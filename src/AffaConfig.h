@@ -18,11 +18,10 @@
 // ---------------------------------------------------------------------------
 // Panel selection
 // ---------------------------------------------------------------------------
-// SILENCE IS AN ERROR, NOT A DEFAULT — you must name at least one panel in build_flags,
-// e.g. -D AFFA_PANEL_CARMINAT=1. A misspelled flag leaves every real macro undefined and
-// -Wundef cannot see it; the only observable consequence is "no panel selected", which is
-// what the #error below reports. -D AFFA_PANEL_DEFAULT_ALL=1 asks for all three (a
-// convenience for first builds and the footprint references, not a shipping selection).
+// SILENCE IS AN ERROR, NOT A DEFAULT: name at least one panel in build_flags. A misspelled
+// flag leaves every real macro undefined and -Wundef cannot see it; the #error below is what
+// catches it. AFFA_PANEL_DEFAULT_ALL=1 asks for all three — for first builds and the
+// footprint references, not for shipping.
 #ifndef AFFA_PANEL_DEFAULT_ALL
 #  define AFFA_PANEL_DEFAULT_ALL 0
 #endif
@@ -63,34 +62,22 @@
 // Feature gates
 // ---------------------------------------------------------------------------
 
-// src/widget/ (MenuGeometry, IMenuRenderer, MenuModel), CarminatMenuRenderer,
-// MenuController, IPage routing, nav(), getMenu(). The largest optional block.
-// 0: nav() returns NotSupported, supports(Feature::Menu) is false, getMenu() is not
-// compiled; the panel classes and every render call are unaffected.
-//
-// Off by default because it is a convenience widget, not protocol: the panel's whole menu
-// contract is showMenu(header,row0,row1,scroll) + highlightItem(rowTag), and both are
-// always available regardless of this flag. Everything above them is one opinion about UI
-// state. See docs/MENU-WIDGET.md and docs/API.md §7b.
-//
-// Gated on THIS FLAG ALONE with no panel gate: src/widget/ compiles on the host with no
-// Arduino, no CAN and no panel header.
+// src/widget/ + CarminatMenuRenderer + MenuController + IPage + nav() + getMenu(). The
+// largest optional block, and OFF by default: the panel's whole menu contract is
+// showMenu(header,row0,row1,scroll) + highlightItem(rowTag), both always available
+// regardless of this flag, and everything above them is one opinion about UI state.
+// Gated on this flag ALONE, so src/widget/ compiles on the host with no panel header.
+// docs/MENU-WIDGET.md.
 #ifndef AFFA_ENABLE_MENU
 #  define AFFA_ENABLE_MENU 0
 #endif
 
-// src/widget/Marquee — the scrolling text window, and with it UpdateListDisplay's
-// setScrollText / setScrollActive / reassert. Like the menu it is a widget rather than
-// protocol, and like the menu it is gated on THIS FLAG ALONE so it compiles on the host
-// with no panel header. On by default: unlike the menu it is small, and the UpdateList
-// 8-segment panel is nearly unusable without it — eight cells do not hold a track title.
+// src/widget/Marquee and UpdateListDisplay's setScrollText / setScrollActive / reassert.
+// A widget like the menu, gated on this flag alone — but ON by default: it is small, and
+// eight segment cells do not hold a track title.
 #ifndef AFFA_ENABLE_MARQUEE
 #  define AFFA_ENABLE_MARQUEE 1
 #endif
-
-// AFFA_ENABLE_AUX_TRACKER (removed) gated AuxModeTracker, a heuristic that inferred a
-// radio's audio source from panel text. The patterns survive as a table in
-// docs/PROTOCOL-NOTES.md §8; implement them over subscribe() on the panel's text id.
 
 // showPopupText / hidePopup (the mode 0x74 overlay). 0: both return NotSupported.
 #ifndef AFFA_ENABLE_POPUP
@@ -152,15 +139,9 @@
 #  endif
 #endif
 
-// Inbound multi-frame decode: the ISO-TP reassembler, the screen decoder, and the onText()
-// callback they feed. For sniffing another head unit or replaying a capture — nothing in
-// the radio role needs it, so it is off on target and on for the host, where the tests
-// live. PlatformIO defines ARDUINO for framework=arduino only.
-//
-// AFFA_ENABLE_VIRTUAL_PANEL (removed) gated vpanel/, a set of panel twins used as a test
-// oracle and as a dev loop with no panel attached. They were application-shaped code
-// shipped as library surface; setSelfAck() covers the no-panel loop, and a decoder built
-// on the two headers this gate buys covers the oracle. docs/API.md §2.14.
+// The ISO-TP reassembler, the screen decoder, and the onText() callback they feed. For
+// reading a channel somebody else writes; the radio role never needs it, so it is off on
+// target and on for the host. docs/API.md §2.14.
 #ifndef AFFA_ENABLE_ISOTP_RX
 #  if defined(ARDUINO)
 #    define AFFA_ENABLE_ISOTP_RX 0
@@ -173,12 +154,9 @@
 // Sizing knobs
 // ---------------------------------------------------------------------------
 
-// Latest-value-wins replacement of a queued, not-yet-started render of the same
-// RenderSlot; one linear scan of at most AFFA_TX_QUEUE_DEPTH entries per enqueue.
-// 0: a repeated render stacks — at f Hz in front of a T-second transfer, min(ceil(f*T),
-// depth-1) stale messages land after the key and the rest return QueueFull. That is the
-// "panel keeps counting after Pause" symptom. Prefer TxOptions::coalesce = false on the
-// specific messages that must all be seen.
+// Latest-value-wins replacement of a queued, not-yet-started render of the same RenderSlot.
+// 0: a repeated render stacks, which is the "panel keeps counting after Pause" symptom.
+// Prefer TxOptions::coalesce = false on the specific messages that must all be seen.
 #ifndef AFFA_TX_COALESCE
 #  define AFFA_TX_COALESCE 1
 #endif
@@ -187,11 +165,9 @@
 // registration burst (2 probes + 1 payload) cannot fit and every send after a resync
 // returns QueueFull.
 //
-// 6, not 4, because showInfoPopup is three messages with coalesce=false (same funcId and
-// RenderSlot, so they would otherwise supersede one another). Worst case is the first call
-// after a resync: 2 probes + 3 rows = 5 outstanding, so depth 4 loses the third row to
-// QueueFull and the popup renders with a blank line. 6 leaves a slot for an Urgent message
-// arriving mid-burst. The extra two slots cost ~250 B of static RAM at the default payload.
+// 6, not 4: the worst case is the first call after a resync — 2 probes + showInfoPopup's 3
+// non-coalescing rows = 5 outstanding — and at depth 4 the popup renders with a blank line.
+// The sixth slot is headroom for an Urgent arriving mid-burst.
 #ifndef AFFA_TX_QUEUE_DEPTH
 #  define AFFA_TX_QUEUE_DEPTH 6
 #endif
@@ -215,9 +191,9 @@
 #  warning "AffaDisplay: AFFA_MAX_PAYLOAD < 96 — showMenu will return Result::TooLong."
 #endif
 
-// RX ring slots; must be a power of two (static_assert in AffaRing). 32 * sizeof(Frame) =
-// 448 B, tolerating a ~7 ms gap between poll() calls on a saturated 500 kbit/s bus. Too
-// small: Stats::ringOverflow climbs, ACKs are lost, sends time out and sync flaps.
+// RX ring slots; power of two (static_assert in AffaRing). 32 tolerates a ~7 ms gap between
+// poll() calls on a saturated 500 kbit/s bus. Too small: ringOverflow climbs, ACKs are lost,
+// sends time out and sync flaps.
 #ifndef AFFA_RX_RING_DEPTH
 #  define AFFA_RX_RING_DEPTH 32
 #endif
@@ -229,17 +205,14 @@
 #  define AFFA_ACK_TIMEOUT_MS 2000
 #endif
 
-// How long the link may go without a 0x69 ping before sync is torn down. The panel pings
-// at ~1 Hz; below ~3000 a single missed ping tears down a working link. Never lower it
-// below the longest flash write the application performs: the TWAI ISR is not in IRAM, so
-// an OTA or NVS write stops reception and looks exactly like a silent panel.
+// How long the link may go without a 0x69 ping before sync is torn down. The panel pings at
+// ~1 Hz; below ~3000 a single missed ping tears down a working link. NEVER lower it below
+// the longest flash write the application performs: the TWAI ISR is not in IRAM, so an OTA
+// or NVS write stops reception and looks exactly like a silent panel.
 //
-// THE EFFECTIVE SILENCE WINDOW IS UP TO AFFA_PEER_TIMEOUT_MS + AFFA_SYNC_INTERVAL_MS
-// (~6 s at the defaults). The watchdog is evaluated only on a heartbeat tick and a latched
-// ping is consumed before the expiry branch, so up to one heartbeat period passes between
-// the deadline expiring and teardown. A test that jumps the clock by AFFA_PEER_TIMEOUT_MS
-// + 1 will NOT see a teardown; test_core and test_twin starve the link by
-// AFFA_PEER_TIMEOUT_MS + AFFA_SYNC_INTERVAL_MS + 1.
+// THE EFFECTIVE SILENCE WINDOW IS UP TO AFFA_PEER_TIMEOUT_MS + AFFA_SYNC_INTERVAL_MS (~6 s).
+// The watchdog is evaluated only on a heartbeat tick, so a test that jumps the clock by
+// AFFA_PEER_TIMEOUT_MS + 1 will NOT see a teardown; starve it by the sum plus one.
 #ifndef AFFA_PEER_TIMEOUT_MS
 #  define AFFA_PEER_TIMEOUT_MS 5000
 #endif

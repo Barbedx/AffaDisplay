@@ -123,12 +123,10 @@ enum class Feature : uint8_t {
   InfoPopup,    // showInfoPopup / hideInfoPopup
   KeyTx,        // this panel family has a key-transmit id, so pressKey(..., Wire) can
                 // put a frame on the bus
-  RadioText,    // the ISO-TP reassembler is compiled in (AFFA_ENABLE_ISOTP_RX), so
-                // inbound text CAN be reconstructed. It reports a COMPILE GATE and
-                // nothing more: no panel routes reassembled text to the application.
-                // UpdateList's own single-frame sniff of 0x121 is reported through the
-                // protected UpdateListBase::onRadioText() hook, which is a subclass
-                // seam, not this capability.
+  RadioText,    // AFFA_ENABLE_ISOTP_RX is on, so inbound text is reassembled and
+                // delivered to AffaDisplayBase::onText(). Not the same thing as
+                // UpdateListBase::onRadioText(), a single-frame AUX sniff on a
+                // subclass seam.
 };
 
 // Navigation intent. Mapped to (Key, KeyEdge) by AffaDisplayBase::nav().
@@ -245,11 +243,10 @@ enum class EventKind : uint8_t {
   TxComplete,    // ev.tx     — same information as CompleteCb
   LinkError,     // ev.error  — ring overflow, dropped TX, controller error
 };
-// RadioText and ScreenChanged used to be declared here. Nothing ever constructed either
-// one — reassembly lives in proto/ and the panels' dependency table does not include it —
-// so the public API was advertising two events that could not arrive. An application that
-// wants inbound text today subscribes to the raw frames on the panel's text id; see
-// docs/PROTOCOL-NOTES.md §8. Re-add them WITH their emitter, never before it.
+// RadioText and ScreenChanged were declared here with nothing constructing either, so the
+// API advertised two events that could not arrive. Inbound text came back as
+// AffaDisplayBase::onText() — a callback WITH its emitter, which is the only honest order.
+// Anything added here follows the same rule.
 
 enum class LinkErrorKind : uint8_t {
   RingOverflow,     // Stats::ringOverflow advanced: frames were LOST
@@ -257,17 +254,13 @@ enum class LinkErrorKind : uint8_t {
   ControllerError,  // the driver's own error counters advanced
 };
 
-// A tagged union, not std::variant and not a class hierarchy. std::variant costs an
-// index, alignment padding and a valueless-by-exception state this library (built
-// -fno-exceptions) cannot even reach; a hierarchy costs a vtable pointer per event and
-// forces the event to outlive the callback. This is POD built on the poll() stack, copied
-// nowhere, allocated never.
+// A tagged union, not std::variant and not a hierarchy: POD built on the poll() stack,
+// copied nowhere, allocated never.
 //
-// The union carried two more arms, `text` and `screen`, whose only readers would have been
-// EventKind::RadioText and EventKind::ScreenChanged. Both went with those enumerators. If
-// either event ever gains a real emitter, its arm comes back WITH it — and so does the
-// rule that made them delicate: a pointer into library-internal storage is valid ONLY for
-// the duration of the callback.
+// It carried `text` and `screen` arms for the two removed enumerators. Their delicacy is
+// why inbound text came back as onText() instead: a pointer into library storage is valid
+// ONLY for the duration of the callback, and that rule is easier to state on a callback
+// than to enforce on an arm of a union anyone may copy.
 struct Event {
   EventKind kind;
   union {

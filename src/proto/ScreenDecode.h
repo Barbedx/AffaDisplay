@@ -1,19 +1,13 @@
-// Reassembled bytes -> ScreenModel. One semantics, shared by the twins, the tests and any
+// Reassembled bytes -> ScreenModel. One semantics, shared by the tests and by any
 // application sniffing another head unit.
 //
-// OFFSET ORIGIN — READ BEFORE TOUCHING A NUMBER HERE. Three origins are in circulation for
-// the same fields (docs/PROTOCOL-NOTES.md §1.2):
-//   PAYLOAD  offset 0 is the 0x10 first-frame byte      (payload = content + 2)
-//   CONTENT  offset 0 is the screen command 0x21/0x74/… (content = tail + 6, confirm box)
-//   TAIL     offset 0 is the first byte after a fixed header
-// The reference decoder mixed two in one file (`OFF_SCROLL = 10` is a payload offset while
-// the same field is content offset 8). Everything here is PAYLOAD origin, converted once
-// at transcription; every constant states its origin and nothing downstream reconverts.
+// EVERY CONSTANT HERE IS PAYLOAD ORIGIN — offset 0 is the 0x10 first-frame byte. Three
+// origins are in circulation for the same fields and the reference decoder mixed two in one
+// file; docs/PROTOCOL-NOTES.md §1.2 has the conversion. Nothing downstream reconverts.
 //
-// THIS DECODER IS AN INDEPENDENT WITNESS. It exists to disagree with our encoder: a twin
-// reporting a field one byte off from what a render call put there is a FINDING, not a
-// calibration error. Do not move an offset to make a test pass. Every constant traces to
-// docs/WIRE-SPEC.md, hence to a capture or to the third-party affa3.c.
+// THIS DECODER IS AN INDEPENDENT WITNESS. It exists to disagree with our encoder: a field
+// reported one byte off from what a render call put there is a FINDING, not a calibration
+// error. Do not move an offset to make a test pass.
 #pragma once
 
 #include "../AffaConfig.h"
@@ -28,17 +22,12 @@ namespace screen {
 // ---------------------------------------------------------------------------
 // Carminat windowed menu — command 0x21 mode 0x01. docs/WIRE-SPEC.md §8.5
 // ---------------------------------------------------------------------------
-// TWO LENGTHS, AND THE DIFFERENCE IS THE POINT. The builder always ends at exactly 96
-// payload bytes, so that is what a self-ACK emulator or LoopbackLink receives (14 frames,
-// last PCI 0x2D). A REAL PANEL terminates at the DECLARED FF_DL — payload[1] = 0x5A = 90
-// content bytes, satisfied by 6 + 12*7, i.e. after frame 12, last PCI 0x2C — so it only
-// ever holds payload[0..91] and payload[92..95] (the last four cells of row1) NEVER REACH
-// IT. Same fact AffaConfig states as "the Carminat window row is 26 usable bytes".
-// docs/WIRE-SPEC.md §8.5, §3.6.
-//
-// menu() therefore guards on 92, not 96, or a hardware-faithful twin could never decode a
-// menu. kMenuMinLen stays 96 because docs/API.md §2.13 publishes that name and value as
-// the BUILDER length, not the decode threshold.
+// TWO LENGTHS, AND THE DIFFERENCE IS THE POINT. The builder always ends at 96 payload
+// bytes. A REAL PANEL terminates at the DECLARED FF_DL — payload[1] = 0x5A = 90 content
+// bytes, satisfied after frame 12 — so payload[92..95], the last four cells of row1, NEVER
+// REACH IT. menu() therefore guards on 92, not 96, or a hardware-faithful decode could
+// never read a menu at all. kMenuMinLen stays 96 because docs/API.md §2.13 publishes that
+// name as the BUILDER length. WIRE-SPEC §8.5, §3.6.
 constexpr uint8_t kMenuMinLen   = 96;  // PAYLOAD bytes our BUILDER emits (API.md §2.13)
 constexpr uint8_t kMenuHwMinLen = 92;  // PAYLOAD bytes a REAL panel receives; menu()'s
                                        // actual guard = 2 + declared FF_DL 0x5A
@@ -54,14 +43,10 @@ constexpr uint8_t kOffRow1Mark = 65;  // PAYLOAD (content 63) — 0x7F
 constexpr uint8_t kOffRow1     = 66;  // PAYLOAD (content 64) .. 95, 30 bytes
 constexpr uint8_t kEndRow1     = 95;  // PAYLOAD (content 93)
 
-// Every Carminat SCREEN — menu, now-playing box, notification — is a showMenu over 0x151,
-// so this covers all of them. No-op if len < kMenuHwMinLen. Resets `sel`: a fresh screen
-// clears the highlight, as the panel does. Fields extending past `len` come back short
-// (row1 gives its 26 hardware-usable bytes at 92, all 30 at 96).
-//
-// Deliberately does NOT check payload[2]/[3] — the caller already selected this payload by
-// its first frame, and docs/API.md §2.13 specifies a length-only guard. Use
-// isMenuPayload() for the command guard.
+// Every Carminat SCREEN is a showMenu over 0x151, so this covers all of them. No-op below
+// kMenuHwMinLen. Resets `sel` — a fresh screen clears the highlight, as the panel does.
+// Deliberately does NOT check payload[2]/[3]: docs/API.md §2.13 specifies a length-only
+// guard. Use isMenuPayload() when you want the command checked.
 void menu(const uint8_t* payload, uint8_t len, ScreenModel& out);
 
 // True when the payload looks like a windowed-menu screen by COMMAND, not just length.
@@ -76,9 +61,8 @@ constexpr bool isMenuPayload(const uint8_t* p, uint8_t len) {
 // 0x74 is the FULL window (the popup overlay), 0x77 the windowed radio-text line. Same
 // 6-byte header, one decoder.
 //
-// Declared-length discrepancy that must not be "fixed": setText declares 0x0E (14) and
-// transmits 20, and the panel renders only the first 8 text bytes. We decode what was
-// TRANSMITTED; a test wanting "what the panel shows" truncates to 8 itself.
+// DECLARED-LENGTH DISCREPANCY THAT MUST NOT BE "FIXED": setText declares 0x0E (14) and
+// transmits 20; the panel renders the first 8. We decode what was TRANSMITTED.
 constexpr uint8_t kWinTextCmdFull   = 0x74;  // PAYLOAD [2] — full window / popup
 constexpr uint8_t kWinTextCmdWindow = 0x77;  // PAYLOAD [2] — not-full window
 constexpr uint8_t kOffWinIcon       = 3;     // PAYLOAD — RDS icon (0x45 AF-RDS, 0x55 none)
@@ -136,8 +120,7 @@ void segText(const uint8_t* payload, uint8_t len, ScreenModel& out);
 // 0x76 versus 0x7F IS A STATEFUL DIFFERENTIAL ENCODING. 0x7F carries a three-byte icon
 // header; 0x76 omits it and the PANEL KEEPS whatever the last 0x7F set, so a decoder that
 // ignores this reports "no icons" for a screen that has them. The latch belongs to the
-// twin (per-instance, invalidated on resync), not to this stateless function, which
-// reports only what THIS message carried.
+// caller (per-instance, invalidated on resync), not to this stateless function.
 constexpr uint8_t kSegIconCmd     = 0x7F;  // PAYLOAD [2]
 constexpr uint8_t kSegIconDecl    = 0x1C;  // PAYLOAD [1] — 28, also correct
 constexpr uint8_t kSegIconMinLen  = 29;
@@ -164,12 +147,12 @@ constexpr uint8_t kRowTag0       = 0x7E;
 constexpr uint8_t kRowTag1       = 0x7F;
 bool frame(const Frame& f, ScreenModel& out);
 
-// Copy printable ASCII from payload[a..b] INCLUSIVE, stopping at the first NUL, then trim
-// leading and trailing spaces. `dstSize` includes the NUL. Exposed because tests pin it.
+// Printable ASCII from payload[a..b] INCLUSIVE, stopping at the first NUL, then trimmed.
+// `dstSize` includes the NUL.
 //
-// Non-printables are DROPPED, not substituted: panel filler (0xA3 on our bench unit, 0x84
-// on an OEM cluster, 0xFF on the OEM radio) lands in these fields on short strings, and a
-// substitution would put an artefact into an oracle meant to say what a human reads.
+// Non-printables are DROPPED, not substituted: panel filler (0xA3 here, 0x84 on an OEM
+// cluster, 0xFF on the OEM radio) lands in these fields on short strings, and a substitution
+// puts an artefact into an oracle meant to say what a human reads.
 void asciiz(const uint8_t* payload, uint8_t len, uint8_t a, uint8_t b,
             char* dst, uint8_t dstSize);
 

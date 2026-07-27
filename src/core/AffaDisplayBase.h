@@ -14,22 +14,17 @@
 
 namespace affa {
 
-// Implements both interfaces. The four IPanel primitives (showMenu, setText,
-// highlightItem, showPopupText) are declared with SIGNATURES IDENTICAL to IDisplay's, so
-// a single override in a panel satisfies both bases with no ambiguity. Interfaces carry
-// no data, so there is no diamond. Do not "tidy" either signature.
+// The four IPanel primitives are declared with SIGNATURES IDENTICAL to IDisplay's, so one
+// override in a panel satisfies both bases with no ambiguity. Do not "tidy" either.
 class AffaDisplayBase : public IDisplay, public IPanel {
  public:
-  // C function pointers, not std::function: no allocation, no hidden vtable, and a plain
-  // pointer can be compared and reset.
+  // C function pointers, not std::function: no allocation, and a plain pointer compares.
   using KeyCb      = void (*)(Key k, KeyEdge e, void* ctx);
   using CompleteCb = void (*)(TxTicket t, Result r, void* ctx);
   using SyncCb     = void (*)(SyncState s, void* ctx);
 
-  // The link, the clock and the profile are constructor arguments because none of them is
-  // optional and none of them may change after begin(). `funcIds` must outlive this
-  // object and its ORDER IS ON THE WIRE — it is the order the lazy 0x70 registration
-  // probes go out in.
+  // None of these may change after begin(). `funcIds` must outlive this object and its
+  // ORDER IS ON THE WIRE — the order the lazy 0x70 registration probes go out in.
   AffaDisplayBase(ICanLink& link, IClock& clock, const SyncProfile& profile,
                   const uint16_t* funcIds, uint8_t funcCount);
   ~AffaDisplayBase() override = default;
@@ -39,8 +34,8 @@ class AffaDisplayBase : public IDisplay, public IPanel {
 
   // ---- lifecycle ----------------------------------------------------------
   // Resets the FSMs, clears the queue (queued tickets complete Cancelled), arms the peer
-  // deadline and the heartbeat. Transmits NOTHING by itself — the first frame leaves on
-  // the first poll(). Safe to call again; idempotent apart from the reset.
+  // deadline and the heartbeat. Transmits NOTHING by itself — the first frame leaves on the
+  // first poll().
   bool begin() override;
 
   // The single pump. This order, every call, with no early-out that can skip a step:
@@ -63,21 +58,17 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   void onSync(SyncCb cb, void* ctx);        // fires only on an actual state change
 
   // ---- observation seam ----------------------------------------------------
-  // Layer 0: every frame in and out, unfiltered, in wire order, for sniffers and
-  // consoles. One tap; a second call replaces the first; nullptr removes it. It is on the
-  // path of EVERY frame on the bus — keep it to a ring push, and never render from it.
+  // Layer 0: every frame in and out, unfiltered, in wire order. One tap; a second call
+  // replaces it. On the path of EVERY frame — keep it to a ring push, never render from it.
   void onFrame(FrameTap cb, void* ctx);
 
-  // Layer 1: filtered raw subscription. Fixed table of AFFA_MAX_SUBSCRIPTIONS entries, no
-  // allocation. Returns kNoSub when the table is full or the match is unsatisfiable (dir
-  // with no bits set, or len > 8) — CHECK valid(), an ignored return is a subscription
-  // that silently never fires.
+  // Layer 1: filtered raw subscription. Fixed table, no allocation. Returns kNoSub when the
+  // table is full or the match is unsatisfiable — CHECK valid(), an ignored return is a
+  // subscription that silently never fires.
   //
-  // Observational, never consuming: subscriptions fire BEFORE the library's own handling
-  // and nothing a callback does prevents it. Slots are scanned in index order and
-  // registration order survives only until a slot is freed and reused, so do not depend on
-  // the relative order of two subscriptions — if two callbacks must be ordered, that is
-  // one callback.
+  // Observational, never consuming: they fire BEFORE the library's own handling and nothing
+  // a callback does prevents it. Do NOT depend on the relative order of two subscriptions;
+  // if two callbacks must be ordered, that is one callback.
   [[nodiscard]] SubHandle subscribe(const FrameMatch& m, FrameCb cb, void* ctx);
   bool      unsubscribe(SubHandle h);       // false if the handle is stale
   uint8_t   subscriptions() const;          // slots in use, for diagnostics
@@ -105,13 +96,12 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   void setPassive(bool on);
   bool passive() const;
 
-  // Bench self-ACK. With no panel on the bus the per-frame ACK never arrives and only the
-  // first frame of a multi-frame message would go out; with this on the TX FSM
-  // acknowledges its own frames (Partial while bytes remain, Done on the last) so the full
-  // sequence is emitted for a PC-side decoder. Wire bytes are identical to a real send.
+  // Bench self-ACK: the TX FSM acknowledges its own frames (Partial while bytes remain, Done
+  // on the last), so a multi-frame message goes out in full with no panel attached. Wire
+  // bytes are identical to a real send.
   //
-  // Pinning a golden vector against this: a real panel terminates at the declared FF_DL,
-  // so showMenu is 13 frames on hardware and 14 here. Easy to misattribute to the driver.
+  // PINNING A GOLDEN VECTOR AGAINST THIS: a real panel terminates at the declared FF_DL, so
+  // showMenu is 13 frames on hardware and 14 here. Easy to misattribute to the driver.
   void setSelfAck(bool on);
 
   // ---- observation --------------------------------------------------------
@@ -139,31 +129,26 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // the call. `opt` carries the coalescing slot, the priority and the per-message
   // coalescing opt-out; the default is a plain FIFO append (slot None never coalesces).
   //
-  // [[nodiscard]] because kNoTicket is the ONLY signal that the message was rejected, with
-  // the reason in lastResult(). Dropping it turns a QueueFull into a screen that never
-  // appears. `(void)enqueue(...)` if you genuinely do not care.
+  // [[nodiscard]] because kNoTicket is the ONLY signal of rejection, with the reason in
+  // lastResult(). Dropping it turns a QueueFull into a screen that never appears.
   [[nodiscard]] TxTicket enqueue(uint16_t funcId, const uint8_t* data, uint8_t len,
                                  TxOptions opt = TxOptions{});
 
   // ---- preemption ----------------------------------------------------------
-  // Drop every job QUEUED AND NOT YET STARTED — not one byte handed to ICanLink::send().
-  // The job on the wire is untouched, and so are pending Registration jobs: a payload
-  // reaching the panel before its function is registered is rejected, and the resulting
-  // SendFailed looks exactly like a wire-format bug. Dropped tickets are reported through
-  // onComplete with Result::Aborted; returns how many.
+  // Drop every job QUEUED AND NOT YET STARTED. The job on the wire is untouched, and so are
+  // pending Registration jobs — a payload reaching the panel before its function is
+  // registered is rejected, and the SendFailed looks exactly like a wire-format bug.
+  // Dropped tickets report Result::Aborted through onComplete; returns how many.
   //
-  // The queue is mutated BEFORE any callback fires, so a nested abortPending() from inside
-  // one of those callbacks finds nothing and returns 0.
+  // The queue is mutated BEFORE any callback fires, so a nested abortPending() returns 0.
   uint8_t abortPending();
 
-  // abortPending() plus abandoning the message on the wire, at the next FRAME BOUNDARY —
-  // after the in-flight frame's ACK or deadline, never mid-frame — with the ISO-TP
-  // continuation counter reset so the next message starts clean at frame 0. True if a job
-  // was actually abandoned.
+  // abortPending() plus abandoning the message on the wire at the next FRAME BOUNDARY — after
+  // the in-flight frame's ACK or deadline, never mid-frame — with the continuation counter
+  // reset so the next message starts clean at frame 0.
   //
-  // The panel is left holding a partial transfer, and WHETHER IT RECOVERS CLEANLY IS NOT
-  // VERIFIED ON HARDWARE. Bench and shutdown tool; routine preemption is coalescing +
-  // abortPending() + Priority::Urgent.
+  // The panel is left holding a partial transfer and WHETHER IT RECOVERS CLEANLY IS NOT
+  // VERIFIED ON HARDWARE. Routine preemption is coalescing + abortPending() + Urgent.
   bool abortAll();
 
   // Is a not-yet-started job for this slot sitting in the queue? Cheap, exact, and the
@@ -171,14 +156,12 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   bool pending(RenderSlot s) const;
 
   // ---- input seam ----------------------------------------------------------
-  // Emulate a key press. The Local half takes the IDENTICAL path to a key decoded off the
-  // wire. Safe from an application task; NOT safe from an ISR (it can render, which
-  // enqueues).
+  // Emulate a key press. The Local half takes the IDENTICAL path to a key off the wire. Safe
+  // from an application task; NOT from an ISR (it can render, which enqueues).
   //
-  // BOTH DEFAULT TO Local: in the radio role we RECEIVE key frames, so transmitting one
-  // adds nothing but a frame nothing listens for. KeySource::Wire is for impersonating the
-  // panel at a REAL radio and puts phantom button presses on the bus — harmless on a
-  // bench, input other modules may act on in a vehicle.
+  // BOTH DEFAULT TO Local: in the radio role we RECEIVE key frames. KeySource::Wire is for
+  // impersonating the panel at a REAL radio and PUTS PHANTOM PRESSES ON THE BUS — harmless
+  // on a bench, input other modules may act on in a vehicle.
   [[nodiscard]] Result pressKey(Key k, KeyEdge e, KeySource src = KeySource::Local);
   [[nodiscard]] Result nav(NavCommand c,          KeySource src = KeySource::Local);
 
@@ -218,12 +201,10 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // capture shows RX 1C1 70 .. answered with TX 5C1 74 ..., and the panel expects it.
   virtual uint16_t keyTxId() const { return 0; }
 
-  // Called for each received frame the base did not consume itself — i.e. not a sync
-  // frame on syncReplyId and not an ACK on funcId|replyFlag. Panels decode their key
-  // frame and their radio-text frame here. Return true if consumed.
+  // Each received frame the base did not consume itself. Return true if consumed.
   //
-  // Runs AFTER the auto-ACK for that frame has been transmitted, which is the legacy
-  // order (Carminat acknowledged 0x1C1 before it validated the key bytes).
+  // Runs AFTER the auto-ACK for that frame, which is the legacy order — Carminat
+  // acknowledged 0x1C1 before it validated the key bytes.
   virtual bool onFrame(const Frame& f) { (void)f; return false; }
 
 #if AFFA_ENABLE_ISOTP_RX
@@ -240,17 +221,15 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   }
 #endif
 
-  // Veto the generic 0x74 auto-ACK for one frame. The base already suppresses it in
-  // passive mode, for the sync ids, for reply-flagged ids and for every id in the function
-  // table (an inbound frame there is our own echo or another node's traffic; we owe
-  // neither a 0x74). Panels override only for a family quirk — UpdateList does not
-  // acknowledge a malformed key frame.
+  // Veto the generic 0x74 auto-ACK for one frame. The base already suppresses it in passive
+  // mode, for the sync ids, for reply-flagged ids and for every id in the function table.
+  // Panels override only for a family quirk — UpdateList does not acknowledge a malformed
+  // key frame.
   virtual bool shouldAutoAck(const Frame& f) const { (void)f; return true; }
 
-  // Called after a key is decoded (from the wire, or from pressKey/nav with a Local
-  // source). The base applies the menu hotkey, routes to the panel's menu, then falls
-  // through to KeyCb and EventKind::Key. Panels override to ADD routing, never to replace
-  // the fall-through.
+  // The base applies the menu hotkey, routes to the panel's menu, then falls through to
+  // KeyCb and EventKind::Key. Panels override to ADD routing, NEVER to replace the
+  // fall-through.
   virtual void routeKey(Key k, KeyEdge e);
 
 #if AFFA_ENABLE_MENU
@@ -261,19 +240,16 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   virtual bool routeKeyToMenu(Key k, KeyEdge e) { (void)k; (void)e; return false; }
 #endif
 
-  // The Wire half of pressKey(). Builds and transmits:
+  // The Wire half of pressKey():
   //     keyId : 03 89 <hi> <lo | (hold ? 0xC0 : 0)> 00 00 00 00
-  // Bytes 4..7 are literal zero and NOT packetFiller() — that is what the capture of our
-  // own emulated key shows.
+  // Bytes 4..7 are LITERAL ZERO, not packetFiller() — that is what the capture shows.
   //
-  // NotSupported when the panel has no key transmit id, or for a Hold edge on a wheel
-  // code: 0x0101|0xC0 and 0x0141|0xC0 are both 0x01C1, so a held detent has no
-  // distinguishable wire form and sending the click form would produce a fine step where
-  // the caller asked for a coarse one.
+  // NotSupported for a Hold edge on a wheel code: 0x0101|0xC0 and 0x0141|0xC0 are both
+  // 0x01C1, so a held detent has no distinguishable wire form, and sending the click form
+  // would produce a fine step where the caller asked for a coarse one.
   //
-  // NOT QUEUED: a single frame on its own id with no ACK and no function registration;
-  // behind the ISO-TP queue it would have exactly the latency preemption exists to remove.
-  // Tagged fromSelf, reported to the tap as Direction::Tx.
+  // NOT QUEUED: behind the ISO-TP queue it would have exactly the latency preemption exists
+  // to remove. Tagged fromSelf, reported to the tap as Direction::Tx.
   [[nodiscard]] Result transmitKey(Key k, KeyEdge e);
 
   // Called from poll() once per pass, after the sync and TX FSMs. Panels put their own
@@ -281,15 +257,13 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // _clock, never a call counter.
   virtual void onPoll() {}
 
-  // Decode a raw wire code into a key and an edge. Shared so both panels use the same
-  // mask. The wheel codes 0x0101/0x0141 are EXEMPT: masking 0x0141 would rewrite it to
-  // 0x0101, i.e. every wheel-down detent would be reported as a wheel-up.
+  // The wheel codes 0x0101/0x0141 are EXEMPT from the mask: masking 0x0141 rewrites it to
+  // 0x0101, i.e. every wheel-DOWN detent is reported as a wheel-up.
   static void decodeKey(uint16_t raw, Key& out, KeyEdge& edge);
 
-  // The 03 89 guard plus decodeKey(). Returns false for anything that is not a key frame.
-  // The guard is load-bearing: the key id also carries `70 A3..`, `02 64 0F A3..` and
-  // `05 63 "0037"` from the panel, and a decoder without it invents keys 0x640F and
-  // 0x3030 out of that traffic.
+  // The `03 89` guard plus decodeKey(). THE GUARD IS LOAD-BEARING: the key id also carries
+  // `70 A3..`, `02 64 0F A3..` and `05 63 "0037"`, out of which a decoder without it
+  // invents keys 0x640F and 0x3030.
   static bool decodeKeyFrame(const Frame& f, Key& out, KeyEdge& edge);
 
   // For a panel publishing a decoded event of its own — so it arrives through the SAME
