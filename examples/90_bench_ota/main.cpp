@@ -1312,7 +1312,17 @@ void setup() {
   // minutes before the console answered its first request, which reads exactly like a
   // board that never booted. A bench that cannot be reached is worse than a bus that
   // stays down, and isLive() reports the latter honestly.
-  g_canUp = g_hw.begin(kPins, kBitrate, /*forceRecoveryMs=*/0,
+  // 250, not 0 and not 2000. Measured on this rig, both ends:
+  //   0    — a bus-off ends in TWAI_STATE_STOPPED and the link stays down until a reboot.
+  //          At power-up the panel is not ready for a moment, our heartbeat goes
+  //          unacknowledged, and ~30 frames later the controller is stopped for good:
+  //          rxFrames 0, busErr frozen at 62, txFrames still climbing into nothing.
+  //   2000 — recovery works but each cycle costs the driver's full disable/delay/enable,
+  //          and they accumulate inside setup(): `bench: up` appeared at 185 999 ms, which
+  //          is indistinguishable from a board that never booted.
+  // 250 ms recovers fast enough that a panel which wakes a second late is caught, and
+  // cheap enough that a genuinely dead bus costs seconds of bring-up rather than minutes.
+  g_canUp = g_hw.begin(kPins, kBitrate, /*forceRecoveryMs=*/250,
                        BENCH_LISTEN_ONLY ? affa::Esp32CanLink::LinkMode::ListenOnly
                                          : affa::Esp32CanLink::LinkMode::Normal);
   if (!g_canUp)

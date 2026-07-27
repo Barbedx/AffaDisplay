@@ -94,8 +94,38 @@
 
 // Menu, MenuController, IPage routing, nav(), getMenu(). The single largest optional
 // block. 0: nav() returns NotSupported and supports(Feature::Menu) is false.
+// OFF BY DEFAULT, AND THE REASON IS A CORRECTION.
+//
+// This block was originally on, on the argument that the Carminat menu is a wire-level
+// construct: a 96-byte 0x21 screen with a two-row sliding window, a separate highlight
+// frame, and a scroll byte derived from the selection. That argument conflates two things.
+//
+// What the PANEL defines, and what therefore belongs in this library, is exactly:
+//     showMenu(header, row0, row1, scrollByte)   // the 0x21/0x01 screen
+//     highlightItem(rowTag)                      // 07 29 01 <7E|7F> 80
+// Header, two rows, which one is lit, which arrows. That is the whole contract, and those
+// two calls are ALWAYS available regardless of this switch.
+//
+// Everything above them — which items exist, which is selected, how a two-row window
+// slides over N of them, what a "field" is, when Select advances to the next field and
+// when it exits — is a UI state machine. The panel knows none of it. It is one opinion
+// about how a menu should behave, and an application with a different remote, a different
+// item model or a different idea of editing will want its own.
+//
+// That the sliding window is also the one part that behaved unexpectedly on the bench is
+// not a coincidence: it is the only place where this library decided something on the
+// application's behalf.
+//
+// So: Menu, MenuController, IPage, nav() and getMenu() are a CONVENIENCE WIDGET, shipped
+// because it is real, tested, byte-exact code that saves an afternoon — not because it is
+// part of the protocol. Turn it on if it fits; write your own against showMenu() +
+// highlightItem() + the decoded Key events if it does not. See docs/API.md §7b and the
+// README's boundary note.
+//
+// 0: nav() returns NotSupported, supports(Feature::Menu) is false, and getMenu() is not
+// compiled. The panel classes and every render call are unaffected.
 #ifndef AFFA_ENABLE_MENU
-#  define AFFA_ENABLE_MENU 1
+#  define AFFA_ENABLE_MENU 0
 #endif
 
 // Heuristic inference of a RADIO's audio source by pattern-matching decoded text.
