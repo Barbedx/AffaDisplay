@@ -132,6 +132,26 @@ the 8-character limit in `docs/API.md` next to `setText`.
 
 ---
 
+### 2b. `setAuxMode()` returns `Ok` and emits nothing — the README says it returns `NotSupported`
+
+The README's capability matrix says: *"`Feature::AuxTracking` means 'the
+`AuxModeTracker` helper is compiled in', not '`setAuxMode()` works'. No shipped
+panel overrides `setAuxMode()`, so it returns `NotSupported` everywhere."*
+
+On `CarminatDisplay` it returns **`Result::Ok`** and puts **no frame on the
+wire**. Checked twice: the completion callback reports `Ok` (our sink logs any
+non-`Ok`, and stayed silent), and the frame ring holds nothing but the heartbeat
+afterwards.
+
+`Ok` for a call that does nothing is the one verdict a caller cannot act on —
+`NotSupported` is a fact, `Ok` is a promise. Small, but it is exactly the kind of
+thing that gets built on before anyone checks.
+
+Suggestion: either the base default should reach this path (returning
+`NotSupported`), or the README should stop saying it does.
+
+---
+
 ### 3. `library.json` declares `esp32_can` + `can_common` as hard dependencies
 
 The README says, correctly: *"With `-D AFFA_ENABLE_ESP32CAN_LINK=0` you need
