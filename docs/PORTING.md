@@ -193,18 +193,24 @@ Two ways, and they are genuinely different projects:
 **(a) Keep the library, add a display.** `IDisplay` is the render interface, and its method
 set is honestly panel-shaped: `setText`, `setTime`, `setPower`, `showMenu(header, row0,
 row1, scrollIndicator)`, `highlightItem(row)`, popup, fullscreen, confirm box, info popup.
-Implement that against your OLED and you get the existing `Menu` for free, because `Menu`
-only ever calls `showMenu()` and `highlightItem()`. What you inherit along with it is a
+Implement that against your OLED and everything the library renders reaches it — including
+`CarminatDisplay`'s own menu, which draws through `affa::CarminatMenuRenderer` and therefore
+through exactly `showMenu()` + `highlightItem()`. What you inherit along with it is a
 **two-row window** — the geometry of the OEM screen — which on a 128×64 OLED is a
 constraint you did not need. Worth it if you are driving both a panel and an OLED from one
-menu; not worth it otherwise.
+menu; not worth it otherwise. If the geometry is the part you object to, you want (b): the
+model takes the shape of the display as a constructor argument.
 
-**(b) Keep only the menu.** `carminat/Menu/Menu.{h,cpp}`, `MenuController` and `IPage`
-contain no wire bytes, no CAN, no ISO-TP: fixed-capacity items, three field kinds
-(integer / list / read-only), function-pointer callbacks with a `ctx`, and a `render()` that
-produces a header string, two row strings, a scroll-indicator byte and a highlight row. Lift
-those three files, replace the `IDisplay` calls with your own draw calls, and you have kept
-the part that took the longest to get right while dropping every byte of AFFA.
+**(b) Keep only the menu.** `widget/MenuGeometry.h`, `widget/IMenuRenderer.h` and
+`widget/MenuModel.{h,cpp}` contain no wire bytes, no CAN, no ISO-TP and **no panel header**:
+fixed-capacity items, three field kinds (integer / list / read-only), function-pointer
+callbacks with a `ctx`, a `MenuGeometry` you choose, and a `render()` that emits
+`beginFrame(header, mask)` / one `row(index, text, selected)` per visible row / `endFrame()`.
+Lift those three files, write ~20 lines of `IMenuRenderer` against your own draw calls, and
+you have kept the part that took the longest to get right while dropping every byte of AFFA.
+`docs/MENU-WIDGET.md` §5 is a worked example for a display the library has never seen.
+`carminat/MenuController` and `IPage` are the optional fourth file: a page stack and a
+`(Key, KeyEdge)` → intent map, which is navigation policy and probably yours to write.
 
 If you are dropping the panel entirely, **stop including `core/`.** It exists to speak to a
 panel; carrying it for `AffaRing` (a 40-line power-of-two ring) is not a trade worth making.

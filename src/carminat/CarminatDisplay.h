@@ -27,12 +27,44 @@
 #include "CarminatConstants.h"
 
 #if AFFA_ENABLE_MENU
-#  include "Menu/Menu.h"
+#  include "../widget/MenuModel.h"
+#  include "CarminatMenuRenderer.h"
 #  include "MenuController.h"
 #  include "IPage.h"
 #endif
 
 namespace affa {
+
+#if AFFA_ENABLE_MENU
+// THE TYPE BEHIND getMenu() CHANGED, AND THESE NAMES DID NOT.
+//
+// `affa::Menu` used to be src/carminat/Menu/Menu.{h,cpp} — a two-row sliding-window menu with
+// the panel welded into it (row0/row1, a fixed pair of char[AFFA_MENU_ROW_MAX], the count<=2
+// scroll rule, IPanel calls in the middle of the state machine). That file is GONE. The same
+// state machine now lives once, in src/widget/MenuModel, with the panel behind IMenuRenderer;
+// the Carminat side of the seam is CarminatMenuRenderer, above.
+//
+// The names stay because they are the application-facing API: docs/API.md §2.12 and every
+// example spell `affa::Menu`, `affa::MenuItem` and the three field builders. They are ALIASES,
+// not a compatibility layer — there is exactly one implementation and these are its other
+// spelling. Two differences a caller can observe:
+//
+//   * MenuModel::render() returns void. Whether a frame reached the panel is not something a
+//     UI state machine can act on; the adapter is the layer that can, so the verdict is
+//     menuRenderer().lastResult().
+//   * the geometry is injected (CarminatMenuRenderer::geometry(), 2 x 26), so rows are
+//     truncated at 26 characters rather than at AFFA_MENU_ROW_MAX - 1.
+//
+// New code should prefer the widget:: spelling; it is the one that works on a panel that is
+// not this one.
+using Menu = widget::MenuModel;
+using widget::Field;
+using widget::FieldType;
+using widget::MenuItem;
+using widget::integerField;
+using widget::readOnlyField;
+using widget::listField;
+#endif
 
 class CarminatDisplay final : public AffaDisplayBase {
  public:
@@ -91,7 +123,17 @@ class CarminatDisplay final : public AffaDisplayBase {
   // The library hands out an EMPTY menu with a header; the application fills it. See
   // docs/API.md §8.7 for the complete item-building example — nothing else is needed and
   // no library internal is touched.
-  Menu& getMenu() { return _menu; }
+  //
+  // THE NAME IS THE SAME AND THE TYPE IS NOT: this used to return `affa::Menu&`, the Carminat
+  // widget; it now returns the display-agnostic model that replaced it. See the alias block
+  // above for what a caller can observe.
+  widget::MenuModel& getMenu() { return _menu; }
+
+  // The adapter between that model and this panel's glass. Exposed for the one thing the
+  // model deliberately cannot answer — lastResult(), the panel's verdict on the last redraw —
+  // and for tracing (lastWasHighlightOnly(), the row text as it went out).
+  CarminatMenuRenderer&       menuRenderer()       { return _menuRenderer; }
+  const CarminatMenuRenderer& menuRenderer() const { return _menuRenderer; }
 
   // The page stack. The application owns every page; pushing one gives it every key until
   // it is popped, including the menu hotkey.
@@ -122,8 +164,12 @@ class CarminatDisplay final : public AffaDisplayBase {
   void initializeMenu();                    // creates an EMPTY menu; the app fills it
   static void onMenuClosed(void* ctx);      // -> setText("RENAULT", 0), the OEM default
 
-  Menu           _menu;
-  MenuController _menuCtrl;
+  // DECLARATION ORDER IS CONSTRUCTION ORDER, and the model binds a reference to the renderer:
+  // the renderer must be declared first, and the controller last because it binds to the
+  // model.
+  CarminatMenuRenderer _menuRenderer;
+  widget::MenuModel    _menu;
+  MenuController       _menuCtrl;
 #endif
 };
 

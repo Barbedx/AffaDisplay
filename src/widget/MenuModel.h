@@ -1,8 +1,10 @@
 // The sliding-window menu, with the panel taken out of it.
 //
-// This is affa::Menu (src/carminat/Menu/) with exactly one change of substance: the two
-// rows of twenty-six characters became a MenuGeometry, and the IPanel became an
-// IMenuRenderer. The state machine is otherwise carried across behaviour for behaviour —
+// This is the former affa::Menu (src/carminat/Menu/, since DELETED — this file replaced it
+// rather than joining it) with exactly one change of substance: the two rows of twenty-six
+// characters became a MenuGeometry, and the IPanel became an IMenuRenderer. On the Carminat
+// the adapter is src/carminat/CarminatMenuRenderer, and CarminatDisplay::getMenu() hands out
+// one of these. The state machine is otherwise carried across behaviour for behaviour —
 // the window/selectedRow arithmetic, the scroll-arrow derivation and its deliberate
 // "no arrows when the list fits", the coarse step on a Hold edge, the clamps, the list-field
 // bound that keeps BOTH the first and the last entry reachable, and Select walking
@@ -11,9 +13,13 @@
 //
 // WHAT MOVED OUT. The model speaks row INDEX (0..rows-1); the Carminat row tags 0x7E/0x7F,
 // the highlight frame, the 96-byte screen, the charset of the glass and the cost of a
-// message are the adapter's, behind IMenuRenderer. The model no longer returns Result:
+// message are the adapter's, behind IMenuRenderer. What did NOT move out is the KNOWLEDGE of
+// which redraws are cheap: the model still tells the renderer when only the lit row changed
+// (IMenuRenderer::highlightOnly), because that is a fact about the state machine and every
+// adapter would otherwise have to rediscover it. The model no longer returns Result:
 // whether a frame reached the panel is not something a UI state machine can act on, and the
-// adapter is the only layer that can (see openIssues in the port notes).
+// adapter is the only layer that can — on this panel that is
+// CarminatDisplay::menuRenderer().lastResult().
 //
 // CONSTRAINTS THIS FILE HOLDS ITSELF TO: no Arduino, no panel header, no CAN, no heap after
 // construction, no std::function. Capacities come from AffaConfig (AFFA_MENU_MAX_ITEMS,
@@ -155,6 +161,11 @@ class MenuModel {
   void rowText(uint8_t itemIndex, char* out, size_t outSize) const;
 
  private:
+  // The selection moved INSIDE the window: same items, same arrows, a different lit row.
+  // Offers the renderer the cheap path (IMenuRenderer::highlightOnly) and falls back to a
+  // whole frame when it declines. Every OTHER redraw goes straight to render() — this is
+  // reached only from the two branches that provably left the window where it was.
+  void renderSelectionMove();
   void selectNext();
   void selectPrev();
   void enterEdit();

@@ -40,6 +40,13 @@ class TextPanelRenderer final : public affa::widget::IMenuRenderer {
     _sel[index] = selected;
   }
 
+  // highlightOnly() is deliberately NOT overridden either, for the opposite reason to the
+  // info-row screen: this display CAN show a selection (the '>' column) but cannot address
+  // one row of an already-printed box — a console line, once printed, is gone. Staying on the
+  // default reprints the box, which is correct and is what a full-redraw display should do.
+  // Between the three adapters in this example both sides of the seam's fourth call are
+  // exercised: one overrides it, two do not.
+
   void endFrame() override {
     // The mask, translated into this display's glyphs. An OLED would draw two triangles;
     // a serial console draws two characters.

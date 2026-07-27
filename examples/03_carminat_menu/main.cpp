@@ -2,9 +2,10 @@
 //
 // Two things are demonstrated side by side, and they are NOT the same thing:
 //
-//   * the library's Menu — the application supplies items and fields, and the panel's
-//     wheel drives it. Menu::render() is what calls showMenu() + highlightItem(); the
-//     application never does. Hold-Load opens it (the OEM gesture, and a replaceable
+//   * the library's menu — the application supplies items and fields, and the panel's
+//     wheel drives it. `affa::Menu` is now an alias for affa::widget::MenuModel, and it is
+//     CarminatMenuRenderer (the adapter behind it) that calls showMenu() + highlightItem();
+//     the application never does. Hold-Load opens it (the OEM gesture, and a replaceable
 //     default), the wheel scrolls, Load enters edit, hold-Load leaves.
 //   * showMenu() / highlightItem() called DIRECTLY, on VolUp, to draw a screen that is
 //     not a menu at all. Same wire operation, no state machine attached.

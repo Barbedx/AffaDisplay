@@ -14,7 +14,6 @@
 #include "../affa_test_support.h"
 
 #include "carminat/CarminatDisplay.h"
-#include "carminat/Menu/Menu.h"
 #include "carminat/IPage.h"
 #include "proto/IsoTp.h"
 #include "proto/ScreenDecode.h"
@@ -394,7 +393,10 @@ void test_a_one_and_two_item_menu_shows_no_arrows(void) {
   second.label = "Two";
   r.d.getMenu().addItem(second);
   drain(r.link);
-  ASSERT_RESULT(Ok, r.d.getMenu().render());
+  // render() returns void on the model — the panel's verdict lives on the adapter, which is
+  // the only layer holding an IPanel. Same assertion, one indirection further out.
+  r.d.getMenu().render();
+  ASSERT_RESULT(Ok, r.d.menuRenderer().lastResult());
   pumpUntilIdle(r.d);
   s = capture(r.link);
   TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00, s.screen.scroll, "two items: still no arrows");
@@ -457,6 +459,61 @@ void test_an_active_page_owns_every_key_including_the_hotkey(void) {
 }
 
 // ---------------------------------------------------------------------------
+// The transport keys reach the application even while the menu is open
+// ---------------------------------------------------------------------------
+//
+// ADDED WITH THE MENU MIGRATION, and it is the one property that migration could plausibly
+// have broken. The deleted Menu::handleKey returned false from its `default:` for SrcNext,
+// SrcPrev, VolUp, VolDown and Pause, and AffaDisplayBase::routeKey falls through to the
+// application's KeyCb on false. MenuModel has no key vocabulary at all, so that `default:`
+// now lives in MenuController::routeKey — route every key into the model instead and the
+// menu silently eats the radio controls whenever it is open.
+
+namespace {
+int  g_appKeys = 0;
+Key  g_appKey  = Key::Load;
+void countAppKey(Key k, KeyEdge, void*) { ++g_appKeys; g_appKey = k; }
+}  // namespace
+
+void test_transport_keys_fall_through_to_the_application_while_the_menu_is_open(void) {
+  Rig r;
+  r.up();
+  r.addDemoItems();
+  r.d.onKey(&countAppKey, nullptr);
+  r.step(NavCommand::Open);
+  TEST_ASSERT_TRUE(r.d.getMenu().isOpen());
+
+  static const Key kTransport[] = {Key::SrcNext, Key::SrcPrev, Key::VolUp,
+                                   Key::VolDown, Key::Pause};
+  int expected = 0;
+  for (const Key k : kTransport) {
+    g_appKeys = 0;
+    drain(r.link);
+    ASSERT_RESULT(Ok, r.d.pressKey(k, KeyEdge::Click, KeySource::Local));
+    pumpUntilIdle(r.d);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_appKeys,
+                                  "the menu has no opinion on this key: it is the app's");
+    TEST_ASSERT_EQUAL_HEX16(static_cast<uint16_t>(k), static_cast<uint16_t>(g_appKey));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(),
+                                     "and the menu draws nothing for a key it ignored");
+    TEST_ASSERT_TRUE_MESSAGE(r.d.getMenu().isOpen(), "nor does it close");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, r.d.getMenu().selectedIndex(),
+                                    "nor does the selection move");
+    ++expected;
+  }
+  TEST_ASSERT_EQUAL_INT(5, expected);
+
+  // The counterpart, so the test cannot pass by the KeyCb simply seeing everything: a key the
+  // menu DOES have an opinion about is consumed and never reaches the application.
+  g_appKeys = 0;
+  ASSERT_RESULT(Ok, r.d.pressKey(Key::RollDown, KeyEdge::Click, KeySource::Local));
+  pumpUntilIdle(r.d);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_appKeys, "the wheel is the menu's while it is open");
+  TEST_ASSERT_EQUAL_UINT8(1, r.d.getMenu().selectedIndex());
+  drain(r.link);
+}
+
+// ---------------------------------------------------------------------------
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -475,5 +532,6 @@ int main(int, char**) {
   RUN_TEST(test_clear_closes_silently_without_firing_the_close_callback);
   RUN_TEST(test_a_one_and_two_item_menu_shows_no_arrows);
   RUN_TEST(test_an_active_page_owns_every_key_including_the_hotkey);
+  RUN_TEST(test_transport_keys_fall_through_to_the_application_while_the_menu_is_open);
   return UNITY_END();
 }

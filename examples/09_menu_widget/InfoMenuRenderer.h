@@ -54,6 +54,12 @@ class InfoMenuRenderer final : public affa::widget::IMenuRenderer {
     copy(_row[index], text);
   }
 
+  // highlightOnly() is deliberately NOT overridden. A screen with no highlight cannot move
+  // one, so the honest answer is the default's "no" and the model redraws — three
+  // showInfoPopup messages that write the same three strings again. That is the price of a
+  // panel with no selection tag, and it is visible here rather than hidden behind a `return
+  // true` that would draw nothing at all.
+
   void endFrame() override {
     // Three rows, one call, whatever the list length was: rows past the end of the list
     // arrive as empty strings and blank their cells, which is what the panel expects.

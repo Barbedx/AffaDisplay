@@ -88,9 +88,16 @@ void setup() {
   g_sink += static_cast<uint32_t>(mn.addItem(it));
   mn.setHeader("H");
   mn.open();
-  bite(mn.handleKey(affa::Key::RollUp, affa::KeyEdge::Click));
+  // The model has no key vocabulary any more; the six intents are what the key map calls.
+  bite(mn.next());
+  bite(mn.prev());
+  bite(mn.increase());
+  bite(mn.decrease());
+  bite(mn.select());
   bite(mn.setFieldValue(0, 0, 5));
-  bite(mn.render());
+  mn.render();
+  bite(g_carminat.menuRenderer().lastResult());
+  bite(mn.back());
   mn.close();
   mn.clear();
   g_sink += mn.count();

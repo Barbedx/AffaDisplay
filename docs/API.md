@@ -92,9 +92,12 @@ no `std::function`, no heap after `begin()`.
 | `carminat/CarminatConstants.h` | `0x3AF`, `0x3CF`, `0x151`, `0x1F1`, `0x1C1`, filler `0x00`, scroll-indicator values, the Carminat `SyncProfile` instance. | `core/*` | yes |
 | `carminat/CarminatDisplay.{h,cpp}` | Carminat frame builders: `setText`, `setTime`, `showMenu`, `highlightItem`, popup/fullscreen/confirm/info, key decode for `0x1C1`. Gated on `AFFA_PANEL_CARMINAT`. | `core/*`, `util/*`, `<Arduino.h>` permitted in the **.cpp only** | `.h` yes, `.cpp` yes if it avoids `<Arduino.h>` — it must |
 | `carminat/AuxModeTracker.{h,cpp}` | AUX-source detection from `0x151` text traffic. Gated on `AFFA_ENABLE_AUX_TRACKER && AFFA_PANEL_CARMINAT`, **default off** (§7b.7b). Takes `const Frame&` and an `IClock&`, **not** `CAN_FRAME` and not `millis()`. Depended on by nothing; the application feeds it through `subscribe()` or does not compile it. | `core/*` | yes |
-| `carminat/MenuController.{h,cpp}` | Page stack + key routing (page first, then menu, then fall through to the application callback). Gated on `AFFA_ENABLE_MENU && AFFA_PANEL_CARMINAT`. | `core/*`, `IPage.h`, `Menu/Menu.h` | yes |
+| `widget/MenuGeometry.h` | `MenuGeometry` — `rows`, `rowChars`, `wrap`. The shape of the display, injected. Gated on `AFFA_ENABLE_MENU`. | `AffaConfig.h` | yes |
+| `widget/IMenuRenderer.h` | The panel seam: `beginFrame` / `row` / `endFrame`, plus the non-pure `highlightOnly`. Same gate. | `AffaConfig.h` | yes |
+| `widget/MenuModel.{h,cpp}` | `FieldType`, `Field`, `MenuItem`, `MenuModel` — the sliding-window menu state machine, display-agnostic. Fixed-capacity, no `String`, no `vector`, no `std::function`, **no panel header**. Gated on `AFFA_ENABLE_MENU` alone: it is not panel code. | `AffaConfig.h`, `util/*` | yes |
+| `carminat/CarminatMenuRenderer.{h,cpp}` | The `IMenuRenderer` for this panel: 2 x 26 geometry, the `0x7E`/`0x7F` row tags, `showMenu` + `highlightItem`, the cheap `highlightOnly` path, and the `Result` the model does not carry. Gated on `AFFA_ENABLE_MENU && AFFA_PANEL_CARMINAT`. | `core/*`, `widget/*` | yes |
+| `carminat/MenuController.{h,cpp}` | Page stack + key routing (page first, then menu, then fall through to the application callback). Owns the `(Key, KeyEdge)` → `MenuModel` intent map. Gated on `AFFA_ENABLE_MENU && AFFA_PANEL_CARMINAT`. | `core/*`, `IPage.h`, `widget/MenuModel.h` | yes |
 | `carminat/IPage.h` | `IPage` — `onEnter/onExit/onTick/handleKey`. | `core/AffaTypes.h` | yes |
-| `carminat/Menu/Menu.{h,cpp}` | `FieldType`, `Field`, `MenuItem`, `Menu`. Fixed-capacity, no `String`, no `vector`, no `std::function`. Same gate as `MenuController`. | `core/*`, `util/AffaText.h` | yes |
 | `updatelist/UpdateListConstants.h` | `0x3DF`, `0x3CF`, `0x121`, `0x1B1`, `0x0A9`, filler `0x81`, the UpdateList `SyncProfile` instance. | `core/*` | yes |
 | `updatelist/UpdateListBase.{h,cpp}` | Shared AFFA2 behaviour: `setPower`, `0x121` radio-text sniffing. Gated on `AFFA_PANEL_UPDATELIST`. | `core/*`, `util/*` | yes |
 | `updatelist/UpdateListDisplay.{h,cpp}` | The 8-segment panel; non-blocking title scroll driven from `poll()`. Same gate. | as above | yes |
@@ -103,7 +106,7 @@ no `std::function`, no heap after `begin()`.
 **Enforced rules.**
 
 * `<esp32_can.h>` appears exactly once in the repository, in `link/Esp32CanLink.cpp`.
-  A CI grep asserts this. `Menu.h` in the original code included it for `CAN_FRAME`;
+  A CI grep asserts this. The original code's `Menu.h` included it for `CAN_FRAME`;
   the port removes that include and the `handleMessage(const CAN_FRAME&)` method with it.
 * `<Arduino.h>` is permitted only in `link/Esp32CanLink.cpp` and in panel `.cpp` files,
   and even there only if something genuinely needs it. Prefer `<cstring>`/`<cstdio>`.
@@ -750,9 +753,9 @@ class AffaRing {
 
 namespace affa {
 
-#if AFFA_ENABLE_MENU
-class Menu;   // carminat/Menu/Menu.h — forward-declared so core/ does not include it
-#endif
+// NOTHING MENU-SHAPED IS DECLARED HERE, not even a forward declaration. The base reaches the
+// menu through three virtual hooks (menuOpen / openMenu / routeKeyToMenu, §7b) and never
+// through a type, which is what lets widget::MenuModel exist without core/ knowing it does.
 
 // Implements both interfaces. The four IPanel primitives (showMenu, setText,
 // highlightItem, showPopupText) are declared with SIGNATURES IDENTICAL to IDisplay's,
@@ -1282,22 +1285,44 @@ class LoopbackLink final : public ICanLink {
 member the test advances). It lives in `test/`, not in `src/` — it is not part of the
 library's surface.
 
-### 2.12 `carminat/Menu/Menu.h` — the application-facing menu API
+### 2.12 `widget/MenuModel.h` — the application-facing menu API
+
+The menu is **not panel code**. It used to be: `carminat/Menu/Menu.{h,cpp}` was a two-row
+sliding window with `IPanel` calls in the middle of the state machine and `row0`/`row1`
+welded into the arithmetic. That file is gone. What is left is one implementation —
+`widget::MenuModel` — with the display behind `widget::IMenuRenderer` and its shape in a
+`widget::MenuGeometry`. `carminat/CarminatMenuRenderer` is this panel's adapter, and it is
+what `CarminatDisplay` constructs for you. The full account is **docs/MENU-WIDGET.md**.
+
+`affa::Menu`, `affa::MenuItem`, `affa::Field`, `affa::FieldType` and the three field builders
+are still spelled that way in `carminat/CarminatDisplay.h` — as **aliases**, not a second
+implementation. Two differences a caller can observe:
+
+* `MenuModel::render()` returns **void**. Whether a frame reached the panel is not something
+  a UI state machine can act on; the adapter is the layer holding the `IPanel`, so the
+  verdict is `CarminatDisplay::menuRenderer().lastResult()`.
+* the geometry is injected (`CarminatMenuRenderer::geometry()`, 2 x 26), so a row is
+  truncated at 26 characters rather than at `AFFA_MENU_ROW_MAX - 1`.
+
+There is **no `handleKey`**. The model has six intents and no key vocabulary at all; mapping
+`(Key, KeyEdge)` onto them is `MenuController`'s job (§7b), and its `default:` is what keeps
+SrcNext / SrcPrev / VolUp / VolDown / Pause reaching the application while the menu is open.
 
 ```cpp
 #pragma once
-#include "../../AffaConfig.h"
-#if AFFA_ENABLE_MENU && AFFA_PANEL_CARMINAT
+#include "../AffaConfig.h"
+#if AFFA_ENABLE_MENU
 
-#include "../../core/AffaTypes.h"
-#include "../../core/IPanel.h"
+#include "IMenuRenderer.h"
+#include "MenuGeometry.h"
 
 namespace affa {
+namespace widget {
 
 enum class FieldType : uint8_t { Integer, List };
 
 // One editable value inside a menu item. Fixed layout, no allocation. `unit` and the
-// strings in `list` are CALLER-OWNED and must outlive the Menu — they are pointed at,
+// strings in `list` are CALLER-OWNED and must outlive the model — they are pointed at,
 // never copied. String literals and static tables are the intended sources.
 struct Field {
   FieldType type           = FieldType::Integer;
@@ -1305,7 +1330,7 @@ struct Field {
   int32_t   minValue       = 0;
   int32_t   maxValue       = 0;
   int32_t   step           = 1;
-  int32_t   stepMultiplier = 1;     // multiplies `step` on Increase/Decrease (hold)
+  int32_t   stepMultiplier = 1;     // multiplies `step` on increase()/decrease() (hold)
   const char*        unit  = nullptr;              // Integer only, may be null
   const char* const* list  = nullptr;              // List only
   uint8_t   listCount      = 0;
@@ -1320,64 +1345,67 @@ Field readOnlyField(int32_t value, const char* unit = nullptr);
 Field listField(const char* const* values, uint8_t count, uint8_t index = 0);
 
 struct MenuItem {
-  const char* label = nullptr;                   // caller-owned, must outlive the Menu
+  const char* label = nullptr;                   // caller-owned, must outlive the model
   Field    fields[AFFA_MENU_MAX_FIELDS];
   uint8_t  fieldCount = 0;
   char     separator  = ' ';                     // between label/value and fields
-  bool     editable   = true;                    // false -> Select does nothing
+  bool     editable   = true;                    // false -> select() does nothing
   // Fired after a field's value changed. Never called from an interrupt.
   void   (*onChange)(const MenuItem& item, uint8_t fieldIndex, void* ctx) = nullptr;
-  // If set, a Select on this item calls this INSTEAD of entering edit mode.
+  // If set, select() on this item calls this INSTEAD of entering edit mode.
   void   (*onActivate)(void* ctx) = nullptr;
   void*    ctx = nullptr;
 };
 
-class Menu {
+class MenuModel {
  public:
   using CloseCb = void (*)(void* ctx);
 
-  Menu(IPanel& panel, const char* header);
+  MenuModel(IMenuRenderer& renderer, const MenuGeometry& geom, const char* header);
 
   // ---- content, owned by the application ----------------------------------
   void      setHeader(const char* h);
   int       addItem(const MenuItem& item);   // index, or -1 if full
   MenuItem* item(uint8_t index);             // nullptr if out of range
   uint8_t   count() const;
-  void      clear();                         // also closes the menu
-  // Change a value from outside (a sensor, a web request). Re-renders only if the
-  // item is currently in the visible two-row window.
+  void      clear();                         // also closes the menu, silently
+  // Change a value from outside (a sensor, a web request). Redraws only if the item
+  // is currently inside the visible window.
   bool      setFieldValue(uint8_t itemIndex, uint8_t fieldIndex, int32_t value);
-  void      onClose(CloseCb cb, void* ctx);  // default: nothing. Carminat sets
+  void      onClose(CloseCb cb, void* ctx);  // default: nothing. CarminatDisplay sets
                                              // setText("RENAULT", 0), as today.
 
   // ---- state --------------------------------------------------------------
   bool    isOpen()        const;
   bool    isEditing()     const;
   uint8_t selectedIndex() const;
-  uint8_t selectedRow()   const;             // 0 = top visible row, 1 = bottom
+  uint8_t selectedRow()   const;             // 0 = top row of the window
+  uint8_t editingField()  const;
+  uint8_t topIndex()      const;             // the item shown on row 0
+  uint8_t scrollMask()    const;             // 0x00 / 0x07 / 0x0B / 0x0C, see §8.6
+  const MenuGeometry& geometry() const;
 
-  // ---- driven by AffaDisplayBase, not by the application -------------------
-  bool   handleKey(Key k, KeyEdge e);        // true = consumed
-  Result render();                           // re-emit the current window
-  void   open();
-  void   close();                            // clears editing state; see §8.5
+  // ---- navigation: one method per intent, no Key enum ----------------------
+  // Each returns true when the model consumed the intent; false means "the menu is
+  // closed, this key is the application's" — the contract Menu::handleKey had.
+  bool next();       // wheel down:      edit ? +1 step : selection down
+  bool prev();       // wheel up:        edit ? -1 step : selection up
+  bool increase();   // wheel down held: edit ? +coarse : selection down
+  bool decrease();   // wheel up   held: edit ? -coarse : selection up
+  bool select();     // activate / enter edit / advance to the next field
+  bool back();       // leave the menu
 
- private:
-  IPanel&  _panel;
-  const char* _header;
-  MenuItem _items[AFFA_MENU_MAX_ITEMS];
-  uint8_t  _count = 0;
-  uint8_t  _selectedIndex = 0;
-  uint8_t  _selectedRow = 0;
-  uint8_t  _editingField = 0;
-  bool     _open = false;
-  bool     _editing = false;
-  CloseCb  _closeCb = nullptr;  void* _closeCtx = nullptr;
-  uint8_t  scrollIndicator() const;          // 0x07 / 0x0B / 0x0C, see §8.6
-  void     rowText(uint8_t index, char* out, size_t outSize) const;
+  void open();                               // no-op on an EMPTY menu
+  void close();                              // clears editing state; see §8.5
+
+  // ---- rendering -----------------------------------------------------------
+  void render();                             // re-emit the whole window. VOID: the
+                                             // panel's verdict lives on the adapter
+  void rowText(uint8_t itemIndex, char* out, size_t outSize) const;
 };
 
-} // namespace affa
+}  // namespace widget
+}  // namespace affa
 #endif
 ```
 
@@ -2181,7 +2209,7 @@ never call user code. Everything else happens in the caller's task, inside `poll
 | `FrameTap` (`onFrame`) | the task that called `poll()` (RX) or whichever task caused a transmission (TX) — including `pressKey`, a render call is queued so its frames always leave from `poll()` | Yes, but it is on the path of **every** frame on the bus. Keep it to a ring push. Do not render from it. |
 | `FrameCb` (`subscribe`) | as `FrameTap` | Same, and the same warning applies less forcefully because the match already filtered. Rendering from here is permitted and is what §7b.7a does. |
 | `EventCb` (`onEvent`) | the task that called `poll()`, or `pressKey`/`nav` for `EventKind::Key` | Same as `KeyCb`. Every pointer inside `Event` dies when the callback returns (§2.1). |
-| `Field::onChange` / `MenuItem::onChange` / `onActivate` / `Menu::CloseCb` | the task that called `poll()`/`pressKey`/`nav` | Same. Note `onChange` fires *before* the resulting re-render is enqueued. |
+| `Field::onChange` / `MenuItem::onChange` / `onActivate` / `MenuModel::CloseCb` | the task that called `poll()`/`pressKey`/`nav` | Same. Note `onChange` fires *before* the resulting re-render is enqueued. |
 | `ILogSink::write` | any of the above, plus `Esp32CanLink::begin()` | **No.** Treat it as a leaf. It may be called with the library's internal state mid-transition. |
 
 A callback must not block. It is running inside `poll()`; anything it waits for that
@@ -2469,7 +2497,7 @@ the image", which the map file and the flash number report.
 | `AFFA_PANEL_CARMINAT` | **0** — naming no panel is an `#error` | Carminat frame builders, key decode, `0x151`/`0x1F1` tables. | 0 while using a Carminat: `CarminatDisplay` is not declared — compile error at your call site. |
 | `AFFA_PANEL_UPDATELIST` | as above | AFFA2 base + 8-segment display + title scroll. | as above |
 | `AFFA_PANEL_UPDATELIST_MENU` | as above | LCD `setText` channel/location encoding. Forces `AFFA_PANEL_UPDATELIST` on. | as above |
-| `AFFA_ENABLE_MENU` | 1 | `Menu`, `MenuController`, `IPage` routing, `nav()`, `getMenu()`. The single largest optional block. | 0: `nav()` returns `NotSupported`, `getMenu()` is not declared, `supports(Feature::Menu)` is false. A menu-driven application stops compiling — which is the point. |
+| `AFFA_ENABLE_MENU` | **0** | `widget/` (`MenuModel`, `IMenuRenderer`, `MenuGeometry`), `CarminatMenuRenderer`, `MenuController`, `IPage` routing, `nav()`, `getMenu()`. The single largest optional block, and **off by default**: the menu is a widget, not protocol. `showMenu()` / `highlightItem()` are unconditional and stay available with this at 0. | 0 (the default): `nav()` returns `NotSupported`, `getMenu()` is not declared, `supports(Feature::Menu)` is false. A menu-driven application stops compiling — which is the point; set it to 1 in your `build_flags`. |
 | `AFFA_ENABLE_AUX_TRACKER` | **0** | `AuxModeTracker`: AUX detection from `0x151` traffic, plus its pattern strings. **Default-off on purpose** — the patterns describe one Renault radio family, not a panel, and the library has no business asserting them as fact (§7b.1, §7b.7b). It is a helper you may call; nothing in the library depends on it. | 0 (the default): `AuxModeTracker` is not declared, `supports(Feature::AuxTracking)` is false, and AUX is never auto-detected. 1: you get the heuristic and pay ~0.4 kB of flash for strings that may be wrong about your radio; feed it frames yourself and read its verdict. `setAuxMode()` returns `NotSupported` **either way** — no panel holds a tracker (§6). Note the helper is gated on this flag ALONE, not on a panel flag, so an UpdateList-only build can use it too — but `AffaDisplay.h` includes the header only under `AFFA_PANEL_CARMINAT && AFFA_ENABLE_AUX_TRACKER`, so such a consumer must `#include "carminat/AuxModeTracker.h"` directly. |
 | `AFFA_ENABLE_POPUP` | 1 | `showPopupText` / `hidePopup` (mode `0x74` overlay). | 0: both return `NotSupported`. |
 | `AFFA_ENABLE_FULLSCREEN` | 1 | `showFullscreenText` / `hideFullscreenText` (`0x21` mode `0x05`). | 0: both return `NotSupported`. |
@@ -2603,9 +2631,11 @@ with `AFFA_ENABLE_POPUP=0` reports `supports(Feature::Popup) == false`, and
 | `highlightItem(uint8_t)` | same | now asynchronous |
 | `showConfirmBoxWithOffsets(...)` | `showConfirmBox(...)` | the offset-taking builder is internal |
 | `showInfoMenu(i1,i2,i3,o1,o2,o3,prefix)` | `showInfoPopup(l1,l2,l3)` | the offsets are internal constants; the `delay(5)` between its frames is gone — the TX FSM paces them |
-| `getMenu()` returning the `String`/`vector` `Menu` | `getMenu()` returning the fixed-capacity `affa::Menu` | see §8.7 for the new item-building API |
+| `getMenu()` returning the `String`/`vector` `Menu` | `getMenu()` returning the fixed-capacity `affa::widget::MenuModel` (still spelled `affa::Menu` — the alias in `CarminatDisplay.h`) | see §8.7 for the new item-building API and §2.12 for what the change of type means |
 | `MenuItem(String, {Field...})` | `affa::MenuItem{ .label = "...", .fields = {...} }` + `integerField/listField/readOnlyField` | no `String`, no `std::function`; callbacks are function pointers with a `ctx` |
-| `Menu::handleMessage(const CAN_FRAME&)` | *(removed)* | it was already a no-op, and it was the only reason `Menu.h` included `<esp32_can.h>` |
+| `Menu::handleMessage(const CAN_FRAME&)` | *(removed)* | it was already a no-op, and it was the only reason the original `Menu.h` included `<esp32_can.h>` |
+| `Menu::handleKey(Key, KeyEdge)` | *(removed)* → `MenuController::routeKey()` + `MenuModel::next/prev/increase/decrease/select/back()` | the model has no key vocabulary, so the `(Key, KeyEdge)` map moved up one layer into navigation policy. The fall-through for SrcNext / SrcPrev / VolUp / VolDown / Pause is unchanged and now lives in that map's `default:` |
+| `Menu::render()` returning `Result` | `MenuModel::render()` returning `void` | the verdict is `CarminatDisplay::menuRenderer().lastResult()`: only the layer holding the `IPanel` can answer it |
 | `IDisplay::isCarminat()` | `supports(Feature)` | ask about the capability, not the model |
 | `emulateKey(AffaKey, bool hold)` (file-static in `CarminatDisplay.cpp`) | `pressKey(Key, KeyEdge, KeySource::Wire)` | it built the `0x1C1` frame by hand and pushed it through `CanUtils`. The wire bytes are unchanged. `KeySource::Wire` is the source that reproduces it exactly, and it must be passed explicitly — the default is `Local`, which drives our own menu and transmits nothing (§7b.6) |
 | *(no equivalent — `ProcessKey` was the only entry)* | `pressKey(..., KeySource::Local)` / `nav(NavCommand)` | the input seam: a web console, a BLE remote or a test now drives the same path as the wheel (§8.3) |
@@ -3092,7 +3122,7 @@ default) neither it nor its pattern strings reach flash.
 
 #### 7b.7c A custom menu-open hotkey
 
-"Hold Load opens the menu" was hard-wired inside `Menu::handleKey`. It *is* the OEM
+"Hold Load opens the menu" was hard-wired inside the extracted `Menu::handleKey`. It *is* the OEM
 convention for this panel, so it stays — as a default that can be replaced or removed.
 
 ```cpp
@@ -3319,13 +3349,15 @@ matching the extracted behaviour.
 > **A defect fixed while porting.** The legacy `Menu::handleKey` closed the menu on
 > hold-Load without clearing `editing`. Reopening the menu therefore resumed in edit
 > mode on whatever field was live when you left, with no visual difference from a
-> fresh open. `Menu::close()` now clears `editing` and `editingField`. This is a
+> fresh open. `MenuModel::close()` now clears `editing` and `editingField`. This is a
 > behaviour change and it is intentional.
 
 Keys the menu does not consume (`SrcNext`, `SrcPrev`, `VolUp`, `VolDown`, `Pause`, and
 everything while the menu is closed except hold-Load) fall through to the application's
 `KeyCb`. `MenuController` routes an active `IPage` first, then the menu, then the
-fall-through — unchanged from the extracted code.
+fall-through — unchanged from the extracted code. Since the menu became display-agnostic
+the `(Key, KeyEdge)` → intent map is `MenuController::routeKey`'s rather than the menu's,
+and that fall-through is its `default:` branch; `MenuModel` has no `Key` vocabulary at all.
 
 > **`nav(NavCommand::Open)` is an intent, not a keystroke, and it does not travel the key
 > path.** `AffaDisplayBase::nav()` calls `openMenu()` directly rather than `routeKey()`.
@@ -3336,9 +3368,10 @@ fall-through — unchanged from the extracted code.
 > above describes the gesture. The same refusal applies to an empty menu, which never
 > opens — an open empty menu would render nothing and swallow the wheel and `Load`.
 
-> **The closing key is CONSUMED.** `Menu::handleKey` returns true for every key it acts on
-> while open, *including* the hold-`Load` that closes the menu, as the `Open`/`Back` rows
-> above specify. The extracted `MenuController::routeKey` returned `_menu.isActive()`
+> **The closing key is CONSUMED.** `MenuController::routeKey` returns true for every key the
+> menu acts on while open — `MenuModel::back()` returns true — *including* the hold-`Load`
+> that closes it, as the `Open`/`Back` rows above specify. The extracted
+> `MenuController::routeKey` returned `_menu.isActive()`
 > **after** handling, so in the old code the closing keystroke also fell through to the
 > application's `KeyCb`. If an application relied on seeing that key, this is the
 > behaviour change to look at.
@@ -3357,12 +3390,41 @@ otherwise                                        -> 0x0C  (both)
 The `count <= 2` case is new: the extracted code indexed `items[topIndex+1]` without a
 bounds check and read past the end of a one-item menu.
 
-### 8.7 `Menu& getMenu()` and the minimal item-building API
+### 8.7 `widget::MenuModel& getMenu()` and the minimal item-building API
+
+The exact declaration, in `carminat/CarminatDisplay.h`, is:
+
+```cpp
+widget::MenuModel& getMenu();                            // non-const only
+CarminatMenuRenderer&       menuRenderer();              // the adapter —
+const CarminatMenuRenderer& menuRenderer() const;        //   ask it for lastResult()
+```
+
+**`getMenu()` returns `affa::widget::MenuModel&`.** It used to return a `Menu&` that was
+`carminat/Menu/Menu.h`; that file has been deleted and there is now exactly one menu state
+machine in the library. `affa::Menu` still names the returned type — it is a **type alias**
+for `affa::widget::MenuModel` declared in `CarminatDisplay.h`, alongside `affa::MenuItem`,
+`affa::Field`, `affa::FieldType`, `affa::integerField`, `affa::readOnlyField` and
+`affa::listField` — so `affa::Menu& m = display.getMenu();` still compiles and still means
+what it meant. Aliases, not a compatibility shim: there is nothing behind them but the one
+implementation. Two differences a caller can observe, both spelled out in §2.12:
+
+* `render()` returns **`void`**, not `Result`. Ask `menuRenderer().lastResult()` for the
+  panel's verdict — only the layer holding the `IPanel` can answer it.
+* a row truncates at the injected `rowChars` (26 on this panel) rather than at
+  `AFFA_MENU_ROW_MAX - 1`.
+
+And the boundary that governs all of it: **`showMenu()` and `highlightItem()` are the
+protocol-level primitives, and they are unconditional.** They are declared on
+`CarminatDisplay` outside every menu gate and work with `AFFA_ENABLE_MENU=0`, which is the
+default. `getMenu()`, `MenuModel`, `MenuController`, `IPage` and `nav()` are the **optional**
+widget built on top of them — one opinion about menu behaviour, which an application with a
+different remote is expected to replace. See `docs/MENU-WIDGET.md`.
 
 > **`getMenu()` is declared on `CarminatDisplay`, NOT on `AffaDisplayBase` or `IDisplay`.**
 > The menu is a Carminat capability — `UpdateList` has no menu at all and answers
 > `supports(Feature::Menu)` with false — so the accessor lives on the panel that has one
-> and the base declares no `Menu*` seam. Take a `CarminatDisplay&` (or keep a typed
+> and the base declares no `MenuModel*` seam. Take a `CarminatDisplay&` (or keep a typed
 > pointer beside your base-typed one) wherever you build or inspect the menu; a
 > base-typed handle gives you `nav()`, which is the panel-agnostic half of the same
 > capability. This section and §7b.7c are written against a `CarminatDisplay&` for that

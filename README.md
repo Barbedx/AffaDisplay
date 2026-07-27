@@ -210,6 +210,14 @@ above that (which items exist, which is selected, how a window slides over N of 
 Select advances to the next field) is a UI state machine the panel knows nothing about, which
 is why `AFFA_ENABLE_MENU` defaults to `0`.
 
+Say it plainly, because the rest of this section is about the widget and it is easy to lose:
+**`showMenu()` and `highlightItem()` are the protocol-level primitives and they are not
+optional.** They live in `CarminatDisplay` outside every menu gate. With
+`AFFA_ENABLE_MENU=0` — the default — both still compile, still work, and still put the same
+bytes on the wire; what you lose is `MenuModel`, `MenuController`, `IPage`, `nav()` and
+`getMenu()`, i.e. one *opinion* about how a menu should behave. **The widget is optional; the
+two calls it is built on are not.** Drive them yourself and you owe this library nothing.
+
 If you want that state machine rather than your own, `src/widget/` now holds it in a form that
 is **not welded to one panel's geometry**: `MenuModel` + `IMenuRenderer` + `MenuGeometry`.
 Rows, characters-per-row and wrap are injected, so the same algorithm drives the 2 × 26
@@ -219,8 +227,14 @@ highlight frames and what a redraw costs stay in the adapter you write — usual
 lines. It compiles on the host with no Arduino, no CAN and no panel header.
 
 Read [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md); run `examples/09_menu_widget`, which puts
-one identical menu on three different displays. The original `Menu` / `MenuController` /
-`IPage` are untouched and still ship under the same gate.
+one identical menu on three different displays. **There is only one implementation:**
+`src/carminat/Menu/` — the panel-welded original — has been deleted, `CarminatDisplay` drives
+`MenuModel` through `affa::CarminatMenuRenderer`, and `getMenu()` keeps its name while
+returning `widget::MenuModel&`. `affa::Menu` and `affa::MenuItem` survive as aliases, so
+existing item-building code compiles unchanged; the two observable differences are that
+`render()` returns `void` (ask `menuRenderer().lastResult()` for the panel's verdict) and that
+rows truncate at the injected 26 characters. `MenuController` / `IPage` keep their job — the
+page stack and the `(Key, KeyEdge)` → intent map, which is navigation policy, not menu.
 
 ### Configuration knobs
 
@@ -234,8 +248,8 @@ defaults.
 | `AFFA_PANEL_UPDATELIST` | `0`¹ | UpdateList 8-segment panel |
 | `AFFA_PANEL_UPDATELIST_MENU` | `0`¹ | UpdateList mono-LCD variant (implies the line above) |
 | `AFFA_PANEL_DEFAULT_ALL` | `0`¹ | opt in to "compile all three panels". Only for a first look and for the footprint reference builds. |
-| `AFFA_ENABLE_MENU` | **`0`** | `Menu`, `MenuController`, `IPage`, `nav()`, `getMenu()`. The largest optional block, and **off by default**: the menu is a widget, not protocol. `showMenu` / `highlightItem` stay available with it off. |
-| ↳ `src/widget/` | *same gate* | `MenuModel` + `IMenuRenderer` + `MenuGeometry` — the same sliding-window algorithm with rows, characters-per-row and wrap as **parameters**, for any display. Panel-free, host-testable, no heap after construction. See [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md). |
+| `AFFA_ENABLE_MENU` | **`0`** | `src/widget/`, `CarminatMenuRenderer`, `MenuController`, `IPage`, `nav()`, `getMenu()`. The largest optional block, and **off by default**: the menu is a widget, not protocol. `showMenu` / `highlightItem` stay available with it off. |
+| ↳ `src/widget/` | *same gate* | `MenuModel` + `IMenuRenderer` + `MenuGeometry` — the sliding-window algorithm with rows, characters-per-row and wrap as **parameters**, for any display. Panel-free, host-testable, no heap after construction. The **only** menu implementation in the library; `CarminatDisplay` uses it too. See [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md). |
 | `AFFA_ENABLE_POPUP` | `1` | `showPopupText` / `hidePopup` |
 | `AFFA_ENABLE_FULLSCREEN` | `1` | `showFullscreenText` / `hideFullscreenText` |
 | `AFFA_ENABLE_CONFIRMBOX` | `1` | `showConfirmBox` (sits at exactly the 113-byte ceiling) |
@@ -280,18 +294,24 @@ is **218 912 B** flash / **13 476 B** RAM.
 
 | Build | Flash | Δ vs empty sketch | RAM | Δ vs empty sketch |
 | --- | ---: | ---: | ---: | ---: |
-| `size_all` — every panel gate on (`AFFA_PANEL_DEFAULT_ALL=1`) | 265 720 B | +46 808 B | 16 380 B | +2 904 B |
-| `size_carminat` — Carminat only | 265 720 B | +46 808 B | 16 380 B | +2 904 B |
-| `size_min` — Carminat, no menu/popup/fullscreen/confirm/info, no transliteration, no log, no subscriptions | 264 186 B | +45 274 B | 16 052 B | +2 576 B |
-| `ex07_virtual_panel_c3` — Carminat **plus the twin** (`proto/` + `vpanel/`) | 284 140 B | +65 228 B | 25 980 B | +12 504 B |
+| `size_all` — every panel gate on (`AFFA_PANEL_DEFAULT_ALL=1`) | 266 116 B | +47 204 B | 16 380 B | +2 904 B |
+| `size_carminat` — Carminat only | 266 116 B | +47 204 B | 16 380 B | +2 904 B |
+| `size_min` — Carminat, no menu/popup/fullscreen/confirm/info, no transliteration, no log, no subscriptions | 264 236 B | +45 324 B | 16 052 B | +2 576 B |
+| `ex07_virtual_panel_c3` — Carminat **plus the twin** (`proto/` + `vpanel/`) | 282 504 B | +63 592 B | 24 396 B | +10 920 B |
+
+<sub>The four absolute figures above were re-measured from a clean `pio run` on the date of
+the menu migration, and all four are **byte-identical before and after it** — none of these
+builds uses a menu. The two *baselines* they are compared against (the empty sketch and the
+CAN-only floor below) are carried forward from the earlier measurement session, not
+re-measured; the toolchain is pinned, so they are expected to hold.</sub>
 
 Read those numbers with three corrections, or they will mislead you:
 
 1. **Most of the delta is the CAN driver, not this library.** A bare sketch that only links
    `esp32_can` + `can_common`, opens `Serial` and calls `CAN0.begin(500000)` — no
    AffaDisplay at all — is **257 724 B / 14 564 B** on the same toolchain. Against *that*
-   floor the library costs **+7 996 B flash / +1 816 B RAM** fully enabled, **+6 462 B /
-   +1 488 B** minimal, and **+26 416 B / +11 416 B** with the twin compiled in and used.
+   floor the library costs **+8 392 B flash / +1 816 B RAM** fully enabled, **+6 512 B /
+   +1 488 B** minimal, and **+24 780 B / +9 832 B** with the twin compiled in and used.
    That is the number to quote.
 2. **`size_all` and `size_carminat` are byte-identical, and that is the result, not a
    defect.** Both build `examples/01_link_check`, which instantiates its own minimal
@@ -305,25 +325,45 @@ Read those numbers with three corrections, or they will mislead you:
 <sub>The project brief quoted 247 290 B for an empty sketch on this board. That figure does
 not reproduce with the toolchain pinned in this repository (Arduino core 2.0.17 / platform
 espressif32 6.13.0); 218 912 B is what a clean build measures here. Against 247 290 B the
-deltas would read +18 416, +18 416, +16 886 and +36 850 B. The measured baselines above are
+deltas would read +18 826, +18 826, +16 946 and +35 214 B. The measured baselines above are
 the ones this table uses.</sub>
 
-Per-example, same board and core, all from real `pio run` output:
+Per-example, same board and core, all from real `pio run` output. **Both columns were
+measured on the same day and the same toolchain**, "before" being the tree with
+`src/carminat/Menu/` still in it and "after" being this one — so the Δ is the price of
+collapsing the two menu implementations into one, and nothing else:
 
-| Env | What it exercises | Flash | RAM |
-| --- | --- | ---: | ---: |
-| `ex01_link_check` | core only, log level 4 | 265 728 B | 16 380 B |
-| `ex02_carminat_text` | Carminat, no menu | 271 208 B | 16 332 B |
-| `ex03_carminat_menu` | Carminat + `Menu` + pages | 274 174 B | 17 900 B |
-| `ex04_updatelist_segment` | UpdateList 8-segment + marquee | 270 460 B | 16 452 B |
-| `ex05_updatelist_menu` | UpdateList LCD variant | 270 474 B | 16 492 B |
-| `ex06_counter_preempt` | Carminat, tap + preemption | 271 040 B | 16 348 B |
-| `ex07_virtual_panel_c3` | Carminat + `proto/` + `vpanel/` | 284 140 B | 25 980 B |
-| `ex08_radio_mitm` | Carminat + menu + subscriptions | 274 202 B | 17 756 B |
-| `ex90_bench_ota` | web console + WiFi + ElegantOTA + twin | 898 244 B | 71 124 B |
+| Env | What it exercises | Flash before | Flash after | Δ | RAM before | RAM after | Δ |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ex01_link_check` | core only, log level 4 | 266 124 B | 266 124 B | **0** | 16 380 B | 16 380 B | **0** |
+| `ex02_carminat_text` | Carminat, no menu | 271 708 B | 271 708 B | **0** | 16 332 B | 16 332 B | **0** |
+| `ex03_carminat_menu` | Carminat + `Menu` + pages | 274 672 B | 275 700 B | **+1 028 B** | 17 900 B | 18 028 B | **+128 B** |
+| `ex04_updatelist_segment` | UpdateList 8-segment + marquee | 270 962 B | 270 962 B | **0** | 16 452 B | 16 452 B | **0** |
+| `ex05_updatelist_menu` | UpdateList LCD variant | 270 866 B | 270 866 B | **0** | 16 492 B | 16 492 B | **0** |
+| `ex06_counter_preempt` | Carminat, tap + preemption | 271 546 B | 271 546 B | **0** | 16 356 B | 16 356 B | **0** |
+| `ex07_virtual_panel_c3` | Carminat + `proto/` + `vpanel/` | 282 504 B | 282 504 B | **0** | 24 396 B | 24 396 B | **0** |
+| `ex08_radio_mitm` | Carminat + menu + subscriptions | 274 700 B | 275 740 B | **+1 040 B** | 17 756 B | 17 884 B | **+128 B** |
+| `ex09_menu_widget` | one menu on three displays | 278 294 B | 276 904 B | **−1 390 B** | 19 876 B | 19 908 B | +32 B |
+| `ex90_bench_ota` | web console + WiFi + ElegantOTA + twin | 899 032 B | 900 040 B | **+1 008 B** | 71 124 B | 71 236 B | **+112 B** |
+| `size_all` / `size_carminat` | every gate on | 266 116 B | 266 116 B | **0** | 16 380 B | 16 380 B | **0** |
+| `size_min` | Carminat, everything optional off | 264 236 B | 264 236 B | **0** | 16 052 B | 16 052 B | **0** |
 
-A panel plus its rendering is ~5.5 kB over the bare core; `Menu` adds ~3 kB flash and
-~1.6 kB RAM (turn `AFFA_MENU_MAX_ITEMS` / `AFFA_MENU_MAX_FIELDS` down if that matters); the
+Read that table honestly: **removing the duplicate cost flash, it did not save it.** Every
+build that does not use a menu is byte-identical — the deletion is free if you were not
+paying for the menu anyway — but a Carminat build that *does* use one grew by **~1 kB flash
+and 128 B RAM**. That is what generality costs: the deleted `Menu` had the geometry welded
+in as compile-time constants and called `IPanel` directly, while `MenuModel` multiplies by a
+`rowChars` it is handed and reaches the panel through a virtual `IMenuRenderer`, and
+`CarminatDisplay` now holds an adapter object as well as a model. The one row that *shrank*
+is `ex09_menu_widget`, by 1 390 B, because it stopped carrying its own copy of the Carminat
+adapter and uses the library's — which is the same effect at a smaller scale, and the reason
+the trade is still worth taking. A kilobyte is the price; one state machine instead of two,
+so that a fix lands once, is what it buys. The project has already paid the other price: the
+sync FSM was duplicated across `CarminatDisplay::tick()` and `UpdateListBase::tick()` and
+**both copies carried the same two defects verbatim**.
+
+A panel plus its rendering is ~5.5 kB over the bare core; `Menu` adds ~4 kB flash and
+~1.7 kB RAM (turn `AFFA_MENU_MAX_ITEMS` / `AFFA_MENU_MAX_FIELDS` down if that matters); the
 twins are ~13 kB flash and ~9.6 kB RAM and are the reason they are off on target.
 `ex90_bench_ota` is dominated by WiFi and the HTTP server and uses a 1.4 MB OTA partition.
 
@@ -338,11 +378,23 @@ harness is `platformio_footprint.ini` + `tools/footprint/gate_probe` — run
 `pio run -c platformio_footprint.ini` to reproduce every number here, including the two
 baselines above and the two `#error` guards, which are environments expected to *fail*.
 
+> The byte figures below were measured **before** the menu migration (one `MenuModel` +
+> `CarminatMenuRenderer` replacing the deleted `carminat/Menu/`). The symbol names in the
+> evidence column are current; re-run the harness for exact numbers.
+>
+> **The `AFFA_ENABLE_MENU=0` row cannot currently be reproduced**, and that is a defect in the
+> harness rather than in the gate: `[env:g_base]` in `platformio_footprint.ini` never passes
+> `-D AFFA_ENABLE_MENU=1`, and the gate defaults to `0`, so the reference build has the menu
+> off already. Measured today, `g_base` and `g_no_menu` differ by **8 bytes**. Turning it on
+> in the reference build means turning it on in every other `g_no_*` env too, so that all of
+> them still differ from the baseline by exactly one flag — and then re-measuring the whole
+> table.
+
 | Flag | Flash | RAM | Symbol evidence in `firmware.elf` |
 | --- | ---: | ---: | --- |
 | `AFFA_ENABLE_ESP32CAN_LINK=0` | **−12 218 B** | −1 400 B | `Esp32CanLink::begin` and all 28 `CAN0`/driver symbols gone; the env drops `lib_deps` entirely and still links |
-| `AFFA_PANEL_CARMINAT=0` | −5 536 B | −2 752 B | every `CarminatDisplay::*` and `affa::Menu::*` symbol gone |
-| `AFFA_ENABLE_MENU=0` | −3 266 B | −1 584 B | `Menu::handleKey`, `MenuController::*` gone |
+| `AFFA_PANEL_CARMINAT=0` | −5 536 B | −2 752 B | every `CarminatDisplay::*` and `affa::CarminatMenuRenderer::*` symbol gone |
+| `AFFA_ENABLE_MENU=0` | −3 266 B | −1 584 B | `affa::widget::MenuModel::*`, `MenuController::*` gone |
 | `AFFA_PANEL_UPDATELIST=0` (with `_MENU=0`) | −2 550 B | −2 592 B | every `UpdateList*` symbol gone |
 | `AFFA_ENABLE_TRANSLITERATION=0` | −2 130 B | 0 | `affa::toAscii` gone (inlined bounded copy replaces it) |
 | `AFFA_ENABLE_LOG=0` | −1 696 B | −8 B | `affa::detail::emit` gone, and with it every format string |
@@ -754,6 +806,14 @@ ACK id завжди **обчислюється** як `funcId | 0x400`, і ні�
 до наступного поля) — це стан інтерфейсу, про який панель нічого не знає; саме тому
 `AFFA_ENABLE_MENU` типово дорівнює `0`.
 
+Скажемо це прямо, бо решта розділу — про віджет, і це легко загубити: **`showMenu()` і
+`highlightItem()` — це примітиви рівня протоколу, і вони не є необов'язковими.** Вони живуть
+у `CarminatDisplay` поза всіма перемикачами меню. З `AFFA_ENABLE_MENU=0` — а це типове
+значення — обидва так само компілюються, так само працюють і кладуть на шину ті самі байти;
+втрачаєте ви `MenuModel`, `MenuController`, `IPage`, `nav()` і `getMenu()`, тобто одну
+*думку* про те, як меню має поводитися. **Віджет необов'язковий; два виклики, на яких він
+збудований, — ні.** Керуйте ними самі — і ви нічого цій бібліотеці не винні.
+
 Якщо вам потрібен саме цей автомат, а не власний, то `src/widget/` тепер тримає його у формі,
 **не привареній до геометрії однієї панелі**: `MenuModel` + `IMenuRenderer` + `MenuGeometry`.
 Кількість рядків, символів у рядку і зациклення передаються ззовні, тож той самий алгоритм
@@ -764,8 +824,14 @@ OLED 6 × 20. Модель оперує *індексом рядка* і від�
 і без заголовків панелі.
 
 Читайте [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md); запустіть `examples/09_menu_widget`, де
-одне й те саме меню виводиться на три різні дисплеї. Старі `Menu` / `MenuController` / `IPage`
-не змінені й далі постачаються під тим самим прапорцем.
+одне й те саме меню виводиться на три різні дисплеї. **Реалізація лишилася одна:**
+`src/carminat/Menu/` — оригінал, приварений до панелі — видалено, `CarminatDisplay` керує
+`MenuModel` через `affa::CarminatMenuRenderer`, а `getMenu()` зберіг назву й повертає
+`widget::MenuModel&`. `affa::Menu` і `affa::MenuItem` лишилися як псевдоніми, тож наявний код
+побудови пунктів збирається без змін; помітних відмінностей дві — `render()` повертає `void`
+(вердикт панелі питайте в `menuRenderer().lastResult()`), а рядки обрізаються на переданих
+26 символах. `MenuController` / `IPage` роблять те саме, що й раніше: стек сторінок і мапа
+`(Key, KeyEdge)` → намір, тобто політика навігації, а не меню.
 
 ### Перемикачі конфігурації
 
@@ -779,7 +845,7 @@ OLED 6 × 20. Модель оперує *індексом рядка* і від�
 | `AFFA_PANEL_UPDATELIST` | `0`¹ | восьмисегментна UpdateList |
 | `AFFA_PANEL_UPDATELIST_MENU` | `0`¹ | моно-LCD різновид UpdateList (вмикає рядок вище) |
 | `AFFA_PANEL_DEFAULT_ALL` | `0`¹ | явна згода «зібрати всі три панелі». Лише для першого знайомства і для довідкових збірок обсягу. |
-| `AFFA_ENABLE_MENU` | **`0`** | `Menu`, `MenuController`, `IPage`, `nav()`, `getMenu()`. Найбільший опціональний блок, і **типово вимкнений**: меню — це віджет, а не протокол. `showMenu` / `highlightItem` доступні й з вимкненим меню. |
+| `AFFA_ENABLE_MENU` | **`0`** | `src/widget/`, `CarminatMenuRenderer`, `MenuController`, `IPage`, `nav()`, `getMenu()`. Найбільший опціональний блок, і **типово вимкнений**: меню — це віджет, а не протокол. `showMenu` / `highlightItem` доступні й з вимкненим меню. |
 | ↳ `src/widget/` | *той самий прапорець* | `MenuModel` + `IMenuRenderer` + `MenuGeometry` — той самий алгоритм ковзного вікна, але кількість рядків, символів у рядку і зациклення стали **параметрами**, для будь-якого дисплея. Без панелі, тестується на хості, без купи після конструювання. Див. [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md). |
 | `AFFA_ENABLE_POPUP` | `1` | `showPopupText` / `hidePopup` |
 | `AFFA_ENABLE_FULLSCREEN` | `1` | `showFullscreenText` / `hideFullscreenText` |
@@ -826,18 +892,24 @@ ESP32-C3 (`board = esp32-c3-devkitm-1`, ядро Arduino 2.0.17), release, пр�
 
 | Збірка | Флеш | Δ до порожнього скетча | RAM | Δ до порожнього скетча |
 | --- | ---: | ---: | ---: | ---: |
-| `size_all` — усі панелі увімкнені (`AFFA_PANEL_DEFAULT_ALL=1`) | 265 720 Б | +46 808 Б | 16 380 Б | +2 904 Б |
-| `size_carminat` — лише Carminat | 265 720 Б | +46 808 Б | 16 380 Б | +2 904 Б |
-| `size_min` — Carminat без меню/popup/fullscreen/confirm/info, без транслітерації, без логу і підписок | 264 186 Б | +45 274 Б | 16 052 Б | +2 576 Б |
-| `ex07_virtual_panel_c3` — Carminat **плюс twin** (`proto/` + `vpanel/`) | 284 140 Б | +65 228 Б | 25 980 Б | +12 504 Б |
+| `size_all` — усі панелі увімкнені (`AFFA_PANEL_DEFAULT_ALL=1`) | 266 116 Б | +47 204 Б | 16 380 Б | +2 904 Б |
+| `size_carminat` — лише Carminat | 266 116 Б | +47 204 Б | 16 380 Б | +2 904 Б |
+| `size_min` — Carminat без меню/popup/fullscreen/confirm/info, без транслітерації, без логу і підписок | 264 236 Б | +45 324 Б | 16 052 Б | +2 576 Б |
+| `ex07_virtual_panel_c3` — Carminat **плюс twin** (`proto/` + `vpanel/`) | 282 504 Б | +63 592 Б | 24 396 Б | +10 920 Б |
+
+<sub>Ці чотири абсолютні цифри перевиміряні чистим `pio run` у день міграції меню, і всі
+чотири **побайтово однакові до і після неї** — жодна з цих збірок меню не використовує. Дві
+*бази*, з якими їх порівнюють (порожній скетч і підлога «лише CAN» нижче), перенесені з
+попередньої сесії вимірювань і не перевимірювалися; тулчейн зафіксовано, тож вони мають
+триматися.</sub>
 
 Ці числа треба читати з трьома поправками, інакше вони введуть в оману:
 
 1. **Більшість дельти — це драйвер CAN, а не ця бібліотека.** Голий скетч, який лише лінкує
    `esp32_can` + `can_common`, відкриває `Serial` і викликає `CAN0.begin(500000)` — узагалі
    без AffaDisplay — важить **257 724 Б / 14 564 Б** на тому самому тулчейні. Відносно
-   *цієї* підлоги бібліотека коштує **+7 996 Б флеш / +1 816 Б RAM** у повній комплектації,
-   **+6 462 Б / +1 488 Б** у мінімальній і **+26 416 Б / +11 416 Б** із twin-ом, який
+   *цієї* підлоги бібліотека коштує **+8 392 Б флеш / +1 816 Б RAM** у повній комплектації,
+   **+6 512 Б / +1 488 Б** у мінімальній і **+24 780 Б / +9 832 Б** із twin-ом, який
    реально використовується. Саме ці числа варто цитувати.
 2. **`size_all` і `size_carminat` байт у байт однакові — і це результат, а не дефект.** Обидві
    збирають `examples/01_link_check`, який створює власний мінімальний нащадок
@@ -851,23 +923,43 @@ ESP32-C3 (`board = esp32-c3-devkitm-1`, ядро Arduino 2.0.17), release, пр�
 <sub>У технічному завданні для порожнього скетча на цій платі наводилася цифра 247 290 Б.
 Вона не відтворюється на тулчейні, зафіксованому в цьому репозиторії (ядро Arduino 2.0.17 /
 платформа espressif32 6.13.0); чиста збірка тут дає 218 912 Б. Відносно 247 290 Б дельти
-були б +18 416, +18 416, +16 886 і +36 850 Б. Таблиця вище користується виміряними базами.</sub>
+були б +18 826, +18 826, +16 946 і +35 214 Б. Таблиця вище користується виміряними базами.</sub>
 
-По прикладах, та сама плата і ядро, усе з реального виводу `pio run`:
+По прикладах, та сама плата і ядро, усе з реального виводу `pio run`. **Обидві колонки
+виміряні того самого дня тим самим тулчейном**: «до» — дерево, у якому ще був
+`src/carminat/Menu/`, «після» — оце. Тож Δ — це ціна зведення двох реалізацій меню в одну,
+і більше нічого:
 
-| Env | Що задіює | Флеш | RAM |
-| --- | --- | ---: | ---: |
-| `ex01_link_check` | лише ядро, рівень логу 4 | 265 728 Б | 16 380 Б |
-| `ex02_carminat_text` | Carminat без меню | 271 208 Б | 16 332 Б |
-| `ex03_carminat_menu` | Carminat + `Menu` + сторінки | 274 174 Б | 17 900 Б |
-| `ex04_updatelist_segment` | UpdateList 8 сегментів + біжучий рядок | 270 460 Б | 16 452 Б |
-| `ex05_updatelist_menu` | різновид UpdateList LCD | 270 474 Б | 16 492 Б |
-| `ex06_counter_preempt` | Carminat, tap і витіснення | 271 040 Б | 16 348 Б |
-| `ex07_virtual_panel_c3` | Carminat + `proto/` + `vpanel/` | 284 140 Б | 25 980 Б |
-| `ex08_radio_mitm` | Carminat + меню + підписки | 274 202 Б | 17 756 Б |
-| `ex90_bench_ota` | вебконсоль + WiFi + ElegantOTA + twin | 898 244 Б | 71 124 Б |
+| Env | Що задіює | Флеш до | Флеш після | Δ | RAM до | RAM після | Δ |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ex01_link_check` | лише ядро, рівень логу 4 | 266 124 Б | 266 124 Б | **0** | 16 380 Б | 16 380 Б | **0** |
+| `ex02_carminat_text` | Carminat без меню | 271 708 Б | 271 708 Б | **0** | 16 332 Б | 16 332 Б | **0** |
+| `ex03_carminat_menu` | Carminat + `Menu` + сторінки | 274 672 Б | 275 700 Б | **+1 028 Б** | 17 900 Б | 18 028 Б | **+128 Б** |
+| `ex04_updatelist_segment` | UpdateList 8 сегментів + біжучий рядок | 270 962 Б | 270 962 Б | **0** | 16 452 Б | 16 452 Б | **0** |
+| `ex05_updatelist_menu` | різновид UpdateList LCD | 270 866 Б | 270 866 Б | **0** | 16 492 Б | 16 492 Б | **0** |
+| `ex06_counter_preempt` | Carminat, tap і витіснення | 271 546 Б | 271 546 Б | **0** | 16 356 Б | 16 356 Б | **0** |
+| `ex07_virtual_panel_c3` | Carminat + `proto/` + `vpanel/` | 282 504 Б | 282 504 Б | **0** | 24 396 Б | 24 396 Б | **0** |
+| `ex08_radio_mitm` | Carminat + меню + підписки | 274 700 Б | 275 740 Б | **+1 040 Б** | 17 756 Б | 17 884 Б | **+128 Б** |
+| `ex09_menu_widget` | одне меню на трьох дисплеях | 278 294 Б | 276 904 Б | **−1 390 Б** | 19 876 Б | 19 908 Б | +32 Б |
+| `ex90_bench_ota` | вебконсоль + WiFi + ElegantOTA + twin | 899 032 Б | 900 040 Б | **+1 008 Б** | 71 124 Б | 71 236 Б | **+112 Б** |
+| `size_all` / `size_carminat` | усі перемикачі ввімкнені | 266 116 Б | 266 116 Б | **0** | 16 380 Б | 16 380 Б | **0** |
+| `size_min` | Carminat, усе необов'язкове вимкнено | 264 236 Б | 264 236 Б | **0** | 16 052 Б | 16 052 Б | **0** |
 
-Панель разом із рендером — це ~5.5 кБ понад голе ядро; `Menu` додає ~3 кБ флеш і ~1.6 кБ RAM
+Читайте цю таблицю чесно: **видалення дубліката коштувало флешу, а не зекономило його.**
+Кожна збірка, яка не використовує меню, побайтово ідентична — видалення безкоштовне, якщо ви
+й так за меню не платили, — але збірка Carminat, яка меню *використовує*, зросла на **~1 кБ
+флеш і 128 Б RAM**. Саме стільки коштує узагальнення: у видаленому `Menu` геометрія була
+вварена як константи часу компіляції, і він викликав `IPanel` напряму, тоді як `MenuModel`
+множить на переданий йому `rowChars` і дістається панелі через віртуальний `IMenuRenderer`, а
+`CarminatDisplay` тепер тримає ще й об'єкт-адаптер. Єдиний рядок, який *зменшився*, —
+`ex09_menu_widget`, на 1 390 Б, бо приклад перестав носити власну копію адаптера Carminat і
+користується бібліотечним, — це той самий ефект у меншому масштабі й причина, чому обмін усе
+одно вигідний. Кілобайт — це ціна; одна машина станів замість двох, щоб виправлення
+застосовувалося один раз, — це те, що за неї купують. Іншу ціну проєкт уже заплатив: FSM
+синхронізації був продубльований у `CarminatDisplay::tick()` та `UpdateListBase::tick()`, і
+**обидві копії несли ті самі два дефекти дослівно**.
+
+Панель разом із рендером — це ~5.5 кБ понад голе ядро; `Menu` додає ~4 кБ флеш і ~1.7 кБ RAM
 (зменшіть `AFFA_MENU_MAX_ITEMS` / `AFFA_MENU_MAX_FIELDS`, якщо це критично); twin-и — ~13 кБ
 флеш і ~9.6 кБ RAM, і саме тому їх вимкнено на цільовій платі. `ex90_bench_ota` визначається
 переважно WiFi і HTTP-сервером і використовує розділ OTA на 1.4 МБ.
@@ -883,11 +975,20 @@ ESP32-C3 (`board = esp32-c3-devkitm-1`, ядро Arduino 2.0.17), release, пр�
 platformio_footprint.ini` відтворює всі числа звідси, включно з обома базами вище і двома
 охоронними `#error`, чиї середовища мають *не* збиратися.
 
+> Числа нижче виміряні **до** міграції меню (один `MenuModel` + `CarminatMenuRenderer`
+> замість видаленого `carminat/Menu/`). Назви символів у стовпці підтвердження актуальні;
+> для точних байтів перезапустіть стенд.
+>
+> **Рядок `AFFA_ENABLE_MENU=0` зараз відтворити неможливо** — і це вада стенда, а не
+> прапорця: `[env:g_base]` у `platformio_footprint.ini` не передає `-D AFFA_ENABLE_MENU=1`,
+> а типове значення — `0`, тож у довідковій збірці меню вже вимкнене. Виміряно сьогодні:
+> `g_base` і `g_no_menu` різняться на **8 байтів**.
+
 | Прапорець | Флеш | RAM | Підтвердження в символах `firmware.elf` |
 | --- | ---: | ---: | --- |
 | `AFFA_ENABLE_ESP32CAN_LINK=0` | **−12 218 Б** | −1 400 Б | зникають `Esp32CanLink::begin` і всі 28 символів `CAN0`/драйвера; env узагалі без `lib_deps` і все одно лінкується |
-| `AFFA_PANEL_CARMINAT=0` | −5 536 Б | −2 752 Б | зникають усі `CarminatDisplay::*` і `affa::Menu::*` |
-| `AFFA_ENABLE_MENU=0` | −3 266 Б | −1 584 Б | зникають `Menu::handleKey`, `MenuController::*` |
+| `AFFA_PANEL_CARMINAT=0` | −5 536 Б | −2 752 Б | зникають усі `CarminatDisplay::*` і `affa::CarminatMenuRenderer::*` |
+| `AFFA_ENABLE_MENU=0` | −3 266 Б | −1 584 Б | зникають `affa::widget::MenuModel::*`, `MenuController::*` |
 | `AFFA_PANEL_UPDATELIST=0` (разом із `_MENU=0`) | −2 550 Б | −2 592 Б | зникають усі `UpdateList*` |
 | `AFFA_ENABLE_TRANSLITERATION=0` | −2 130 Б | 0 | зникає `affa::toAscii` (його заміняє вбудована обмежена копія) |
 | `AFFA_ENABLE_LOG=0` | −1 696 Б | −8 Б | зникає `affa::detail::emit`, а з ним усі формат-рядки |

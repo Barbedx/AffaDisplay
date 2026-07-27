@@ -16,7 +16,6 @@
 #include "../affa_test_support.h"
 
 #include "carminat/CarminatDisplay.h"
-#include "carminat/Menu/Menu.h"
 #include "updatelist/UpdateListDisplay.h"
 #include "vpanel/CarminatVirtualPanel.h"
 #include "vpanel/UpdateListSegVirtualPanel.h"

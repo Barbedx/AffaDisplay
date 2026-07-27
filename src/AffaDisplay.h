@@ -27,6 +27,17 @@
 #include "util/AffaLog.h"
 #include "util/AffaText.h"
 
+// The display-agnostic menu. It is not panel code — MenuModel drives any IMenuRenderer, and
+// the Carminat adapter is one of them (carminat/CarminatMenuRenderer.h, below) — so it sits
+// above the panel gates and only the feature gate applies.
+#if AFFA_ENABLE_MENU
+#  if __has_include("widget/MenuModel.h")
+#    include "widget/MenuGeometry.h"
+#    include "widget/IMenuRenderer.h"
+#    include "widget/MenuModel.h"
+#  endif
+#endif
+
 #include "link/LoopbackLink.h"
 #if AFFA_ENABLE_ESP32CAN_LINK
 #  include "link/Esp32CanLink.h"
@@ -61,7 +72,7 @@
 #    include "carminat/CarminatConstants.h"
 #    include "carminat/CarminatDisplay.h"
 #    if AFFA_ENABLE_MENU
-#      include "carminat/Menu/Menu.h"
+#      include "carminat/CarminatMenuRenderer.h"
 #      include "carminat/MenuController.h"
 #      include "carminat/IPage.h"
 #    endif

@@ -40,9 +40,12 @@ CarminatDisplay::CarminatDisplay(ICanLink& link, IClock& clock)
                       carminat::kFuncCount)
 #if AFFA_ENABLE_MENU
       ,
-      // The AffaDisplayBase subobject is fully constructed before any member is, so
-      // binding the menu's IPanel& to *this here is well defined.
-      _menu(*this, "Main Menu"),
+      // The AffaDisplayBase subobject is fully constructed before any member is, so binding
+      // the renderer's IPanel& to *this here is well defined. The model then binds to the
+      // renderer and the controller to the model, which is why they are declared in that
+      // order.
+      _menuRenderer(*this),
+      _menu(_menuRenderer, CarminatMenuRenderer::geometry(), "Main Menu"),
       _menuCtrl(_menu)
 #endif
 {
@@ -128,10 +131,10 @@ void CarminatDisplay::initializeMenu() {
 
 // The OEM convention when the menu closes: the panel goes back to the source banner. It
 // ships as a default because it is the convention, and it is replaceable because it is
-// policy — Menu::onClose() overwrites it.
+// policy — MenuModel::onClose() overwrites it.
 void CarminatDisplay::onMenuClosed(void* ctx) {
   // Deliberately dropped: this is a CloseCb with nowhere to report to, and the banner is
-  // cosmetic. An application that needs the verdict installs its own Menu::onClose().
+  // cosmetic. An application that needs the verdict installs its own onClose().
   (void)static_cast<CarminatDisplay*>(ctx)->setText("RENAULT", 0);
 }
 

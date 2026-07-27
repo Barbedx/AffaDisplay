@@ -92,8 +92,9 @@
 // Feature gates
 // ---------------------------------------------------------------------------
 
-// Menu, MenuController, IPage routing, nav(), getMenu(). The single largest optional
-// block. 0: nav() returns NotSupported and supports(Feature::Menu) is false.
+// src/widget/ (MenuGeometry, IMenuRenderer, MenuModel), CarminatMenuRenderer,
+// MenuController, IPage routing, nav(), getMenu(). The single largest optional block.
+// 0: nav() returns NotSupported and supports(Feature::Menu) is false.
 // OFF BY DEFAULT, AND THE REASON IS A CORRECTION.
 //
 // This block was originally on, on the argument that the Carminat menu is a wire-level
@@ -116,11 +117,16 @@
 // not a coincidence: it is the only place where this library decided something on the
 // application's behalf.
 //
-// So: Menu, MenuController, IPage, nav() and getMenu() are a CONVENIENCE WIDGET, shipped
-// because it is real, tested, byte-exact code that saves an afternoon — not because it is
-// part of the protocol. Turn it on if it fits; write your own against showMenu() +
-// highlightItem() + the decoded Key events if it does not. See docs/API.md §7b and the
-// README's boundary note.
+// So: the menu model, its Carminat adapter, MenuController, IPage, nav() and getMenu() are a
+// CONVENIENCE WIDGET, shipped because it is real, tested, byte-exact code that saves an
+// afternoon — not because it is part of the protocol. Turn it on if it fits; write your own
+// against showMenu() + highlightItem() + the decoded Key events if it does not — or keep the
+// state machine and write ~20 lines of IMenuRenderer, which is what src/widget/ is for. See
+// docs/MENU-WIDGET.md, docs/API.md §7b and the README's boundary note.
+//
+// THE MODEL IS NOT PANEL CODE, so src/widget/ is gated on THIS FLAG ALONE, with no panel
+// gate: it compiles on the host with no Arduino, no CAN and no panel header, and an
+// application can drive it onto a display this library has never heard of.
 //
 // 0: nav() returns NotSupported, supports(Feature::Menu) is false, and getMenu() is not
 // compiled. The panel classes and every render call are unaffected.

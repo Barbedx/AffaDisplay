@@ -21,9 +21,11 @@ Needs `-D AFFA_PANEL_CARMINAT=1 -D AFFA_ENABLE_MENU=1` (both are set by the env)
 
 ## Two things that look alike and are not
 
-`Menu` is the state machine: a window over a list, a selection, an edit mode, and the
-knowledge that moving the selection *inside* the visible two rows is a **highlight** while
-moving it outside is a **redraw**. It calls `showMenu()` and `highlightItem()` for you.
+`affa::Menu` — an alias for `affa::widget::MenuModel` since the menu stopped being panel code
+— is the state machine: a window over a list, a selection, an edit mode, and the knowledge
+that moving the selection *inside* the visible two rows is a **highlight** while moving it
+outside is a **redraw**. `affa::CarminatMenuRenderer`, the adapter `CarminatDisplay` builds
+for it, turns that into `showMenu()` and `highlightItem()` for you.
 
 `showMenu()` / `highlightItem()` are the two wire operations. VolUp calls them directly to
 draw a screen with no state machine attached — the same bytes, no library state changed.

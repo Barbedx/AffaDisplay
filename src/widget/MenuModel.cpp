@@ -19,8 +19,9 @@ constexpr uint8_t kNoItem = 0xFF;
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// Field builders — identical to the Carminat widget's, so an item table written for one
-// works with the other after a namespace change and nothing else.
+// Field builders — identical to the deleted Carminat widget's, which is why an item table
+// written against that one still compiles: carminat/CarminatDisplay.h re-exports these three
+// and MenuItem/Field/FieldType into namespace affa under their old names.
 // ---------------------------------------------------------------------------
 
 Field integerField(int32_t value, int32_t min, int32_t max, int32_t step,
@@ -209,10 +210,8 @@ void MenuModel::rowText(uint8_t index, char* out, size_t outSize) const {
   out[n] = '\0';
 }
 
-// One redraw is one whole window: begin, every row top to bottom, end. The model has no way
-// to say "only the highlight moved" through this seam and does not try — see the note in
-// IMenuRenderer.h about why that decision belongs to the adapter, which is the only layer
-// that knows what a message costs.
+// One redraw is one whole window: begin, every row top to bottom, end. The cheap "only the
+// highlight moved" case is NOT this function — it is renderSelectionMove(), below.
 void MenuModel::render() {
   if (_count == 0) {
     AFFA_LOGW(kTag, "render on an empty menu");
@@ -231,6 +230,22 @@ void MenuModel::render() {
     _renderer.row(r, buf, r == _selectedRow);
   }
   _renderer.endFrame();
+}
+
+// THE CONDITION, stated once so the two callers do not have to restate it: `top` is
+// _selectedIndex - _selectedRow, so a move that changes BOTH by one leaves the window exactly
+// where it was. Same window + same items + not editing (selectNext/selectPrev are unreachable
+// while editing, and the '*' / '<>' markers are the only way the selection touches the text)
+// means every row's text is what the last frame put there, and scrollMask() — a function of
+// `top` and _count alone — is unchanged too. Nothing but the lit row differs, which is
+// precisely what highlightOnly() is allowed to assume.
+//
+// A renderer that cannot do it returns false (the default) and gets the frame it would have
+// got before this call existed. On the Carminat the true branch is one 07 29 01 frame against
+// a 96-byte ISO-TP screen — the whole reason the old Menu::selectNext had this branch.
+void MenuModel::renderSelectionMove() {
+  if (_renderer.highlightOnly(_selectedRow)) return;
+  render();
 }
 
 // ---------------------------------------------------------------------------
@@ -272,18 +287,23 @@ void MenuModel::selectNext() {
     if (!_geom.wrap) return;                          // the Carminat behaviour: no wrap
     _selectedIndex = 0;
     _selectedRow   = 0;
+    // A wrap is a whole frame, not a highlight: it takes the window from one end of the list
+    // to the other. (On a geometry where the entire list fits the window it lands back on the
+    // same items — but that is a property of the content, not of the move, and the model does
+    // not claim the cheap path on an accident.)
     render();
     return;
   }
   ++_selectedIndex;
   if (_selectedRow + 1 < _geom.rows) {
     // The selection moved INSIDE the visible window: the text is unchanged and only the lit
-    // row differs. On the Carminat that was one frame instead of a 96-byte screen; here the
-    // adapter recognises it by getting an identical frame with a different `selected`.
+    // row differs, so the renderer gets offered the one-frame path.
     ++_selectedRow;
+    renderSelectionMove();
+    return;
   }
-  // else: the selection was already on the last row, so the window scrolls under it and
-  // _selectedRow stays put.
+  // The selection was already on the last row, so the window scrolls under it and
+  // _selectedRow stays put: every row's text changes and it is a whole frame.
   render();
 }
 
@@ -299,8 +319,12 @@ void MenuModel::selectPrev() {
     return;
   }
   --_selectedIndex;
-  if (_selectedRow > 0) --_selectedRow;               // inside the window
-  // else: the window scrolls up and _selectedRow stays 0.
+  if (_selectedRow > 0) {                             // inside the window
+    --_selectedRow;
+    renderSelectionMove();
+    return;
+  }
+  // The window scrolls up and _selectedRow stays 0.
   render();
 }
 

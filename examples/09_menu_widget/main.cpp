@@ -18,17 +18,23 @@
 // time. The selection resets to the top, which is why the scripted key stream restarts with
 // it and every display gets the identical sequence.
 //
-// THE LIBRARY'S OWN Menu IS STILL COMPILED IN (AFFA_ENABLE_MENU turns on both) and is left
-// EMPTY. setup() clears its hotkey so hold-Load cannot reach it; every key arrives in
-// onKey() and is routed into OUR model. That is the migration story in miniature: the new
-// widget runs beside the old one, and CarminatDisplay has not been touched.
+// CarminatDisplay'S OWN MENU IS THE SAME MODEL. Since the migration there is no second menu
+// implementation anywhere: getMenu() hands out a widget::MenuModel driven through
+// affa::CarminatMenuRenderer, which is the very adapter this example uses for target 1. What
+// this file adds is a SECOND, application-owned model on the same panel — so setup() clears
+// the hotkey, the library's (empty) menu stays out of the way, and every key arrives in
+// onKey() to be routed into OUR model.
 
 #include <Arduino.h>
 #include <AffaDisplay.h>
 #include <widget/MenuModel.h>
 #include <new>
 
-#include "CarminatMenuRenderer.h"
+// The Carminat adapter is NOT in this folder: it ships in the library, as
+// src/carminat/CarminatMenuRenderer.h, because CarminatDisplay's own menu is built on it.
+// Copying it here so the example could own one would be the second implementation this
+// library just finished deleting. The other two adapters below stay local — they are what
+// writing your own looks like.
 #include "InfoMenuRenderer.h"
 #include "TextPanelRenderer.h"
 
@@ -38,6 +44,7 @@
 
 namespace {
 
+using affa::CarminatMenuRenderer;
 using affa::widget::MenuGeometry;
 using affa::widget::MenuItem;
 using affa::widget::MenuModel;
@@ -265,9 +272,9 @@ void setup() {
   delay(200);
   if (!g_link.begin(kPins, 500000)) Serial.println("CAN did not come up — serial demo only");
 
-  // The library's own Menu is compiled in, empty, and must stay out of the way: without this
-  // the OEM hotkey would try to open it on every hold-Load. It refuses (an empty menu never
-  // opens), but saying so explicitly is the point — this example does not use it.
+  // CarminatDisplay's own menu is compiled in, empty, and must stay out of the way: without
+  // this the OEM hotkey would try to open it on every hold-Load. It refuses (an empty menu
+  // never opens), but saying so explicitly is the point — this example drives its own model.
   g_display.clearMenuHotkey();
 
   g_display.onKey(&onKey, nullptr);

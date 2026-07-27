@@ -21,19 +21,42 @@ algorithm is the one that has been on the glass for months — the same window a
 same scroll-arrow derivation, the same coarse step, the same clamps, the same
 `field 0 → 1 → 2 → out`. The only thing generalised is the **geometry**.
 
-> `src/carminat/Menu/` (`Menu`, `MenuController`, `IPage`) is untouched and still ships.
-> The two widgets live side by side; migrating `CarminatDisplay` onto `MenuModel` is a
-> separate change and has not been made.
+> **There is exactly one menu implementation.** `src/carminat/Menu/` — the two-row widget
+> with the panel welded into it — has been **deleted**, and `CarminatDisplay` now holds a
+> `widget::MenuModel` plus an `affa::CarminatMenuRenderer`. Shipping the extraction *beside*
+> the original was a safety measure for one step, and keeping it would have been a second
+> copy of a state machine on purpose — the exact failure this project already paid for once,
+> when the sync FSM was duplicated in `CarminatDisplay::tick()` and `UpdateListBase::tick()`
+> and both copies carried the same two defects verbatim.
+>
+> The application-facing names survive as **aliases** in `carminat/CarminatDisplay.h`:
+> `affa::Menu` is `affa::widget::MenuModel`, and `affa::MenuItem`, `affa::Field`,
+> `affa::FieldType`, `integerField`, `readOnlyField`, `listField` name the `widget::` ones.
+> `getMenu()` keeps its name and returns `widget::MenuModel&`. Two observable differences:
+> `render()` returns **void** (the verdict is `menuRenderer().lastResult()` — only the layer
+> holding the `IPanel` can answer it), and rows truncate at the injected `rowChars` (26)
+> rather than at `AFFA_MENU_ROW_MAX - 1`.
 
 ---
 
-## 1. The three files, and the line between them
+## 1. The files, and the line between them
 
 ```
 src/widget/MenuGeometry.h    rows, rowChars, wrap — the display's shape, injected
 src/widget/MenuModel.{h,cpp} items, fields, selection, window, editing. NO panel.
 src/widget/IMenuRenderer.h   the seam an adapter implements
+
+src/carminat/CarminatMenuRenderer.{h,cpp}   the adapter for THIS panel: 2 x 26, the
+                                            0x7E/0x7F row tags, showMenu + highlightItem
+src/carminat/MenuController.{h,cpp}         navigation policy: the page stack, and the
+                                            (Key, KeyEdge) -> intent map
+src/carminat/IPage.h                        a full-screen page pushed in front of the menu
 ```
+
+The controller and `IPage` did **not** fold into the model, and that is deliberate: which
+gesture opens a menu, who gets a key first, and what happens to the glass when a page is
+popped are navigation *policy*. The model has no `Key` vocabulary at all — six intents, no
+enum — precisely so that layer can be replaced without touching it.
 
 | The **model** owns | An **adapter** (renderer) owns |
 | --- | --- |
@@ -45,6 +68,7 @@ src/widget/IMenuRenderer.h   the seam an adapter implements
 | The scroll mask, derived from the window position | What a mask *means* on this display: a pass-through byte, two glyphs, or nothing |
 | Clamping, wrapping, step and coarse step | Nothing |
 | Firing `onChange` / `onActivate` / `onClose` | Nothing |
+| Which redraws are *whole* and which are only the lit row moving (`highlightOnly`) — a fact about the state machine, not about the glass | What that is worth: one frame, one cell, or nothing it can do |
 | **Never**: frames, ISO-TP, CAN, `Result`, what a redraw costs | **Exactly that**: how to draw, and how expensive it is |
 
 `src/widget/` compiles on the native host with nothing but the C++17 standard library: no
@@ -92,6 +116,10 @@ struct IMenuRenderer {
   virtual void beginFrame(const char* header, uint8_t scrollMask) = 0;
   virtual void row(uint8_t index, const char* text, bool selected) = 0;
   virtual void endFrame() = 0;
+
+  // Only the lit row changed. Override to move the highlight without redrawing; the
+  // default declines and the model emits a full frame instead.
+  virtual bool highlightOnly(uint8_t index) { (void)index; return false; }
 };
 ```
 
@@ -131,16 +159,37 @@ arrow pointing at items that are not there is what sent someone hunting for them
 > window is now at the bottom. Any documentation that describes the arrows in terms of "which
 > item you are on" is wrong for half the reachable states.
 
-### What the seam deliberately does NOT carry
+### `highlightOnly` — the one call that is not a whole frame
 
-There is no "only the highlight moved" call. On the Carminat a full redraw is a 96-byte
-ISO-TP screen and a highlight change is one small frame — ~14× the bus time — but a three-call
-frame protocol cannot express the difference without inventing a second entry point, and the
-model does not know what a message costs. **So the model always emits a whole frame, and an
-adapter that cares recovers the distinction**: remember the header, rows and mask you last
-*sent*; identical text + identical mask + a different `selected` row is precisely the
-highlight-only case. `examples/09_menu_widget/CarminatMenuRenderer.h` does exactly this; an
-adapter that skips it doubles the bus cost of turning the wheel and nothing will fail.
+On the Carminat a full redraw is a 96-byte ISO-TP screen and a highlight change is one
+`07 29 01` frame — **~14× less bus time**, which is why `RenderSlot::Menu` and
+`RenderSlot::Highlight` are different slots. Moving the selection *inside* the visible window
+changes nothing but which row is lit, and `beginFrame`/`row`/`endFrame` cannot say that. So
+there is a fourth call that can.
+
+```cpp
+bool highlightOnly(uint8_t index);   // index: the ROW index, 0..rows-1, that is now lit
+```
+
+The model raises it **exactly when the window did not move and only the selected row
+changed** — `top` is `selectedIndex - selectedRow`, so a move that changes both by one leaves
+the window, the text and the mask untouched. This is the same condition the pre-extraction
+`Menu::selectNext` used to call `highlightItem()` alone.
+
+Everything else is a whole frame: the window scrolling, entering or leaving edit, a value
+changing, `open()`, `render()`, `setFieldValue()`, and a wrap from one end of the list to the
+other.
+
+**The default is correct, not fast**, and that is why the method is not pure virtual. A
+renderer that cannot move a highlight — anything that redraws the whole glass, a screen with
+no selection tag at all — overrides nothing, returns `false` by inheritance, and gets the
+frame it would have got anyway. Returning `true` is a promise that the highlight *did* move.
+
+> This deliberately does **not** live in the adapters. The earlier design had every adapter
+> cache its last frame and infer the case by comparing text + mask + `selected`; that is an
+> obligation on every adapter, silently paid in bus time by the ones that skip it — nothing
+> fails, the wheel just costs twice what it should. A cost only the seam can make free for
+> everybody belongs in the seam.
 
 ---
 
@@ -160,8 +209,9 @@ menu.render();                // re-emit the whole window
 ```
 
 Navigation — one method per **intent**, each returning `true` when the model consumed it
-(`false` means "the menu is closed, this key is yours", which is what `Menu::handleKey`
-returned):
+(`false` means "the menu is closed, this key is yours", which is what the deleted
+`Menu::handleKey` returned; `MenuController::routeKey` is where that map now lives on this
+panel, and its `default:` is what keeps the transport keys reaching the application):
 
 | Method | Not editing | Editing |
 | --- | --- | --- |
@@ -228,6 +278,12 @@ class LcdMenuRenderer final : public affa::widget::IMenuRenderer {
 };
 ```
 
+`highlightOnly()` is not overridden here, so this adapter redraws on every wheel detent — the
+correct, boring answer. A panel that can address one cell cheaply overrides it: blank the `>`
+at the row it last lit, write it at `index`, `return true`. Note that only the *new* row is
+passed — an adapter that has to erase the old marker keeps it from the `selected` flags of the
+last frame, which it already saw.
+
 Driving it:
 
 ```cpp
@@ -247,13 +303,82 @@ translated). Between them they cover every legal thing an adapter can do with th
 
 ## 6. Where it is tested
 
-`test/test_menu_widget/` — 38 cases. Twelve behavioural cases written once and instantiated at
+`test/test_menu_widget/` — 51 cases. Sixteen behavioural cases written once and instantiated at
 **`rows` = 2, 3 and 6** over the same three-item model (so the identical list *fits* the taller
-windows and must lose its arrows), plus two non-parameterised cases. A recorder polices every
+windows and must lose its arrows), plus three non-parameterised cases. A recorder polices every
 redraw: begin/rows-in-order/end never nested, exactly `rows` rows per frame, no row longer than
 `rowChars`, exactly one selected row. Expectations are hand-written per geometry, not computed
 with the model's own expression.
 
+Section 10 of the suite pins `highlightOnly()` at every geometry: a move inside the window
+calls it and emits **no** frame; a move across the window boundary emits a frame and does
+**not** call it; a renderer that answers `false` gets a full frame every time; nothing that
+changes row *text* (entering edit, a value moving, leaving edit) ever takes the cheap path.
+The recorder used by the other thirty-eight cases does **not** override `highlightOnly()`, so
+those cases are simultaneously the assertion that the default still emits every frame it did
+before the call existed.
+
 The suite includes **only** `<unity.h>`, the C headers and `widget/MenuModel.h`. That include
 list is itself the claim that the model is display-agnostic, and it stops compiling the day
 that stops being true.
+
+### 6.1 The evidence that the migration did not change behaviour
+
+`test_menu_widget` proves the model is *correct*. It cannot prove that `CarminatDisplay` still
+behaves the way it did, because it never mentions `CarminatDisplay`. That job belongs to the
+suites that were written against the **deleted** widget, through the display's public API,
+before `MenuModel` existed:
+
+| Suite | What it holds the migration to |
+| --- | --- |
+| `test_nav` | key routing, the page stack, and **frame counts on the wire** for wheel moves, edit entry and exit |
+| `test_bench_surface` | the web console's acceptance list, driven through the same public API |
+| `test_twin` | the virtual panel decoding real menu screens off the bus |
+| `test_seam` | that hold-`Load` is the OEM open gesture and `getMenu()` is reachable through the seam |
+| `test_core`, `test_updatelist_wire` | that a panel with no menu still answers `supports(Feature::Menu)` with false |
+
+**These suites are the acceptance criterion, and they pass unchanged.** No assertion, rig,
+recorder or `RUN_TEST` line was weakened, and the frame-count assertions in particular are
+what confirm the bus cost did not move. Two mechanical edits were unavoidable and neither
+touches an expectation: `test_nav` and `test_twin` both lost a now-dangling
+`#include "carminat/Menu/Menu.h"` (the names come from the alias block in
+`CarminatDisplay.h`), and one `ASSERT_RESULT(Ok, …getMenu().render())` became
+`…getMenu().render(); ASSERT_RESULT(Ok, …menuRenderer().lastResult())`, because `render()`
+now returns `void` and the verdict moved to the adapter. `test_nav` also gained one *new*
+case — the transport keys (`SrcNext`, `SrcPrev`, `VolUp`, `VolDown`, `Pause`) must still
+reach the application while the menu is open — because the `(Key, KeyEdge)` map was
+hand-rewritten into `MenuController` and that was the most plausible way to break it.
+
+## 7. What collapsing the two implementations cost
+
+Measured, not asserted: a clean `pio run` of every environment on the tree that still had
+`src/carminat/Menu/`, and another on this one, same day and same toolchain.
+
+| Env | Flash before | Flash after | Δ | RAM before | RAM after | Δ |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ex03_carminat_menu` | 274 672 B | 275 700 B | **+1 028 B** | 17 900 B | 18 028 B | **+128 B** |
+| `ex08_radio_mitm` | 274 700 B | 275 740 B | +1 040 B | 17 756 B | 17 884 B | +128 B |
+| `ex90_bench_ota` | 899 032 B | 900 040 B | **+1 008 B** | 71 124 B | 71 236 B | **+112 B** |
+| `ex09_menu_widget` | 278 294 B | 276 904 B | **−1 390 B** | 19 876 B | 19 908 B | +32 B |
+| every build without a menu | — | — | **0** | — | — | **0** |
+
+Three things to read off it.
+
+**It cost flash; it did not save flash.** A Carminat build that uses a menu grew by about a
+kilobyte. That is the price of generality: the deleted `Menu` had `rows = 2` and
+`rowChars = 26` as compile-time constants and called `IPanel` directly, while `MenuModel`
+multiplies by a `rowChars` it is handed and reaches the panel through a virtual
+`IMenuRenderer`, and `CarminatDisplay` now holds an adapter object next to the model. Anyone
+who expected deleting a file to shrink the binary should look at this row and adjust.
+
+**Every build that does not use a menu is byte-identical.** `size_min`, `size_all`,
+`ex02_carminat_text`, both UpdateList examples, the twin — all zero. The whole-body `#if`
+discipline held through the migration; you do not pay for the widget unless you name it.
+
+**The one row that shrank is the argument in miniature.** `ex09_menu_widget` lost 1 390 B
+because it stopped carrying its own copy of the Carminat adapter and now uses the library's.
+One copy is smaller than two, at every scale — the example just happened to be small enough
+for the effect to outrun the cost of the abstraction. That is the trade in a sentence: a
+kilobyte, in exchange for a fix landing once. The project has already paid the other side of
+this bill, when the sync state machine was duplicated across `CarminatDisplay::tick()` and
+`UpdateListBase::tick()` and **both copies carried the same two defects verbatim**.

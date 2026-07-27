@@ -11,7 +11,9 @@
 // builder, no CarminatDisplay — the include list below is the claim that the model is
 // display-agnostic, and it would stop compiling if that ever stopped being true. The
 // renderer here is a Recorder that keeps the last frame; what a frame COSTS is the adapter's
-// business (see IMenuRenderer.h) and is asserted in test_nav against the wire instead.
+// business and is asserted in test_nav against the wire instead. WHICH of the two calls the
+// model makes for a given key — a whole frame, or highlightOnly() — is the MODEL's, and
+// section 10 pins it.
 //
 // The expected values are HAND-WRITTEN per geometry rather than derived from the model's own
 // rules. A scroll-mask table computed with the same expression MenuModel uses would agree
@@ -692,6 +694,242 @@ void onChangeFiresAfterTheChangeExactlyOnce(uint8_t rows) {
 }
 
 // ---------------------------------------------------------------------------
+// 10. The highlight-only path
+// ---------------------------------------------------------------------------
+//
+// IMenuRenderer::highlightOnly() is the seam's fourth call: "only the lit row changed, the
+// text and the arrows are as the last frame left them". On the Carminat that is one 07 29 01
+// frame against a 96-byte ISO-TP screen, ~14x less bus time, and it is the reason Menu and
+// Highlight are different RenderSlots — so the model must raise it in EXACTLY the states the
+// old Menu::selectNext called highlightItem() alone, and in no others.
+//
+// This is a SECOND recorder rather than a flag on the one above, deliberately: Recorder does
+// not override highlightOnly() at all, so every one of the thirty-six cases above is also the
+// assertion that the DEFAULT still emits every frame it emitted before this call existed.
+
+// Counts both paths. `reply` is what highlightOnly() answers — a display that can move its
+// highlight (true) and one that cannot but is still offered the chance (false).
+struct HighlightRecorder final : IMenuRenderer {
+  HighlightRecorder(bool answer, uint8_t rowsPerFrame)
+      : reply(answer), expectRows(rowsPerFrame) {}
+
+  bool    reply;
+  uint8_t expectRows;
+  int     frames             = 0;
+  int     highlightCalls     = 0;
+  int     lastHighlightIndex = -1;
+  int     selectedRow        = -1;    // the lit row as of the last thing that went out
+  uint8_t rowCount           = 0;
+  uint8_t mask               = 0xEE;
+  char    rows[kMaxRecRows][AFFA_MENU_ROW_MAX] = {{0}};
+
+  void beginFrame(const char* h, uint8_t m) override {
+    TEST_ASSERT_NOT_NULL(h);
+    mask     = m;
+    rowCount = 0;
+    ++frames;
+  }
+
+  void row(uint8_t index, const char* text, bool selected) override {
+    TEST_ASSERT_LESS_THAN_MESSAGE(kMaxRecRows, rowCount, "more rows than the recorder holds");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(rowCount, index, "rows must arrive in order 0..rows-1");
+    std::snprintf(rows[rowCount], sizeof(rows[0]), "%s", text);
+    ++rowCount;
+    if (selected) selectedRow = static_cast<int>(index);
+  }
+
+  void endFrame() override {
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(expectRows, rowCount, "a frame is still the whole window");
+  }
+
+  bool highlightOnly(uint8_t index) override {
+    // The contract the model owes a renderer that takes this path: the previous frame is on
+    // the glass, so there is always one.
+    TEST_ASSERT_TRUE_MESSAGE(frames > 0, "highlightOnly arrived before any frame");
+    ++highlightCalls;
+    lastHighlightIndex = static_cast<int>(index);
+    if (reply) selectedRow = static_cast<int>(index);   // the renderer drew it itself
+    return reply;
+  }
+
+  const char* text(uint8_t i) const { return (i < rowCount) ? rows[i] : "<row not emitted>"; }
+};
+
+void fillItems(MenuModel& m, uint8_t n) {
+  static const char* const kNames[] = {"I0", "I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8"};
+  for (uint8_t i = 0; i < n; ++i) {
+    MenuItem it;
+    it.label = kNames[i];
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(i), m.addItem(it));
+  }
+}
+
+struct HiRig {
+  HighlightRecorder rec;
+  MenuModel         m;
+
+  HiRig(uint8_t rows, bool reply)
+      : rec(reply, rows), m(rec, makeGeometry(rows, 26, false), "MENU") {}
+};
+
+// A list LONGER than the window, so both cases are reachable at every geometry: rows-1 moves
+// that stay inside the window, then one that makes it scroll.
+uint8_t longerThanTheWindow(uint8_t rows) { return static_cast<uint8_t>(rows + 3); }
+
+// Moving the selection inside the window calls highlightOnly() and emits NO full frame.
+void aMoveInsideTheWindowIsAHighlightNotAFrame(uint8_t rows) {
+  HiRig rig(rows, /*reply=*/true);
+  fillItems(rig.m, longerThanTheWindow(rows));
+  rig.m.open();
+
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, rig.rec.frames, M(rows, "open() draws one whole frame"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, rig.rec.highlightCalls,
+                                M(rows, "open() is a redraw, never a highlight"));
+
+  const int framesAtOpen = rig.rec.frames;
+  for (uint8_t r = 1; r < rows; ++r) {
+    TEST_ASSERT_TRUE_MESSAGE(rig.m.next(), M(rows, "an open model consumes next()"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(framesAtOpen, rig.rec.frames,
+                                  M(rows, "a move inside the window drew NO full frame"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(r, rig.rec.highlightCalls,
+                                  M(rows, "exactly one highlight per in-window move"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(r, rig.rec.lastHighlightIndex,
+                                  M(rows, "the ROW INDEX that is now lit"));
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(r, rig.m.selectedRow(), M(rows, "and it is the model's row"));
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, rig.m.topIndex(), M(rows, "the window has not moved"));
+  }
+
+  // Back up the same way. The window still has not moved, so every step is a highlight.
+  for (uint8_t r = static_cast<uint8_t>(rows - 1); r > 0; --r) {
+    const int hi = rig.rec.highlightCalls;
+    TEST_ASSERT_TRUE_MESSAGE(rig.m.prev(), M(rows, "an open model consumes prev()"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(framesAtOpen, rig.rec.frames,
+                                  M(rows, "walking back inside the window drew no frame either"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(hi + 1, rig.rec.highlightCalls, M(rows, "one highlight"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(r - 1, rig.rec.lastHighlightIndex, M(rows, "moving up a row"));
+  }
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, rig.m.selectedIndex(), M(rows, "back at the first item"));
+
+  // A key that moves nothing is neither: no wrap, no frame, and no highlight for a highlight
+  // that would say what the panel already shows.
+  const int frames = rig.rec.frames;
+  const int hi     = rig.rec.highlightCalls;
+  TEST_ASSERT_TRUE_MESSAGE(rig.m.prev(), M(rows, "prev() at the top is still consumed"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(frames, rig.rec.frames, M(rows, "and draws no frame"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(hi, rig.rec.highlightCalls, M(rows, "and no highlight either"));
+}
+
+// Crossing the window boundary emits a full frame and does NOT call highlightOnly(): every
+// row's text changes when the window scrolls, which is precisely what the cheap path may not
+// assume.
+void aMoveAcrossTheBoundaryIsAFrameNotAHighlight(uint8_t rows) {
+  HiRig rig(rows, /*reply=*/true);
+  fillItems(rig.m, longerThanTheWindow(rows));
+  rig.m.open();
+
+  for (uint8_t r = 1; r < rows; ++r) rig.m.next();     // fill the window, highlights only
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(static_cast<uint8_t>(rows - 1), rig.m.selectedRow(),
+                                  M(rows, "the selection is on the last row of the window"));
+
+  int frames = rig.rec.frames;
+  int hi     = rig.rec.highlightCalls;
+
+  TEST_ASSERT_TRUE_MESSAGE(rig.m.next(), M(rows, "next() at the bottom of the window"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(frames + 1, rig.rec.frames,
+                                M(rows, "the window scrolled, so a WHOLE frame went out"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(hi, rig.rec.highlightCalls,
+                                M(rows, "and highlightOnly was NOT called"));
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, rig.m.topIndex(), M(rows, "the window moved by one item"));
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(static_cast<uint8_t>(rows - 1), rig.m.selectedRow(),
+                                  M(rows, "and the selection stayed on the last row"));
+  TEST_ASSERT_EQUAL_STRING_MESSAGE("I1", rig.rec.text(0),
+                                   M(rows, "the frame carries the NEW window's text"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(rows - 1, rig.rec.selectedRow,
+                                M(rows, "with the right row lit"));
+
+  // Walk back up to row 0 — highlights — and then one more, which scrolls the window the
+  // other way and is a frame again.
+  for (uint8_t r = static_cast<uint8_t>(rows - 1); r > 0; --r) rig.m.prev();
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, rig.m.selectedRow(), M(rows, "at the top row of the window"));
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, rig.m.topIndex(), M(rows, "the window is still where it was"));
+
+  frames = rig.rec.frames;
+  hi     = rig.rec.highlightCalls;
+  TEST_ASSERT_TRUE_MESSAGE(rig.m.prev(), M(rows, "prev() at the top of the window"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(frames + 1, rig.rec.frames,
+                                M(rows, "scrolling up is a whole frame too"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(hi, rig.rec.highlightCalls, M(rows, "and not a highlight"));
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, rig.m.topIndex(), M(rows, "the window is back at the top"));
+  TEST_ASSERT_EQUAL_STRING_MESSAGE("I0", rig.rec.text(0), M(rows, "showing item 0 again"));
+}
+
+// A renderer that returns false from highlightOnly() gets a full frame EVERY time — the
+// fallback is not a fast path with a hole in it, it is the behaviour that shipped.
+void aRendererThatDeclinesGetsAFullFrameEveryTime(uint8_t rows) {
+  HiRig rig(rows, /*reply=*/false);
+  fillItems(rig.m, longerThanTheWindow(rows));
+  rig.m.open();
+
+  for (uint8_t r = 1; r < rows; ++r) {
+    const int frames = rig.rec.frames;
+    TEST_ASSERT_TRUE_MESSAGE(rig.m.next(), M(rows, "next() consumed"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(frames + 1, rig.rec.frames,
+                                  M(rows, "declining the cheap path means a whole frame"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(r, rig.rec.highlightCalls,
+                                  M(rows, "it was offered the cheap path first"));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(r, rig.rec.selectedRow,
+                                  M(rows, "and the frame lights the new row"));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("I0", rig.rec.text(0),
+                                     M(rows, "the window did not move, so row 0 is item 0"));
+  }
+
+  // The scroll that follows is a frame as well, with no offer made: identical cost to the
+  // in-window move, which is exactly the regression this call exists to prevent.
+  const int frames = rig.rec.frames;
+  const int hi     = rig.rec.highlightCalls;
+  rig.m.next();
+  TEST_ASSERT_EQUAL_INT_MESSAGE(frames + 1, rig.rec.frames, M(rows, "the scroll is a frame"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(hi, rig.rec.highlightCalls, M(rows, "with nothing offered"));
+}
+
+// Only a SELECTION move takes the cheap path. Entering edit, changing a value and leaving
+// edit all change the row's text ('*', '<>', the value itself) and must redraw, even though
+// the selection has not moved a row.
+void onlyASelectionMoveTakesTheCheapPath(uint8_t rows) {
+  HiRig rig(rows, /*reply=*/true);
+  MenuItem it;
+  it.label      = "Bright";
+  it.fields[0]  = integerField(50, 0, 100, 5, 10, "%");
+  it.fields[1]  = listField(kModes, 3, 0);
+  it.fieldCount = 2;
+  TEST_ASSERT_EQUAL_INT(0, rig.m.addItem(it));
+  MenuItem second;
+  second.label = "Second";
+  TEST_ASSERT_EQUAL_INT(1, rig.m.addItem(second));
+  rig.m.open();
+
+  const int hi = rig.rec.highlightCalls;
+  int frames   = rig.rec.frames;
+
+  rig.m.select();                                    // enter edit: the row grows '*' and '<>'
+  TEST_ASSERT_EQUAL_INT_MESSAGE(++frames, rig.rec.frames, M(rows, "entering edit redraws"));
+  rig.m.next();                                      // 50 -> 55: the value on the row changed
+  TEST_ASSERT_EQUAL_INT_MESSAGE(++frames, rig.rec.frames, M(rows, "a value change redraws"));
+  rig.m.select();                                    // field 0 -> 1: the markers moved
+  TEST_ASSERT_EQUAL_INT_MESSAGE(++frames, rig.rec.frames, M(rows, "advancing a field redraws"));
+  rig.m.select();                                    // leave edit: the markers went away
+  TEST_ASSERT_EQUAL_INT_MESSAGE(++frames, rig.rec.frames, M(rows, "leaving edit redraws"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(hi, rig.rec.highlightCalls,
+                                M(rows, "not one of those was a highlight-only move"));
+
+  // And the selection move that follows is, which is the difference the whole call is about.
+  TEST_ASSERT_TRUE(rig.m.next());
+  TEST_ASSERT_EQUAL_INT_MESSAGE(frames, rig.rec.frames, M(rows, "the wheel drew no frame"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(hi + 1, rig.rec.highlightCalls, M(rows, "it moved the highlight"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, rig.rec.lastHighlightIndex, M(rows, "onto row 1"));
+}
+
+// ---------------------------------------------------------------------------
 // Not parameterised: the geometry itself
 // ---------------------------------------------------------------------------
 
@@ -730,6 +968,26 @@ void test_the_geometry_is_sanitised_once_at_construction(void) {
   TEST_ASSERT_EQUAL_STRING("Bright", rec.text(0));
 }
 
+// THE DEFAULT MUST BE CORRECT, NOT FAST. Recorder does not override highlightOnly() at all —
+// it is the renderer somebody writes in twenty lines against the three pure virtuals, exactly
+// as docs/MENU-WIDGET.md §5 shows — and it must still see every frame it would have seen
+// before the fourth call existed. That is why highlightOnly() is not pure virtual, and this
+// is the case that would fail if the base ever returned true.
+void test_the_default_highlightOnly_falls_back_to_a_full_frame(void) {
+  Rig rig(2);
+  rig.addFillerItems(4);
+  rig.m.open();
+
+  const int frames = rig.rec.frames;
+  TEST_ASSERT_TRUE(rig.m.next());
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, rig.m.selectedRow(), "the move was inside the window");
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, rig.m.topIndex(), "and the window did not move");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(frames + 1, rig.rec.frames,
+                                "a renderer that says nothing still gets the whole frame");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, rig.rec.selectedRow, "with the new row lit");
+  TEST_ASSERT_EQUAL_STRING_MESSAGE("I0", rig.rec.text(0), "and the same items on it");
+}
+
 // ---------------------------------------------------------------------------
 // Every behavioural test above, at every geometry.
 // ---------------------------------------------------------------------------
@@ -751,6 +1009,10 @@ AT_EVERY_GEOMETRY(aListFieldReachesBothEnds)
 AT_EVERY_GEOMETRY(aReadOnlyFieldIsWalkedPastButNeverEdited)
 AT_EVERY_GEOMETRY(rowTextTruncatesAtRowChars)
 AT_EVERY_GEOMETRY(onChangeFiresAfterTheChangeExactlyOnce)
+AT_EVERY_GEOMETRY(aMoveInsideTheWindowIsAHighlightNotAFrame)
+AT_EVERY_GEOMETRY(aMoveAcrossTheBoundaryIsAFrameNotAHighlight)
+AT_EVERY_GEOMETRY(aRendererThatDeclinesGetsAFullFrameEveryTime)
+AT_EVERY_GEOMETRY(onlyASelectionMoveTakesTheCheapPath)
 
 }  // namespace
 
@@ -808,8 +1070,25 @@ int main(int, char**) {
   RUN_TEST(test_onChangeFiresAfterTheChangeExactlyOnce_rows3);
   RUN_TEST(test_onChangeFiresAfterTheChangeExactlyOnce_rows6);
 
+  RUN_TEST(test_aMoveInsideTheWindowIsAHighlightNotAFrame_rows2);
+  RUN_TEST(test_aMoveInsideTheWindowIsAHighlightNotAFrame_rows3);
+  RUN_TEST(test_aMoveInsideTheWindowIsAHighlightNotAFrame_rows6);
+
+  RUN_TEST(test_aMoveAcrossTheBoundaryIsAFrameNotAHighlight_rows2);
+  RUN_TEST(test_aMoveAcrossTheBoundaryIsAFrameNotAHighlight_rows3);
+  RUN_TEST(test_aMoveAcrossTheBoundaryIsAFrameNotAHighlight_rows6);
+
+  RUN_TEST(test_aRendererThatDeclinesGetsAFullFrameEveryTime_rows2);
+  RUN_TEST(test_aRendererThatDeclinesGetsAFullFrameEveryTime_rows3);
+  RUN_TEST(test_aRendererThatDeclinesGetsAFullFrameEveryTime_rows6);
+
+  RUN_TEST(test_onlyASelectionMoveTakesTheCheapPath_rows2);
+  RUN_TEST(test_onlyASelectionMoveTakesTheCheapPath_rows3);
+  RUN_TEST(test_onlyASelectionMoveTakesTheCheapPath_rows6);
+
   RUN_TEST(test_a_closed_model_consumes_nothing);
   RUN_TEST(test_the_geometry_is_sanitised_once_at_construction);
+  RUN_TEST(test_the_default_highlightOnly_falls_back_to_a_full_frame);
 
   return UNITY_END();
 }

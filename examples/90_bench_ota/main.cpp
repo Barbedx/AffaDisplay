@@ -977,8 +977,15 @@ void execCmd(const Cmd& c) {
     case Op::MenuShow: {
       affa::Menu& m = g_display.getMenu();
       affa::Result r;
-      if (!m.isOpen()) r = g_display.nav(affa::NavCommand::Open);
-      else             r = m.render();
+      if (!m.isOpen()) {
+        r = g_display.nav(affa::NavCommand::Open);
+      } else {
+        // The model returns void: "did the frames reach the panel" is not a question a UI
+        // state machine can answer. The adapter holding the IPanel is, so the verdict the
+        // console reports comes from there.
+        m.render();
+        r = g_display.menuRenderer().lastResult();
+      }
       jRenderDone(r);
       break;
     }

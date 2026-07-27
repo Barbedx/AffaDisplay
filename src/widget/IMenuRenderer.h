@@ -10,15 +10,19 @@
 // The model calls exactly one beginFrame, then `rows` calls to row() with index 0..rows-1
 // in order, then one endFrame — per redraw, always the whole window, never a partial one.
 //
-// WHAT THIS SEAM DELIBERATELY DOES NOT CARRY, and what an adapter does about it: the
-// Carminat widget distinguishes a FULL redraw (one 96-byte ISO-TP screen, ~14x the bus time)
-// from a HIGHLIGHT-ONLY change (one frame), because moving the selection inside the visible
-// window changes nothing but which row is lit. A three-call frame protocol cannot express
-// "only the lit row changed" without inventing a second entry point, so the model always
-// emits a whole frame and an adapter that cares keeps the last header/rows/scrollMask it
-// sent and compares: identical text + identical scrollMask + a different `selected` row is
-// precisely the highlight-only case. That decision is now the adapter's, which is where the
-// knowledge of what a message costs actually lives.
+// THE ONE THING THAT IS NOT A WHOLE FRAME, and why it is here rather than in every adapter:
+// the Carminat widget distinguishes a FULL redraw (one 96-byte ISO-TP screen) from a
+// HIGHLIGHT-ONLY change (one 07 29 01 frame, ~14x less bus time — it is why RenderSlot::Menu
+// and RenderSlot::Highlight are different slots), because moving the selection inside the
+// visible window changes nothing but which row is lit. beginFrame/row/endFrame cannot say
+// that, so there is a FOURTH call that can: highlightOnly(). The model raises it exactly
+// when the window did not move and only the selected row changed — the same condition
+// Menu::selectNext tested — and falls back to a full frame when the renderer declines.
+//
+// The alternative was to let every adapter cache the last frame and infer the case by
+// comparing. That is an obligation on every adapter, silently paid in bus time by the ones
+// that forget: nothing fails, the wheel just costs twice what it should. A cost that only
+// the seam can make free for everybody belongs in the seam.
 #pragma once
 #include "../AffaConfig.h"
 
@@ -57,6 +61,33 @@ struct IMenuRenderer {
   virtual void row(uint8_t index, const char* text, bool selected) = 0;
 
   virtual void endFrame() = 0;
+
+  // Only the lit row changed; the text and the arrows are exactly as the last frame left
+  // them, and `index` is the row index — same 0..rows-1 counting as row() — that is now
+  // selected. A display that can move its highlight without redrawing (Carminat: one
+  // 07 29 01 frame instead of a 96-byte screen, ~14x less bus time) overrides this, moves
+  // the highlight and returns true.
+  //
+  // THE DEFAULT MUST BE CORRECT, NOT FAST, which is why this is not pure virtual: a renderer
+  // that cannot move a highlight on its own — anything that redraws the whole glass, the
+  // info-row screen that has no highlight at all, a serial console — says nothing here, and
+  // the model emits the full frame it would have emitted anyway. Returning false is always
+  // safe; returning true without having drawn anything leaves the selection where the last
+  // frame put it.
+  //
+  // Called ONLY between complete frames, never inside one, and never as the first thing a
+  // renderer sees: a full frame always precedes it (open() renders, and every path that
+  // changes text renders), so "as the last frame left them" is a state the renderer has.
+  //
+  // ONLY THE NEW ROW IS PASSED. A panel whose highlight is a command (Carminat: the frame
+  // names the row and the panel unlights the other one) needs nothing else. A panel that has
+  // to ERASE the old marker before drawing the new one — a `>` column on an LCD — remembers
+  // which row it lit, which it already knows: `selected` in the last frame's row() calls said
+  // so, and this call's `index` says where it goes next.
+  virtual bool highlightOnly(uint8_t index) {
+    (void)index;
+    return false;
+  }
 };
 
 }  // namespace widget
