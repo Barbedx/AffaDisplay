@@ -1305,7 +1305,14 @@ void setup() {
 #ifndef BENCH_LISTEN_ONLY
 #  define BENCH_LISTEN_ONLY 0
 #endif
-  g_canUp = g_hw.begin(kPins, kBitrate, /*forceRecoveryMs=*/2000,
+  // forceRecoveryMs=0. MEASURED, do not "improve" this back to 2000: with auto-recovery
+  // armed against a bus that keeps going bus-off, every cycle costs the driver's full
+  // disable/2 s/enable, and they accumulate INSIDE setup(). The serial log showed WiFi up
+  // immediately, `AFFA: begin` at 3.4 s, and the end of CAN bring-up at 185 999 ms — three
+  // minutes before the console answered its first request, which reads exactly like a
+  // board that never booted. A bench that cannot be reached is worse than a bus that
+  // stays down, and isLive() reports the latter honestly.
+  g_canUp = g_hw.begin(kPins, kBitrate, /*forceRecoveryMs=*/0,
                        BENCH_LISTEN_ONLY ? affa::Esp32CanLink::LinkMode::ListenOnly
                                          : affa::Esp32CanLink::LinkMode::Normal);
   if (!g_canUp)
