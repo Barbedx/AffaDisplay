@@ -1,0 +1,62 @@
+{
+  "name": "AffaDisplay",
+  "version": "0.1.0",
+  "description": "Non-blocking ESP32 driver for Renault AFFA2/AFFA3 OEM dash panels (Carminat, UpdateList) over CAN. Pull-port CAN seam, state-machine transmit, wall-clock sync watchdog, zero dynamic allocation after begin(), host-testable without hardware.",
+  "keywords": [
+    "can",
+    "canbus",
+    "renault",
+    "carminat",
+    "affa2",
+    "affa3",
+    "megane",
+    "display",
+    "esp32",
+    "twai",
+    "iso-tp",
+    "automotive"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/andruxa/AffaDisplay.git"
+  },
+  "authors": [
+    {
+      "name": "Andrii",
+      "email": "www.andruxa@gmail.com",
+      "maintainer": true
+    }
+  ],
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "headers": "AffaDisplay.h",
+  "dependencies": [
+    {
+      "owner": "collin80",
+      "name": "can_common"
+    },
+    {
+      "name": "esp32_can",
+      "version": "https://github.com/collin80/esp32_can.git"
+    }
+  ],
+  "build": {
+    "flags": [
+      "-std=gnu++17"
+    ],
+    "unflags": [
+      "-std=gnu++11"
+    ]
+  },
+  "examples": [
+    "examples/*/*.cpp"
+  ],
+  "export": {
+    "exclude": [
+      ".pio",
+      ".vscode",
+      "docs/*.bak"
+    ]
+  }
+}

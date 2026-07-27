@@ -1,0 +1,966 @@
+# AffaDisplay
+
+> A non-blocking ESP32 driver for Renault AFFA2 / AFFA3 OEM dash panels over CAN /
+> Неблокуючий драйвер штатних панелей Renault AFFA2 / AFFA3 для ESP32 через CAN
+
+**[English](#english) · [Українська](#українська)**
+
+MIT · ESP32 / ESP32-C3 · Arduino + PlatformIO · no heap after `begin()` · no `delay()` anywhere ·
+138 host tests, no hardware required
+
+---
+
+## English
+
+* [What it is and what it is not](#what-it-is-and-what-it-is-not)
+* [Quick start](#quick-start)
+* [Wiring](#wiring)
+* [Supported panels](#supported-panels)
+* [Capability matrix](#capability-matrix)
+* [Configuration knobs](#configuration-knobs)
+* [Footprint](#footprint)
+* [Threading and the non blocking contract](#threading-and-the-non-blocking-contract)
+* [Latency and preemption](#latency-and-preemption)
+* [Key codes](#key-codes)
+* [Developing without a car](#developing-without-a-car)
+* [Three ways to break the link from outside](#three-ways-to-break-the-link-from-outside)
+* [Documents and tests](#documents-and-tests)
+
+### What it is and what it is not
+
+**It is** a complete, self-contained implementation of the *panel side* of the Renault
+AFFA display protocol: the sync handshake, lazy function registration, ISO-TP framing,
+the per-frame ACK state machine, key decoding and encoding, and every screen the panel
+knows how to draw — text, clock, menu, popup, fullscreen, confirm box, info list.
+
+It talks to two panel families:
+
+* **Carminat / AFFA3** — the 3-row graphical display with the scroll wheel;
+* **UpdateList / AFFA2** — the 8-segment display, and its mono-LCD variant.
+
+Nothing in it sleeps, waits or allocates after `begin()`. The CAN seam is a **pull** port
+(`recv(Frame&)`), every transmission is a **state machine advanced by `poll()`**, and every
+periodic behaviour is a **wall-clock deadline** against an injected `IClock`. Those three
+are structural answers to three defects that cost real bench time in the project this code
+was extracted from: a watchdog that counted `poll()` *calls* instead of milliseconds, a
+2000 ms blocking ACK wait sitting inside the only code path that could have delivered the
+ACK, and a render queue in which a stale value could not be superseded.
+
+**It is not:**
+
+* **a radio emulator.** It drives a panel. Which text means which audio source, what a
+  password prompt means, what a key should *do* — that is your application's business.
+  See the boundary principle in `docs/API.md` §7b.
+* **a CAN sniffer framework.** It exposes every frame it sees (Layer 0 tap, Layer 1
+  filtered subscriptions), but it owns one controller under a strict contract and will not
+  reconfigure it behind your back.
+* **car-aware.** It knows nothing about your vehicle bus, your radio's model, or what else
+  is listening on `0x151`. It will happily transmit into all of it if you let it.
+* **a persistence layer.** No NVS, no preferences, no filesystem. What the user edits in a
+  menu is yours to store.
+* **thread-safe.** It is per-instance and unlocked, by design. Exactly one task calls
+  `poll()`; see [Threading](#threading-and-the-non-blocking-contract).
+
+### Quick start
+
+```cpp
+#include <AffaDisplay.h>
+
+struct ArduinoClock final : affa::IClock {            // the whole IClock implementation
+  uint32_t millis() const override { return ::millis(); }
+};
+
+affa::Esp32CanLink    g_link;
+ArduinoClock          g_clock;
+affa::CarminatDisplay g_display(g_link, g_clock);
+
+static void onKey(affa::Key k, affa::KeyEdge e, void*) {
+  if (k == affa::Key::Pause && e == affa::KeyEdge::Click) g_display.setText("PAUSED", 0);
+}
+
+void setup() {
+  // Named struct: the two pins cannot be swapped at the call site, and they have been.
+  g_link.begin(affa::CanPins{.rx = GPIO_NUM_4, .tx = GPIO_NUM_3}, 500000);
+  g_display.onKey(&onKey, nullptr);
+  g_display.begin();                                  // TRANSMITS — read the warning below
+}
+
+void loop() {
+  g_display.poll();                                   // that is the whole integration
+}
+```
+
+`setText()`, `showMenu()` and friends **enqueue and return**. Their `Result` says whether
+the message was *accepted*, never whether the panel *displayed* it — that verdict arrives
+later through `onComplete(cb, ctx)`, carrying the same `TxTicket` the call issued.
+
+> ### ⚠️ `begin()` TRANSMITS — never do this first on a vehicle bus
+>
+> The first sync heartbeat leaves on the first `poll()`, on `0x3AF` (Carminat) or `0x3DF`
+> (UpdateList), and the library answers registration requests with `0x74` on `id | 0x400`.
+> On a bench with one panel that is exactly right. On a **live vehicle bus** you are
+> injecting frames a real head unit may also be sending: two nodes answering the same
+> registration is not a scenario anyone has characterised, and the panel is not the only
+> thing listening. Know what else is on those identifiers before you power it up, and
+> prefer a bench harness — see [Developing without a car](#developing-without-a-car).
+
+Installation, `platformio.ini`:
+
+```ini
+lib_deps =
+  https://github.com/andruxa/AffaDisplay.git
+  collin80/can_common
+  https://github.com/collin80/esp32_can.git
+
+build_flags =
+  -std=gnu++17
+  -D AFFA_PANEL_CARMINAT=1
+build_unflags =
+  -std=gnu++11        ; the ESP32-C3 Arduino core still defaults to gnu++11
+```
+
+With `-D AFFA_ENABLE_ESP32CAN_LINK=0` you need neither `can_common` nor `esp32_can`:
+nothing else in the library includes a driver header, and you supply your own `ICanLink`
+(three methods).
+
+### Wiring
+
+The bench board is an **ESP32-C3 SuperMini** plus a 3.3 V CAN transceiver
+(SN65HVD230 / TJA1051T-3, *not* a 5 V TJA1050 without level shifting).
+
+| Signal | ESP32-C3 pin | Notes |
+| --- | --- | --- |
+| CAN **RX** | `GPIO_NUM_4` | transceiver `RXD` / `R` |
+| CAN **TX** | `GPIO_NUM_3` | transceiver `TXD` / `D` |
+| `CANH` / `CANL` | — | to the panel harness |
+| Bit rate | **500 000** | fixed by the car; not negotiable |
+| Termination | 120 Ω | one at each physical end of the bus — with a panel plus your board on a short bench harness, one 120 Ω resistor is usually right; two if the harness is long |
+
+> #### The (rx, tx) trap
+>
+> `CanPins` is a named struct precisely because these two get swapped, and the symptom is
+> not an error — it is **silence**. No TX error, no RX frame, no log line, nothing:
+>
+> ```cpp
+> g_link.begin(affa::CanPins{.rx = GPIO_NUM_4, .tx = GPIO_NUM_3}, 500000);   // this board
+> ```
+>
+> The reference project **MeganeCAN** uses the mirrored assignment (`rx = GPIO_NUM_3,
+> tx = GPIO_NUM_4`) on its own board. Copying its `setCANPins()` line onto this one is the
+> single most common way to get a dead bus, and `examples/01_link_check` exists mainly to
+> tell you which of the two you are looking at.
+
+**The panel opens the conversation.** Nothing appears until the panel pings: it announces
+itself with `61 11` on `0x3CF`, the library answers with the hello burst, and only then
+does registration and rendering become possible. A bench with power but no panel produces
+a heartbeat every second and nothing else — that is correct behaviour, not a fault.
+
+### Supported panels
+
+| Family | Class | Sync id | Reply id | Function ids | Key id | Key ACK |
+| --- | --- | --- | --- | --- | --- | --- |
+| Carminat / AFFA3 | `affa::CarminatDisplay` | `0x3AF` | `0x3CF` | `0x151`, `0x1F1` | `0x1C1` | `0x5C1` |
+| UpdateList / AFFA2, 8-segment | `affa::UpdateListDisplay` | `0x3DF` | `0x3CF` | `0x121`, `0x1B1` | `0x0A9` | `0x4A9` |
+| UpdateList / AFFA2, mono LCD | `affa::UpdateListMenuDisplay` | `0x3DF` | `0x3CF` | `0x121`, `0x1B1` | `0x0A9` | `0x4A9` |
+
+The ACK id is always **computed** as `funcId | 0x400`, never tabulated. `0x0A9 | 0x400` is
+`0x4A9` and not `0x5A9`, because bit 8 is already clear in `0x0A9` — uniquely in this
+table. A hard-coded ACK id is a bug waiting for the UpdateList family.
+
+Each family also ships a **twin** (`AFFA_ENABLE_VIRTUAL_PANEL`) — a model of the panel that
+reassembles what you transmit, decodes it into a `ScreenModel` and ACKs the way hardware
+does. See [Developing without a car](#developing-without-a-car).
+
+### Capability matrix
+
+Ask `display.supports(affa::Feature::X)` before you call; every unsupported call returns
+`Result::NotSupported` rather than silently succeeding.
+
+| Feature | Carminat | UpdateList 8-seg | UpdateList LCD |
+| --- | :---: | :---: | :---: |
+| `Text` | yes | yes | yes |
+| `Time` | yes | no | no |
+| `Power` | yes | yes | yes |
+| `Menu` | if `AFFA_ENABLE_MENU` | no | no |
+| `Popup` | if `AFFA_ENABLE_POPUP` | no | no |
+| `Fullscreen` | if `AFFA_ENABLE_FULLSCREEN` | no | no |
+| `ConfirmBox` | if `AFFA_ENABLE_CONFIRMBOX` | no | no |
+| `InfoPopup` | if `AFFA_ENABLE_INFOPOPUP` | no | no |
+| `AuxTracking` | if `AFFA_ENABLE_AUX_TRACKER` (off by default) | same | same |
+| `KeyTx` | yes (`0x1C1`) | yes (`0x0A9`) | yes (`0x0A9`) |
+| `RadioText` | if `AFFA_ENABLE_ISOTP_RX` | same | same |
+
+Two honest caveats, both also recorded in `docs/API.md` §6:
+
+* `Feature::RadioText` reports the **compile gate**, and as of 0.1.0 **nothing emits
+  `EventKind::RadioText`** — the reassembler in `proto/` has not been wired into the RX
+  path for either family. On a host build (gate on by default) the capability
+  over-promises; on target the gate is off by default and the two agree. A canary test
+  (`test_seam`) fails the day someone closes this, which is the point of it.
+* `Feature::AuxTracking` means "the `AuxModeTracker` helper is compiled in", not
+  "`setAuxMode()` works". No shipped panel overrides `setAuxMode()`, so it returns
+  `NotSupported` everywhere.
+
+### Configuration knobs
+
+`src/AffaConfig.h` is the single knob header; every gate is documented there with what it
+costs and what breaks. Set them in your own `build_flags` — the header only ever supplies
+defaults.
+
+| Macro | Default | What it controls |
+| --- | :---: | --- |
+| `AFFA_PANEL_CARMINAT` | `0`¹ | Carminat / AFFA3 panel |
+| `AFFA_PANEL_UPDATELIST` | `0`¹ | UpdateList 8-segment panel |
+| `AFFA_PANEL_UPDATELIST_MENU` | `0`¹ | UpdateList mono-LCD variant (implies the line above) |
+| `AFFA_ENABLE_MENU` | `1` | `Menu`, `MenuController`, `IPage`, `nav()`, `getMenu()`. The largest optional block. |
+| `AFFA_ENABLE_POPUP` | `1` | `showPopupText` / `hidePopup` |
+| `AFFA_ENABLE_FULLSCREEN` | `1` | `showFullscreenText` / `hideFullscreenText` |
+| `AFFA_ENABLE_CONFIRMBOX` | `1` | `showConfirmBox` (sits at exactly the 113-byte ceiling) |
+| `AFFA_ENABLE_INFOPOPUP` | `1` | `showInfoPopup` / `hideInfoPopup` (three messages) |
+| `AFFA_ENABLE_AUX_TRACKER` | **`0`** | `AuxModeTracker`. Off because it describes *someone else's radio*, not the panel. ~0.4 kB of pattern strings. |
+| `AFFA_ENABLE_TRANSLITERATION` | `1` | `toAscii` + its table (~1.2 kB). **0 is dangerous**: UTF-8 then reaches the wire unchanged and renders as garbage — a visual failure, not a compile error. |
+| `AFFA_ENABLE_LOG` | `1` | the `AFFA_LOG*` macros. 0: no format strings enter flash at all, so never put a side effect in a log argument. |
+| `AFFA_LOG_LEVEL` | `3` | 0 off, 1 error, 2 warn, 3 info, 4 debug, 5 trace. Compile-time. |
+| `AFFA_ENABLE_ESP32CAN_LINK` | `1` on Arduino, `0` on host | `Esp32CanLink` and the `<esp32_can.h>` dependency |
+| `AFFA_ENABLE_VIRTUAL_PANEL` | `0` on target, `1` on host | the panel twins (`vpanel/`). The most expensive optional block. |
+| `AFFA_ENABLE_ISOTP_RX` | follows `VIRTUAL_PANEL` | the reassembler + screen decoder alone, without the twins |
+| `AFFA_ENABLE_TASK` | `0` | an owned FreeRTOS task that calls `poll()`. **Never combine with calling `poll()` yourself.** |
+| `AFFA_TASK_PERIOD_MS` | `5` | that task's period; larger increases key latency and RX-ring pressure |
+| `AFFA_TASK_STACK` | `3072` | peak is a render call: 96-byte payload plus scratch |
+| `AFFA_TASK_PRIO` | `5` | **must stay below `task_CAN`'s 15** or the RX ring starves |
+| `AFFA_TX_COALESCE` | `1` | latest-value-wins per `RenderSlot`. 0 reproduces the "panel keeps counting after Pause" defect. |
+| `AFFA_TX_QUEUE_DEPTH` | `6` | queue slots, `~AFFA_MAX_PAYLOAD + 12` B each. 6 and not 4 because `showInfoPopup` is three messages and the first call after a resync also carries two registration probes. |
+| `AFFA_MAX_PAYLOAD` | `113` | **a wire limit, not a budget**: `8 + 15×7 = 113`, the point at which the ISO-TP counter would wrap. Below 96 the Carminat menu returns `TooLong`. |
+| `AFFA_RX_RING_DEPTH` | `32` | power of two. 32 × `sizeof(Frame)` = 448 B; tolerates a ~7 ms gap between `poll()` calls on a saturated bus. |
+| `AFFA_ACK_TIMEOUT_MS` | `2000` | per-frame ACK deadline; matches the legacy blocking wait exactly |
+| `AFFA_PEER_TIMEOUT_MS` | `5000` | silence before sync is torn down. **Effective window is up to this + `AFFA_SYNC_INTERVAL_MS`**, because the watchdog is evaluated on a heartbeat tick. Never lower it below your longest flash write — the TWAI ISR is not in IRAM, so an OTA or NVS write looks exactly like a panel that went quiet. |
+| `AFFA_SYNC_INTERVAL_MS` | `1000` | heartbeat cadence. Treat as fixed: it is what the capture shows. |
+| `AFFA_MAX_SUBSCRIPTIONS` | `8` | Layer 1 filtered subscription slots |
+| `AFFA_MENU_MAX_ITEMS` | `12` | menu capacity |
+| `AFFA_MENU_MAX_FIELDS` | `3` | fields per item; `MenuItem` embeds all of them, which is most of the menu's RAM |
+| `AFFA_MENU_ROW_MAX` | `32` | rendered row buffer |
+| `AFFA_TEXT_MAX` | `64` | text/marquee buffer |
+
+¹ All three panel flags default to `0` on target — you select what you build. On the host
+test build all three are `1`.
+
+### Footprint
+
+ESP32-C3 (`board = esp32-c3-devkitm-1`, Arduino core 2.0.17), release build, straight from
+`pio run`. **Baseline measured on the same toolchain**: an empty `setup()`/`loop()` sketch
+is **218 912 B** flash / **13 476 B** RAM.
+
+| Build | Flash | Δ vs empty sketch | RAM | Δ vs empty sketch |
+| --- | ---: | ---: | ---: | ---: |
+| `size_all` — every panel gate on | 265 706 B | +46 794 B | 16 372 B | +2 896 B |
+| `size_carminat` — Carminat only | 265 706 B | +46 794 B | 16 372 B | +2 896 B |
+| `size_min` — Carminat, no menu/popup/fullscreen/confirm/info, no transliteration, no log, no subscriptions | 264 176 B | +45 264 B | 16 044 B | +2 568 B |
+| `ex07_virtual_panel_c3` — Carminat **plus the twin** (`proto/` + `vpanel/`) | 284 140 B | +65 228 B | 25 980 B | +12 504 B |
+
+Read those numbers with three corrections, or they will mislead you:
+
+1. **Most of the delta is the CAN driver, not this library.** A bare sketch that only links
+   `esp32_can` + `can_common`, opens `Serial` and calls `CAN0.begin(500000)` — no
+   AffaDisplay at all — is **258 806 B / 14 564 B** on the same toolchain. Against *that*
+   floor the library costs **+6 900 B flash / +1 808 B RAM** fully enabled, **+5 370 B /
+   +1 480 B** minimal, and **+25 334 B / +11 416 B** with the twin compiled in and used.
+   That is the number to quote.
+2. **`size_all` and `size_carminat` are byte-identical, and that is the result, not a
+   defect.** Both build `examples/01_link_check`, which instantiates its own minimal
+   `AffaDisplayBase` subclass and references no panel class, so `--gc-sections` removes
+   every panel that is compiled but unused. **An unused panel costs zero, measurably** —
+   which is exactly what the whole-body `#if` discipline in every optional `.cpp` exists to
+   buy. The cost of *using* a panel shows up in the per-example table below.
+3. The virtual-panel row is a *used* twin, for the same reason: enabling
+   `AFFA_ENABLE_VIRTUAL_PANEL` in a build that never names a twin costs nothing either.
+
+<sub>The project brief quoted 247 290 B for an empty sketch on this board. That figure does
+not reproduce with the toolchain pinned in this repository (Arduino core 2.0.17 / platform
+espressif32 6.13.0); 218 912 B is what a clean build measures here. Against 247 290 B the
+deltas would read +18 416, +18 416, +16 886 and +36 850 B. The measured baselines above are
+the ones this table uses.</sub>
+
+Per-example, same board and core, all from real `pio run` output:
+
+| Env | What it exercises | Flash | RAM |
+| --- | --- | ---: | ---: |
+| `ex01_link_check` | core only, log level 4 | 265 714 B | 16 372 B |
+| `ex02_carminat_text` | Carminat, no menu | 271 194 B | 16 324 B |
+| `ex03_carminat_menu` | Carminat + `Menu` + pages | 274 160 B | 17 892 B |
+| `ex04_updatelist_segment` | UpdateList 8-segment + marquee | 270 446 B | 16 444 B |
+| `ex05_updatelist_menu` | UpdateList LCD variant | 270 464 B | 16 484 B |
+| `ex06_counter_preempt` | Carminat, tap + preemption | 271 038 B | 16 348 B |
+| `ex07_virtual_panel_c3` | Carminat + `proto/` + `vpanel/` | 284 140 B | 25 980 B |
+| `ex08_radio_mitm` | Carminat + menu + subscriptions | 274 188 B | 17 748 B |
+| `ex90_bench_ota` | web console + WiFi + ElegantOTA + twin | 898 242 B | 71 124 B |
+
+A panel plus its rendering is ~5.5 kB over the bare core; `Menu` adds ~3 kB flash and
+~1.6 kB RAM (turn `AFFA_MENU_MAX_ITEMS` / `AFFA_MENU_MAX_FIELDS` down if that matters); the
+twins are ~13 kB flash and ~9.6 kB RAM and are the reason they are off on target.
+`ex90_bench_ota` is dominated by WiFi and the HTTP server and uses a 1.4 MB OTA partition.
+
+### Threading and the non blocking contract
+
+* **No `delay()`, no `vTaskDelay()`, no busy-wait, anywhere in `src/`.** `IClock` exposes
+  `millis()` and deliberately nothing else. If something in this library wanted to sleep,
+  its state machine would be wrong.
+* **No heap after `begin()`.** Every buffer is static and sized by a macro in
+  `AffaConfig.h`. No `String`, no `std::vector`, no `std::function` in the core.
+* **No file-scope or function-local state.** Every counter, deadline and buffer is a member,
+  so two instances on two buses cannot interfere. (The extracted code had a file-scope event
+  queue, a static log timestamp and a `static int8_t timeout`; in a library those are shared
+  state between instances.)
+* **Exactly one task calls `poll()`.** The library is per-instance and **unlocked** — that
+  is a deliberate choice, not an omission, and it is what keeps `poll()` free of critical
+  sections. Any other context (an HTTP handler, a BLE callback, a second task) must post a
+  request into a mailbox that the `poll()` task drains. `examples/90_bench_ota` does exactly
+  this and is worth copying.
+* **Callbacks fire from the `poll()` context**, never from the CAN driver task. State is
+  committed *before* the callback that reports it, so a callback may call back into the
+  library — render calls, `abortPending()`, `pressKey()`, `subscribe()` — but never `poll()`
+  itself.
+* **Pointers inside an `Event` are valid only for the duration of the callback.** They point
+  at library-internal storage. Copy what you keep.
+* `poll()` is **frequency-independent**: calling it once per second and a million times per
+  second produce the same frames in the same order with the same timing. There is no minimum
+  rate for correctness — only for latency and for keeping `Stats::ringOverflow` at zero.
+* If you would rather not own the loop, `AFFA_ENABLE_TASK=1` gives the library its own
+  FreeRTOS task. Doing that *and* calling `poll()` yourself is two drivers on one unlocked
+  object; pick one.
+
+### Latency and preemption
+
+The guarantee, pinned by `test_latency` as a **poll count** rather than a wall-clock claim:
+
+> **A key reaches your callback in exactly one `poll()`** — with an empty queue, and equally
+> with a 96-byte `showMenu` in flight, `WaitAck` holding 1900 ms of its 2000 ms deadline, and
+> every transmit slot occupied.
+
+That falls out of the ordering inside `poll()`: drain RX and deliver keys **strictly
+before** pumping the transmit FSM. The TX FSM checks a deadline and returns; it never waits.
+
+* **Latest value wins, per `RenderSlot`.** A repeated render occupies exactly one queue slot
+  no matter the render rate and always holds the newest value; superseded tickets complete
+  `Result::Aborted`. Three `setText`s queued behind an in-flight menu become one message
+  carrying the third string.
+* **Different slots never coalesce against each other** — a clock update cannot eat a popup.
+* **`abortPending()`** drops everything queued but *not yet started*, reporting `Aborted`
+  once per ticket, in order. **`Priority::Urgent`** jumps the queue but never the
+  registration probes.
+* **A message on the wire is never split.** `Urgent` and `abortAll()` take effect at a frame
+  boundary only, and the ISO-TP continuation counter resets when a job is abandoned, so it
+  cannot corrupt the next message.
+* **Self-sent frames are inert.** Every transmitted frame is tagged `Frame::fromSelf` and
+  dropped before the auto-ACK, before the ACK matcher **and** before the key decoder. A real
+  controller does not echo its own frames; `LoopbackLink` can. Behaviour is identical on
+  both, which is what makes the host tests worth anything.
+
+Without this, a 10 Hz counter rendered in front of a 13-frame menu transfer leaves a backlog
+of stale values: the panel visibly keeps counting for a second *after* the user pressed
+Pause and after the library correctly received the key. It reads as a key-handling bug and
+it is a queueing bug. `examples/06_counter_preempt` measures it.
+
+### Key codes
+
+The joystick is physically part of the **panel**: pressing it makes the panel encode and
+transmit a key frame, which the radio receives. **This library's normal role is the radio**,
+so keys only ever come *in*, and `pressKey()` / `nav()` default to `KeySource::Local`.
+
+Wire frame, on `0x1C1` (Carminat) or `0x0A9` (UpdateList):
+
+```
+03 89 <code>>8> <code&0xFF | (hold ? 0xC0 : 0)> <filler × 4>
+```
+
+| `affa::Key` | Code | Notes |
+| --- | :---: | --- |
+| `Load` | `0x0000` | the button at the bottom of the stalk; hold-`Load` is the default menu gesture |
+| `SrcNext` | `0x0001` | |
+| `SrcPrev` | `0x0002` | |
+| `VolUp` | `0x0003` | |
+| `VolDown` | `0x0004` | |
+| `Pause` | `0x0005` | |
+| `RollUp` | `0x0101` | wheel, one detent up |
+| `RollDown` | `0x0141` | wheel, one detent down |
+
+Four things about this table are load-bearing:
+
+1. **The `03 89` guard is not optional.** The same key id also carries `70 A3..`,
+   `02 64 0F A3..` and `05 63 "0037"`. A decoder without the guard invents keys `0x640F`
+   and `0x3030` out of ordinary traffic.
+2. **Held wheel detents are unrecoverable by design.** `0x0101 | 0xC0` and `0x0141 | 0xC0`
+   are *both* `0x01C1`, because `0x40` is simultaneously RollDown's direction bit and half
+   the hold mask. They decode as `RollUp` + hold, and the encoder refuses to transmit either
+   — a hold edge on the wheel has no wire representation at all. This is why
+   `NavCommand::Increase` / `Decrease` are reachable only with `KeySource::Local`.
+3. **The enum is open.** These eight names are `[REF]`-attested, but nothing establishes the
+   list is *complete*. An unrecognised code is delivered as `static_cast<Key>(raw & 0xFF3F)`
+   — a `Key` carrying the raw wire code — and never dropped. Always write a `default:` in a
+   switch over `Key`.
+4. **`KeySource::Wire` puts phantom presses on the bus.** Harmless on a bench; input other
+   modules may act on in a car.
+
+### Developing without a car
+
+Three tiers, none of which needs a vehicle. The full walkthrough with copy-pasteable
+commands is **[`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HARDWARE.md)**.
+
+1. **Laptop only — no board at all.**
+   ```
+   pio test -e native            # 138 cases, ~10 s
+   pio run -e ex07_virtual_panel -t exec
+   ```
+   The whole library runs on the host against a **twin**: a model of the panel that
+   reassembles what you transmit, decodes it into a `ScreenModel`, answers the handshake and
+   ACKs frame by frame. Set `AckMode::Declared` — it is the only mode that models hardware,
+   and it reproduces every frame count in the wire spec (`showMenu` = 13 frames, last PCI
+   `0x2C`) without being told them.
+2. **A bare ESP32 devkit — no transceiver, no panel.** Flash `examples/90_bench_ota` with
+   `AFFA_ENABLE_VIRTUAL_PANEL=1`, open the web console, switch it to `panel=virtual`. The
+   twin is fed from the Layer-0 tap, so the same wiring serves both a virtual panel and a
+   passive decode alongside a real one. You get the live frame ring, the decoded glass, key
+   injection and the latency counters in a browser.
+3. **A real panel on a bench.** Wiring as above, 500 kbit/s, mind the `(rx, tx)` trap, and
+   remember that **the panel opens the conversation** — nothing happens until it pings.
+   Flash `examples/01_link_check` first: it names every known frame and, on a two-node bus,
+   `txErr == 0` is the proof the panel is acknowledging you.
+
+The same document also covers capturing your own traffic, diffing it against
+`docs/WIRE-SPEC.md`, and adding a fourth panel family.
+
+### Three ways to break the link from outside
+
+All three are the application reaching past this library into the CAN driver, and all three
+are verified against `collin80/esp32_can` with file:line citations in
+`docs/ESP32CAN-CONTRACT.md`.
+
+1. **A per-mailbox callback on mailbox 0 or 1.** `processFrame()` prefers a per-mailbox
+   callback over the general one, and `watchFor()` puts its match-everything filter in
+   exactly those two slots — so registering there **silently steals every standard frame**
+   from the library. Symptom: the bus looks alive, the library never receives anything.
+2. **A second `watchFor()` (or a second `CAN0.begin()`).** It reinstalls the driver on a live
+   bus, leaks both queues while `task_CAN` is blocked on the old one, and wipes all 32 filter
+   slots.
+3. **Any driver mode setter** — `setListenOnlyMode`, `setNoACKMode`, `enable`, `disable`,
+   `set_baudrate`, `beginAutoSpeed`, `forceDriverRestart`, `setDebuggingMode(true)`. Every
+   one is implemented as `disable()` + assignment + `enable()`, i.e. `twai_stop` mid-frame,
+   `vTaskDelete` of both RX tasks, driver uninstall, reinstall. Called from inside the
+   general callback, any of them deletes its own caller. This is what repeatedly left the
+   controller stopped in the previous project.
+
+Two more worth knowing: **never test the return value of `CAN0.sendFrame()`** (it is a
+literal `true` on every path, including timeout-and-drop and driver-not-installed), and if
+you want automatic bus-off recovery call `CAN0.setForceRecovery(true)` **before**
+`link.begin()` and accept its 2-second outage. The library adds no recovery of its own —
+two initiators racing `twai_initiate_recovery()` on one controller is how a half-recovered
+peripheral happens.
+
+### Documents and tests
+
+```
+pio test -e native      # 138 host test cases across 11 suites, no hardware
+pio run                 # every environment: the host build plus 12 ESP32-C3 targets
+```
+
+| Document | What it is |
+| --- | --- |
+| [`docs/API.md`](docs/API.md) | The specification the implementation is written against. Where any other document disagrees with it, it wins. |
+| [`docs/WIRE-SPEC.md`](docs/WIRE-SPEC.md) | The byte-level oracle: every frame layout, ready-to-paste golden vectors each tagged with the strongest witness that attests it, and the arithmetic for every frame count. **Where the code and this document disagree about a byte, the code is wrong.** |
+| [`docs/PROTOCOL-NOTES.md`](docs/PROTOCOL-NOTES.md) | Provenance: every byte traced to a capture, an OEM log or a third-party reference, plus the open questions each phrased as the experiment that closes it. |
+| [`docs/ESP32CAN-CONTRACT.md`](docs/ESP32CAN-CONTRACT.md) | What `collin80/esp32_can` actually guarantees, with citations, and the 21 rules that follow. |
+| [`docs/PORTING.md`](docs/PORTING.md) | Moving an application off the old classes — and how to drop this library entirely, including which files are panel-specific and which are the reusable transport core. |
+| [`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HARDWARE.md) | The three tiers above, in full, plus capturing traffic and adding a panel. |
+
+`core/`, `util/`, `link/LoopbackLink.h`, `proto/` and `vpanel/` must all compile for
+`platform = native` with nothing but the C++17 standard library. If a change breaks that
+build, the change is wrong, not the test. `<esp32_can.h>` appears exactly once in the whole
+repository, in `src/link/Esp32CanLink.cpp`.
+
+Licence: **MIT**, see [`LICENSE`](LICENSE).
+
+---
+
+## Українська
+
+* [Що це таке і чим воно не є](#що-це-таке-і-чим-воно-не-є)
+* [Швидкий старт](#швидкий-старт)
+* [Підключення](#підключення)
+* [Підтримувані панелі](#підтримувані-панелі)
+* [Матриця можливостей](#матриця-можливостей)
+* [Перемикачі конфігурації](#перемикачі-конфігурації)
+* [Обсяг прошивки](#обсяг-прошивки)
+* [Багатозадачність і неблокуючий контракт](#багатозадачність-і-неблокуючий-контракт)
+* [Затримка і витіснення](#затримка-і-витіснення)
+* [Коди кнопок](#коди-кнопок)
+* [Розробка без автомобіля](#розробка-без-автомобіля)
+* [Три способи зламати лінк ззовні](#три-способи-зламати-лінк-ззовні)
+* [Документи і тести](#документи-і-тести)
+
+### Що це таке і чим воно не є
+
+**Це** повна самодостатня реалізація *панельного боку* протоколу Renault AFFA: sync
+handshake, лінива реєстрація функцій, ISO-TP фрагментація, автомат станів для покадрового
+ACK, декодування і кодування кнопок, і всі екрани, які панель уміє малювати — текст,
+годинник, меню, popup, повноекранний текст, вікно підтвердження, список інформації.
+
+Підтримуються дві родини панелей:
+
+* **Carminat / AFFA3** — трирядковий графічний дисплей із коліщатком;
+* **UpdateList / AFFA2** — восьмисегментний дисплей і його моно-LCD різновид.
+
+Ніщо тут не спить, не чекає і не виділяє пам'ять після `begin()`. Шов до CAN — це **pull**
+порт (`recv(Frame&)`), кожна передача — це **автомат станів, який рухає `poll()`**, а кожна
+періодична дія — це **дедлайн за реальним часом** відносно впровадженого `IClock`. Усі три
+рішення структурно закривають три дефекти, які коштували реального часу на столі в проєкті,
+звідки цей код видобуто: watchdog, що рахував *виклики* `poll()` замість мілісекунд;
+блокуюче очікування ACK на 2000 мс усередині єдиного шляху, який міг би цей ACK доставити; і
+черга рендерів, у якій застаріле значення не можна було замінити свіжим.
+
+**Чим воно не є:**
+
+* **не емулятор радіо.** Воно керує панеллю. Який текст означає яке джерело звуку, що робити
+  із запитом пароля, що саме має *робити* кнопка — це справа вашого застосунку. Дивіться
+  принцип межі в `docs/API.md` §7b.
+* **не фреймворк для сніфінгу CAN.** Воно віддає кожен кадр, який бачить (Layer 0 tap,
+  Layer 1 підписки з фільтром), але володіє одним контролером за суворим контрактом і не
+  переналаштує його у вас за спиною.
+* **не знає про автомобіль.** Йому нічого не відомо про вашу шину, модель вашого радіо чи про
+  те, хто ще слухає `0x151`. І воно радо передаватиме в усе це, якщо ви дозволите.
+* **не шар зберігання.** Ніякого NVS, preferences чи файлової системи. Те, що користувач
+  змінив у меню, зберігаєте ви.
+* **не потокобезпечне.** Воно на екземпляр і без локів — навмисно. Рівно одна задача викликає
+  `poll()`; див. [Багатозадачність](#багатозадачність-і-неблокуючий-контракт).
+
+### Швидкий старт
+
+```cpp
+#include <AffaDisplay.h>
+
+struct ArduinoClock final : affa::IClock {            // уся реалізація IClock
+  uint32_t millis() const override { return ::millis(); }
+};
+
+affa::Esp32CanLink    g_link;
+ArduinoClock          g_clock;
+affa::CarminatDisplay g_display(g_link, g_clock);
+
+static void onKey(affa::Key k, affa::KeyEdge e, void*) {
+  if (k == affa::Key::Pause && e == affa::KeyEdge::Click) g_display.setText("PAUSED", 0);
+}
+
+void setup() {
+  // Іменована структура: два піни неможливо переплутати на місці виклику, а їх плутали.
+  g_link.begin(affa::CanPins{.rx = GPIO_NUM_4, .tx = GPIO_NUM_3}, 500000);
+  g_display.onKey(&onKey, nullptr);
+  g_display.begin();                                  // ПЕРЕДАЄ — прочитайте попередження
+}
+
+void loop() {
+  g_display.poll();                                   // це вся інтеграція
+}
+```
+
+`setText()`, `showMenu()` та інші **ставлять у чергу і повертаються**. Їхній `Result` каже,
+чи повідомлення *прийнято*, і ніколи — чи панель його *показала*: цей вердикт приходить
+пізніше через `onComplete(cb, ctx)` із тим самим `TxTicket`, який видав виклик.
+
+> ### ⚠️ `begin()` ПЕРЕДАЄ — ніколи не робіть цього першим на шині автомобіля
+>
+> Перший sync heartbeat вилітає на першому `poll()` — на `0x3AF` (Carminat) або `0x3DF`
+> (UpdateList), і бібліотека відповідає на запити реєстрації байтом `0x74` на `id | 0x400`.
+> На столі з однією панеллю це саме те, що треба. На **живій шині автомобіля** ви вкидаєте
+> кадри, які може надсилати і штатна магнітола: два вузли, що відповідають на одну
+> реєстрацію, — це сценарій, який ніхто не досліджував, і панель там не єдиний слухач.
+> З'ясуйте, хто ще сидить на цих ідентифікаторах, перш ніж подавати живлення, і краще
+> починайте зі стенда — див. [Розробка без автомобіля](#розробка-без-автомобіля).
+
+Встановлення, `platformio.ini`:
+
+```ini
+lib_deps =
+  https://github.com/andruxa/AffaDisplay.git
+  collin80/can_common
+  https://github.com/collin80/esp32_can.git
+
+build_flags =
+  -std=gnu++17
+  -D AFFA_PANEL_CARMINAT=1
+build_unflags =
+  -std=gnu++11        ; ядро Arduino для ESP32-C3 досі стоїть на gnu++11
+```
+
+З `-D AFFA_ENABLE_ESP32CAN_LINK=0` вам не потрібні ні `can_common`, ні `esp32_can`: більше
+ніщо в бібліотеці не підключає заголовок драйвера, а свій `ICanLink` — це три методи.
+
+### Підключення
+
+Стендова плата — **ESP32-C3 SuperMini** плюс 3.3 В CAN-трансивер (SN65HVD230 /
+TJA1051T-3, *не* 5 В TJA1050 без узгодження рівнів).
+
+| Сигнал | Пін ESP32-C3 | Примітки |
+| --- | --- | --- |
+| CAN **RX** | `GPIO_NUM_4` | `RXD` / `R` трансивера |
+| CAN **TX** | `GPIO_NUM_3` | `TXD` / `D` трансивера |
+| `CANH` / `CANL` | — | у джгут панелі |
+| Швидкість | **500 000** | задана автомобілем, не обговорюється |
+| Термінація | 120 Ом | по одному на кожному фізичному кінці шини; на короткому стенді з панеллю і вашою платою зазвичай достатньо одного резистора, двох — якщо джгут довгий |
+
+> #### Пастка (rx, tx)
+>
+> `CanPins` зроблено іменованою структурою саме тому, що ці два піни плутають, а симптом —
+> не помилка, а **тиша**. Ні TX error, ні жодного кадру, ні рядка в логу:
+>
+> ```cpp
+> g_link.begin(affa::CanPins{.rx = GPIO_NUM_4, .tx = GPIO_NUM_3}, 500000);   // ця плата
+> ```
+>
+> Референсний проєкт **MeganeCAN** на своїй платі використовує дзеркальне призначення
+> (`rx = GPIO_NUM_3, tx = GPIO_NUM_4`). Скопіювати звідти рядок `setCANPins()` — найпоширеніший
+> спосіб отримати мертву шину, і `examples/01_link_check` існує здебільшого для того, щоб
+> сказати вам, який із двох випадків перед вами.
+
+**Розмову починає панель.** Доки панель не подасть голос, не буде нічого: вона оголошує себе
+кадром `61 11` на `0x3CF`, бібліотека відповідає серією hello, і лише після цього стають
+можливими реєстрація і рендер. Стенд із живленням, але без панелі, видає heartbeat раз на
+секунду і більше нічого — це коректна поведінка, а не несправність.
+
+### Підтримувані панелі
+
+| Родина | Клас | Sync id | Reply id | Function ids | Key id | Key ACK |
+| --- | --- | --- | --- | --- | --- | --- |
+| Carminat / AFFA3 | `affa::CarminatDisplay` | `0x3AF` | `0x3CF` | `0x151`, `0x1F1` | `0x1C1` | `0x5C1` |
+| UpdateList / AFFA2, 8 сегментів | `affa::UpdateListDisplay` | `0x3DF` | `0x3CF` | `0x121`, `0x1B1` | `0x0A9` | `0x4A9` |
+| UpdateList / AFFA2, моно-LCD | `affa::UpdateListMenuDisplay` | `0x3DF` | `0x3CF` | `0x121`, `0x1B1` | `0x0A9` | `0x4A9` |
+
+ACK id завжди **обчислюється** як `funcId | 0x400`, і ніколи не береться з таблиці.
+`0x0A9 | 0x400` — це `0x4A9`, а не `0x5A9`, бо біт 8 у `0x0A9` уже нульовий — унікально в цій
+таблиці. Захардкоджений ACK id — це баг, який чекає на родину UpdateList.
+
+Кожна родина має також **twin** (`AFFA_ENABLE_VIRTUAL_PANEL`) — модель панелі, яка збирає
+те, що ви передали, декодує це в `ScreenModel` і відповідає ACK так, як це робить залізо.
+Див. [Розробка без автомобіля](#розробка-без-автомобіля).
+
+### Матриця можливостей
+
+Питайте `display.supports(affa::Feature::X)` перед викликом; будь-який непідтримуваний виклик
+повертає `Result::NotSupported`, а не робить вигляд, що все вдалося.
+
+| Можливість | Carminat | UpdateList 8-сегм. | UpdateList LCD |
+| --- | :---: | :---: | :---: |
+| `Text` | так | так | так |
+| `Time` | так | ні | ні |
+| `Power` | так | так | так |
+| `Menu` | якщо `AFFA_ENABLE_MENU` | ні | ні |
+| `Popup` | якщо `AFFA_ENABLE_POPUP` | ні | ні |
+| `Fullscreen` | якщо `AFFA_ENABLE_FULLSCREEN` | ні | ні |
+| `ConfirmBox` | якщо `AFFA_ENABLE_CONFIRMBOX` | ні | ні |
+| `InfoPopup` | якщо `AFFA_ENABLE_INFOPOPUP` | ні | ні |
+| `AuxTracking` | якщо `AFFA_ENABLE_AUX_TRACKER` (типово вимкнено) | так само | так само |
+| `KeyTx` | так (`0x1C1`) | так (`0x0A9`) | так (`0x0A9`) |
+| `RadioText` | якщо `AFFA_ENABLE_ISOTP_RX` | так само | так само |
+
+Два чесні застереження, обидва також зафіксовані в `docs/API.md` §6:
+
+* `Feature::RadioText` повідомляє про **прапорець компіляції**, і станом на 0.1.0 **ніщо не
+  породжує `EventKind::RadioText`** — збирач із `proto/` ще не під'єднано до RX-шляху для
+  жодної з родин. У хостовому білді (де прапорець типово увімкнений) можливість обіцяє
+  більше, ніж є; на цільовій платі прапорець типово вимкнений і суперечності немає.
+  Тест-канарка в `test_seam` впаде того дня, коли хтось це закриє, — у цьому й сенс.
+* `Feature::AuxTracking` означає «помічник `AuxModeTracker` скомпільовано», а не
+  «`setAuxMode()` працює». Жодна панель не перевизначає `setAuxMode()`, тож він усюди
+  повертає `NotSupported`.
+
+### Перемикачі конфігурації
+
+`src/AffaConfig.h` — єдиний заголовок із перемикачами; кожен описано там разом із ціною і
+наслідками. Задавайте їх у власних `build_flags` — заголовок лише підставляє значення за
+замовчуванням.
+
+| Макрос | Типово | Що вмикає |
+| --- | :---: | --- |
+| `AFFA_PANEL_CARMINAT` | `0`¹ | панель Carminat / AFFA3 |
+| `AFFA_PANEL_UPDATELIST` | `0`¹ | восьмисегментна UpdateList |
+| `AFFA_PANEL_UPDATELIST_MENU` | `0`¹ | моно-LCD різновид UpdateList (вмикає рядок вище) |
+| `AFFA_ENABLE_MENU` | `1` | `Menu`, `MenuController`, `IPage`, `nav()`, `getMenu()`. Найбільший опціональний блок. |
+| `AFFA_ENABLE_POPUP` | `1` | `showPopupText` / `hidePopup` |
+| `AFFA_ENABLE_FULLSCREEN` | `1` | `showFullscreenText` / `hideFullscreenText` |
+| `AFFA_ENABLE_CONFIRMBOX` | `1` | `showConfirmBox` (рівно на стелі в 113 байтів) |
+| `AFFA_ENABLE_INFOPOPUP` | `1` | `showInfoPopup` / `hideInfoPopup` (три повідомлення) |
+| `AFFA_ENABLE_AUX_TRACKER` | **`0`** | `AuxModeTracker`. Вимкнено, бо описує *чуже радіо*, а не панель. ~0.4 кБ рядків-шаблонів. |
+| `AFFA_ENABLE_TRANSLITERATION` | `1` | `toAscii` і його таблиця (~1.2 кБ). **0 — небезпечно**: UTF-8 тоді потрапляє на шину як є і малюється сміттям — це візуальна помилка, а не помилка компіляції. |
+| `AFFA_ENABLE_LOG` | `1` | макроси `AFFA_LOG*`. При 0 жоден формат-рядок не потрапляє у флеш, тому ніколи не ховайте побічний ефект в аргументі логу. |
+| `AFFA_LOG_LEVEL` | `3` | 0 off, 1 error, 2 warn, 3 info, 4 debug, 5 trace. На етапі компіляції. |
+| `AFFA_ENABLE_ESP32CAN_LINK` | `1` на Arduino, `0` на хості | `Esp32CanLink` і залежність `<esp32_can.h>` |
+| `AFFA_ENABLE_VIRTUAL_PANEL` | `0` на платі, `1` на хості | twin-и панелей (`vpanel/`). Найдорожчий опціональний блок. |
+| `AFFA_ENABLE_ISOTP_RX` | як `VIRTUAL_PANEL` | лише збирач ISO-TP і декодер екрана, без twin-ів |
+| `AFFA_ENABLE_TASK` | `0` | власна задача FreeRTOS, яка викликає `poll()`. **Ніколи не поєднуйте з власним викликом `poll()`.** |
+| `AFFA_TASK_PERIOD_MS` | `5` | період тієї задачі; більший збільшує затримку кнопки і тиск на RX-кільце |
+| `AFFA_TASK_STACK` | `3072` | пік — це виклик рендера: 96 байтів payload плюс робочі дані |
+| `AFFA_TASK_PRIO` | `5` | **має лишатися нижчим за 15 у `task_CAN`**, інакше RX-кільце голодує |
+| `AFFA_TX_COALESCE` | `1` | «перемагає найновіше» в межах `RenderSlot`. 0 відтворює дефект «панель рахує далі після Pause». |
+| `AFFA_TX_QUEUE_DEPTH` | `6` | слоти черги, приблизно `AFFA_MAX_PAYLOAD + 12` Б кожен. 6, а не 4, бо `showInfoPopup` — це три повідомлення, а перший виклик після ресинку тягне ще два зонди реєстрації. |
+| `AFFA_MAX_PAYLOAD` | `113` | **межа протоколу, а не бюджет**: `8 + 15×7 = 113`, далі лічильник ISO-TP переповнюється. Нижче 96 меню Carminat повертає `TooLong`. |
+| `AFFA_RX_RING_DEPTH` | `32` | степінь двійки. 32 × `sizeof(Frame)` = 448 Б; витримує паузу ~7 мс між `poll()` на завантаженій шині. |
+| `AFFA_ACK_TIMEOUT_MS` | `2000` | дедлайн ACK на кадр; точно збігається зі старим блокуючим очікуванням |
+| `AFFA_PEER_TIMEOUT_MS` | `5000` | тиша, після якої sync рветься. **Фактичне вікно — до цього значення плюс `AFFA_SYNC_INTERVAL_MS`**, бо watchdog перевіряється на такті heartbeat. Ніколи не опускайте нижче за найдовший запис у флеш: переривання TWAI не в IRAM, тож OTA чи запис NVS виглядає точно як панель, що замовкла. |
+| `AFFA_SYNC_INTERVAL_MS` | `1000` | період heartbeat. Вважайте фіксованим: так показує захоплення шини. |
+| `AFFA_MAX_SUBSCRIPTIONS` | `8` | слоти підписок Layer 1 |
+| `AFFA_MENU_MAX_ITEMS` | `12` | місткість меню |
+| `AFFA_MENU_MAX_FIELDS` | `3` | полів на пункт; `MenuItem` містить усі їх у собі — це основна частина RAM меню |
+| `AFFA_MENU_ROW_MAX` | `32` | буфер відрендереного рядка |
+| `AFFA_TEXT_MAX` | `64` | буфер тексту і біжучого рядка |
+
+¹ Усі три прапорці панелей типово `0` на цільовій платі — ви самі обираєте, що збирати. У
+хостовому тестовому білді всі три дорівнюють `1`.
+
+### Обсяг прошивки
+
+ESP32-C3 (`board = esp32-c3-devkitm-1`, ядро Arduino 2.0.17), release, прямо з виводу
+`pio run`. **База, виміряна на тому самому тулчейні**: порожній скетч зі `setup()`/`loop()` —
+**218 912 Б** флеш / **13 476 Б** RAM.
+
+| Збірка | Флеш | Δ до порожнього скетча | RAM | Δ до порожнього скетча |
+| --- | ---: | ---: | ---: | ---: |
+| `size_all` — усі панелі увімкнені | 265 706 Б | +46 794 Б | 16 372 Б | +2 896 Б |
+| `size_carminat` — лише Carminat | 265 706 Б | +46 794 Б | 16 372 Б | +2 896 Б |
+| `size_min` — Carminat без меню/popup/fullscreen/confirm/info, без транслітерації, без логу і підписок | 264 176 Б | +45 264 Б | 16 044 Б | +2 568 Б |
+| `ex07_virtual_panel_c3` — Carminat **плюс twin** (`proto/` + `vpanel/`) | 284 140 Б | +65 228 Б | 25 980 Б | +12 504 Б |
+
+Ці числа треба читати з трьома поправками, інакше вони введуть в оману:
+
+1. **Більшість дельти — це драйвер CAN, а не ця бібліотека.** Голий скетч, який лише лінкує
+   `esp32_can` + `can_common`, відкриває `Serial` і викликає `CAN0.begin(500000)` — узагалі
+   без AffaDisplay — важить **258 806 Б / 14 564 Б** на тому самому тулчейні. Відносно
+   *цієї* підлоги бібліотека коштує **+6 900 Б флеш / +1 808 Б RAM** у повній комплектації,
+   **+5 370 Б / +1 480 Б** у мінімальній і **+25 334 Б / +11 416 Б** із twin-ом, який
+   реально використовується. Саме ці числа варто цитувати.
+2. **`size_all` і `size_carminat` байт у байт однакові — і це результат, а не дефект.** Обидві
+   збирають `examples/01_link_check`, який створює власний мінімальний нащадок
+   `AffaDisplayBase` і не згадує жодного класу панелі, тож `--gc-sections` викидає кожну
+   скомпільовану, але невикористану панель. **Невикористана панель коштує нуль, і це
+   виміряно** — саме заради цього кожен опціональний `.cpp` загорнуто у `#if` цілком. Ціна
+   *використання* панелі видно в таблиці прикладів нижче.
+3. Рядок із twin-ом — це twin, який *використовують*, з тієї ж причини: увімкнути
+   `AFFA_ENABLE_VIRTUAL_PANEL` у збірці, яка жодного twin-а не називає, теж коштує нуль.
+
+<sub>У технічному завданні для порожнього скетча на цій платі наводилася цифра 247 290 Б.
+Вона не відтворюється на тулчейні, зафіксованому в цьому репозиторії (ядро Arduino 2.0.17 /
+платформа espressif32 6.13.0); чиста збірка тут дає 218 912 Б. Відносно 247 290 Б дельти
+були б +18 416, +18 416, +16 886 і +36 850 Б. Таблиця вище користується виміряними базами.</sub>
+
+По прикладах, та сама плата і ядро, усе з реального виводу `pio run`:
+
+| Env | Що задіює | Флеш | RAM |
+| --- | --- | ---: | ---: |
+| `ex01_link_check` | лише ядро, рівень логу 4 | 265 714 Б | 16 372 Б |
+| `ex02_carminat_text` | Carminat без меню | 271 194 Б | 16 324 Б |
+| `ex03_carminat_menu` | Carminat + `Menu` + сторінки | 274 160 Б | 17 892 Б |
+| `ex04_updatelist_segment` | UpdateList 8 сегментів + біжучий рядок | 270 446 Б | 16 444 Б |
+| `ex05_updatelist_menu` | різновид UpdateList LCD | 270 464 Б | 16 484 Б |
+| `ex06_counter_preempt` | Carminat, tap і витіснення | 271 038 Б | 16 348 Б |
+| `ex07_virtual_panel_c3` | Carminat + `proto/` + `vpanel/` | 284 140 Б | 25 980 Б |
+| `ex08_radio_mitm` | Carminat + меню + підписки | 274 188 Б | 17 748 Б |
+| `ex90_bench_ota` | вебконсоль + WiFi + ElegantOTA + twin | 898 242 Б | 71 124 Б |
+
+Панель разом із рендером — це ~5.5 кБ понад голе ядро; `Menu` додає ~3 кБ флеш і ~1.6 кБ RAM
+(зменшіть `AFFA_MENU_MAX_ITEMS` / `AFFA_MENU_MAX_FIELDS`, якщо це критично); twin-и — ~13 кБ
+флеш і ~9.6 кБ RAM, і саме тому їх вимкнено на цільовій платі. `ex90_bench_ota` визначається
+переважно WiFi і HTTP-сервером і використовує розділ OTA на 1.4 МБ.
+
+### Багатозадачність і неблокуючий контракт
+
+* **Ніякого `delay()`, `vTaskDelay()` чи активного очікування — ніде в `src/`.** `IClock`
+  віддає `millis()` і навмисно більше нічого. Якби чомусь тут захотілося поспати, це
+  означало б, що автомат станів побудовано неправильно.
+* **Ніякої купи після `begin()`.** Усі буфери статичні і задані макросами в `AffaConfig.h`.
+  Ні `String`, ні `std::vector`, ні `std::function` в ядрі.
+* **Ніякого стану на рівні файлу чи статичних локальних змінних.** Кожен лічильник, дедлайн і
+  буфер — це поле об'єкта, тож два екземпляри на двох шинах не заважають один одному. (У
+  видобутому коді були черга подій на рівні файлу, статична мітка часу логу і
+  `static int8_t timeout`; у бібліотеці це спільний стан між екземплярами.)
+* **`poll()` викликає рівно одна задача.** Бібліотека на екземпляр і **без локів** — це
+  свідомий вибір, а не недогляд, і саме він тримає `poll()` вільним від критичних секцій.
+  Будь-який інший контекст (HTTP-обробник, BLE callback, друга задача) має покласти запит у
+  поштову скриньку, яку розгрібає задача з `poll()`. `examples/90_bench_ota` робить саме так —
+  його варто копіювати.
+* **Callback-и викликаються з контексту `poll()`**, ніколи із задачі драйвера CAN. Стан
+  фіксується *до* того callback-у, який про нього повідомляє, тож із callback-у можна
+  викликати бібліотеку далі — рендери, `abortPending()`, `pressKey()`, `subscribe()` — але
+  ніколи сам `poll()`.
+* **Вказівники всередині `Event` дійсні лише на час виконання callback-у.** Вони вказують на
+  внутрішню пам'ять бібліотеки. Копіюйте те, що зберігаєте.
+* `poll()` **не залежить від частоти виклику**: раз на секунду і мільйон разів на секунду
+  дають ті самі кадри в тому самому порядку з тим самим таймінгом. Мінімальної частоти для
+  коректності не існує — лише для затримки і для того, щоб `Stats::ringOverflow` лишався нулем.
+* Якщо ви не хочете володіти циклом, `AFFA_ENABLE_TASK=1` дає бібліотеці власну задачу
+  FreeRTOS. Робити так *і* викликати `poll()` самому — це два водії на одному об'єкті без
+  локів; оберіть щось одне.
+
+### Затримка і витіснення
+
+Гарантія, зафіксована в `test_latency` як **кількість викликів `poll()`**, а не як обіцянка в
+мілісекундах:
+
+> **Кнопка доходить до вашого callback-у рівно за один `poll()`** — і з порожньою чергою, і
+> так само тоді, коли в польоті 96-байтний `showMenu`, `WaitAck` тримає 1900 мс зі своїх
+> 2000 мс дедлайну, а всі слоти передачі зайняті.
+
+Це випливає з порядку всередині `poll()`: спершу вичерпати RX і доставити кнопки, і лише
+**строго після цього** качати автомат передачі. Автомат TX перевіряє дедлайн і повертається;
+він ніколи не чекає.
+
+* **Перемагає найновіше, у межах `RenderSlot`.** Повторний рендер займає рівно один слот
+  черги незалежно від частоти і завжди тримає найсвіжіше значення; витіснені квитки
+  завершуються з `Result::Aborted`. Три `setText`, поставлені за меню в польоті, стають одним
+  повідомленням із третім рядком.
+* **Різні слоти ніколи не витісняють один одного** — оновлення годинника не з'їсть popup.
+* **`abortPending()`** прибирає все, що в черзі, але *ще не почалося*, повідомляючи `Aborted`
+  по одному разу на квиток, у порядку. **`Priority::Urgent`** обганяє чергу, але ніколи не
+  обганяє зонди реєстрації.
+* **Повідомлення на шині ніколи не розривається.** `Urgent` і `abortAll()` спрацьовують лише
+  на межі кадру, а лічильник продовження ISO-TP скидається при відмові від завдання, тож він
+  не може зіпсувати наступне повідомлення.
+* **Власні передані кадри інертні.** Кожен переданий кадр позначається `Frame::fromSelf` і
+  відкидається до auto-ACK, до зіставлення ACK **і** до декодера кнопок. Справжній контролер
+  не повертає собі власні кадри; `LoopbackLink` може. Поведінка однакова в обох випадках — і
+  саме це робить хостові тести чогось вартими.
+
+Без цього лічильник, що малюється з частотою 10 Гц перед 13-кадровою передачею меню, лишає
+хвіст застарілих значень: панель видимо рахує далі ще секунду *після* того, як користувач
+натиснув Pause і бібліотека коректно отримала кнопку. Виглядає як баг обробки кнопок, а є
+багом черги. `examples/06_counter_preempt` це вимірює.
+
+### Коди кнопок
+
+Джойстик фізично є частиною **панелі**: натискання змушує панель закодувати і передати кадр
+кнопки, який приймає радіо. **Штатна роль цієї бібліотеки — радіо**, тож кнопки завжди
+приходять *до* нас, і `pressKey()` / `nav()` типово працюють як `KeySource::Local`.
+
+Кадр на шині, на `0x1C1` (Carminat) або `0x0A9` (UpdateList):
+
+```
+03 89 <code>>8> <code&0xFF | (hold ? 0xC0 : 0)> <filler × 4>
+```
+
+| `affa::Key` | Код | Примітки |
+| --- | :---: | --- |
+| `Load` | `0x0000` | кнопка знизу підрульового важеля; утримання `Load` — типовий жест відкриття меню |
+| `SrcNext` | `0x0001` | |
+| `SrcPrev` | `0x0002` | |
+| `VolUp` | `0x0003` | |
+| `VolDown` | `0x0004` | |
+| `Pause` | `0x0005` | |
+| `RollUp` | `0x0101` | коліщатко, один клац угору |
+| `RollDown` | `0x0141` | коліщатко, один клац униз |
+
+Чотири речі в цій таблиці критичні:
+
+1. **Перевірка `03 89` не є необов'язковою.** Той самий id кнопок несе також `70 A3..`,
+   `02 64 0F A3..` і `05 63 "0037"`. Декодер без цієї перевірки вигадує кнопки `0x640F` і
+   `0x3030` зі звичайного трафіку.
+2. **Утримання клацання коліщатка невідновне за задумом.** `0x0101 | 0xC0` і `0x0141 | 0xC0`
+   — це *обидва* `0x01C1`, бо `0x40` одночасно є бітом напрямку RollDown і половиною маски
+   утримання. Вони декодуються як `RollUp` + hold, а кодувальник відмовляється передавати
+   будь-який із них: утримання коліщатка не має жодного представлення на шині. Саме тому
+   `NavCommand::Increase` / `Decrease` доступні лише через `KeySource::Local`.
+3. **Перелік відкритий.** Ці вісім імен підтверджені `[REF]`, але ніщо не доводить, що список
+   *повний*. Нерозпізнаний код доставляється як `static_cast<Key>(raw & 0xFF3F)` — тобто
+   `Key`, що несе сирий код із шини, — і ніколи не відкидається. Завжди пишіть `default:` у
+   `switch` по `Key`.
+4. **`KeySource::Wire` кладе фантомні натискання на шину.** На стенді це нешкідливо; в
+   автомобілі це ввід, на який можуть зреагувати інші блоки.
+
+### Розробка без автомобіля
+
+Три рівні, і жоден не потребує машини. Повний покроковий опис із командами, які можна просто
+скопіювати, — **[`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HARDWARE.md)**.
+
+1. **Лише ноутбук — узагалі без плати.**
+   ```
+   pio test -e native            # 138 випадків, ~10 с
+   pio run -e ex07_virtual_panel -t exec
+   ```
+   Уся бібліотека працює на хості проти **twin-а**: моделі панелі, яка збирає передане,
+   декодує це в `ScreenModel`, відповідає на handshake і підтверджує кадр за кадром.
+   Ставте `AckMode::Declared` — це єдиний режим, що моделює залізо, і він відтворює всі
+   кількості кадрів із wire spec (`showMenu` = 13 кадрів, останній PCI `0x2C`), не знаючи
+   їх наперед.
+2. **Гола плата ESP32 — без трансивера і без панелі.** Прошийте `examples/90_bench_ota` з
+   `AFFA_ENABLE_VIRTUAL_PANEL=1`, відкрийте вебконсоль, переключіть її на `panel=virtual`.
+   Twin годується з Layer-0 tap, тому та сама схема обслуговує і віртуальну панель, і
+   пасивне декодування поруч зі справжньою. У браузері ви отримуєте живе кільце кадрів,
+   декодоване «скло», ін'єкцію кнопок і лічильники затримок.
+3. **Справжня панель на столі.** Підключення як вище, 500 кбіт/с, пам'ятайте про пастку
+   `(rx, tx)` і про те, що **розмову починає панель** — доки вона не подасть голос, не
+   станеться нічого. Спершу прошийте `examples/01_link_check`: він називає кожен відомий
+   кадр, і на шині з двох вузлів `txErr == 0` є доказом того, що панель вас підтверджує.
+
+Той самий документ описує, як зняти власний трафік, як звірити його з `docs/WIRE-SPEC.md` і
+як додати четверту родину панелей.
+
+### Три способи зламати лінк ззовні
+
+Усі три — це застосунок, що тягнеться повз бібліотеку прямо в драйвер CAN, і всі три
+перевірені проти `collin80/esp32_can` із посиланнями на файл і рядок у
+`docs/ESP32CAN-CONTRACT.md`.
+
+1. **Callback на поштову скриньку 0 або 1.** `processFrame()` віддає перевагу callback-у
+   скриньки перед загальним, а `watchFor()` кладе свій фільтр «усе підряд» саме в ці дві
+   скриньки — тож реєстрація там **тихо краде в бібліотеки всі стандартні кадри**. Симптом:
+   шина виглядає живою, а бібліотека нічого не отримує.
+2. **Другий `watchFor()` (або другий `CAN0.begin()`).** Він перевстановлює драйвер на живій
+   шині, губить обидві черги, поки `task_CAN` заблокована на старій, і стирає всі 32 слоти
+   фільтрів.
+3. **Будь-який сеттер режиму драйвера** — `setListenOnlyMode`, `setNoACKMode`, `enable`,
+   `disable`, `set_baudrate`, `beginAutoSpeed`, `forceDriverRestart`, `setDebuggingMode(true)`.
+   Кожен реалізовано як `disable()` + присвоєння + `enable()`, тобто `twai_stop` посеред
+   кадру, `vTaskDelete` обох RX-задач, видалення драйвера і встановлення заново. Викликаний
+   із загального callback-у, будь-який із них видаляє власного викликача. Саме це раз за
+   разом лишало контролер зупиненим у попередньому проєкті.
+
+Ще два корисні факти: **ніколи не перевіряйте значення, яке повертає `CAN0.sendFrame()`** (це
+буквальний `true` на будь-якому шляху, включно з «таймаут і відкинули» та «драйвер не
+встановлено»), і якщо вам потрібне автоматичне відновлення після bus-off, викличте
+`CAN0.setForceRecovery(true)` **до** `link.begin()` і змиріться з дводесятковою паузою.
+Бібліотека не додає власного відновлення: два ініціатори, що змагаються за
+`twai_initiate_recovery()` на одному контролері, — це і є спосіб отримати напіввідновлену
+периферію.
+
+### Документи і тести
+
+```
+pio test -e native      # 138 хостових тестів в 11 наборах, без заліза
+pio run                 # усі середовища: хостова збірка плюс 12 цілей ESP32-C3
+```
+
+| Документ | Що це |
+| --- | --- |
+| [`docs/API.md`](docs/API.md) | Специфікація, під яку написано реалізацію. Якщо будь-який інший документ їй суперечить — перемагає вона. |
+| [`docs/WIRE-SPEC.md`](docs/WIRE-SPEC.md) | Побайтовий оракул: усі розкладки кадрів, готові до вставки золоті вектори з позначкою найсильнішого свідка і арифметика для кожної кількості кадрів. **Якщо код і цей документ розходяться щодо байта — помиляється код.** |
+| [`docs/PROTOCOL-NOTES.md`](docs/PROTOCOL-NOTES.md) | Походження: кожен байт зведено до захоплення шини, OEM-логу або сторонньої реалізації, плюс відкриті питання, кожне сформульоване як експеримент, що його закриває. |
+| [`docs/ESP32CAN-CONTRACT.md`](docs/ESP32CAN-CONTRACT.md) | Що насправді гарантує `collin80/esp32_can`, з посиланнями, і 21 правило, яке з цього випливає. |
+| [`docs/PORTING.md`](docs/PORTING.md) | Як перевести застосунок зі старих класів — і як відмовитися від цієї бібліотеки взагалі, включно з тим, які файли специфічні для панелі, а які є придатним до повторного використання транспортним ядром. |
+| [`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HARDWARE.md) | Три рівні вище, докладно, плюс зняття трафіку і додавання панелі. |
+
+`core/`, `util/`, `link/LoopbackLink.h`, `proto/` і `vpanel/` мають збиратися для
+`platform = native` з нічим, окрім стандартної бібліотеки C++17. Якщо зміна ламає цю збірку —
+неправа зміна, а не тест. `<esp32_can.h>` зустрічається в усьому репозиторії рівно один раз,
+у `src/link/Esp32CanLink.cpp`.
+
+Ліцензія: **MIT**, див. [`LICENSE`](LICENSE).
+
+---
+
+## 🇺🇦 Ukraine
+
+This project is developed in Ukraine, under a full-scale invasion.
+If it was useful to you, consider supporting Ukraine's defence:
+https://savelife.in.ua/ and https://u24.gov.ua/
+Slava Ukraini.
+
+## 🇺🇦 Україна
+
+Цей проєкт розробляється в Україні, під час повномасштабного вторгнення.
+Якщо він був вам корисний, розгляньте можливість підтримати оборону України:
+https://savelife.in.ua/ та https://u24.gov.ua/
+Слава Україні.
