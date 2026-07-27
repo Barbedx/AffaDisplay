@@ -180,14 +180,20 @@ and what you cannot avoid rewriting.
 | `src/link/` | ~350 | **No**, but ESP32-specific. `ICanLink` is three methods; `Esp32CanLink` is the only file in the repository that includes `<esp32_can.h>`; `LoopbackLink` is a header-only test double. | you keep CAN. Replacing the MCU means writing one new `ICanLink` and nothing else. |
 | `src/proto/IsoTp.*` | ~200 of 544 | **No.** Plain ISO-TP-style fragmentation and reassembly over 8-byte frames. | you keep any multi-frame CAN protocol |
 | `src/proto/ScreenDecode.*`, `ScreenModel.h` | ~340 of 544 | **Yes** — every offset is a Carminat/UpdateList payload layout. `ScreenModel` itself (header + two rows + a mode) is generic enough to survive. | you decode panel traffic |
-| `src/vpanel/` | ~825 | **Yes** — these model the two panel families. | you want the no-hardware development loop |
-| `src/carminat/` | ~1640 | **Yes**, except `Menu` / `MenuController` / `IPage`, which are a **generic two-row list UI** with no wire knowledge at all — they render into strings and hand them to a display. | you want the menu on your OLED (see B.3) |
-| `src/updatelist/` | ~830 | **Yes** — the 8-segment and LCD encodings, plus the marquee. The marquee itself (position as a pure function of the clock) ports to anything. | you keep an UpdateList panel |
+| `src/widget/` | ~940 | **No.** `MenuModel` + `IMenuRenderer` + `MenuGeometry` are a list UI with no wire knowledge; `Marquee` is a scrolling window with none either. Both take their geometry as data and reach a display through an interface. | you want either widget on your own glass (see B.3) |
+| `src/carminat/` | ~1250 | **Yes**, except the menu adapter, which is just the seam between `src/widget/` and this panel's frames. | you keep a Carminat panel |
+| `src/updatelist/` | ~805 | **Yes** — the 8-segment and LCD encodings. The marquee they drive is **not** here; it moved to `src/widget/Marquee`. | you keep an UpdateList panel |
 
-**The short version:** `core/` + `util/` + `link/` + `proto/IsoTp.*` is the reusable
-transport and protocol machinery, roughly 2 900 lines and no panel knowledge that is not
-supplied as data. Everything under `carminat/`, `updatelist/`, `vpanel/` and
-`proto/ScreenDecode.*` is one specific panel family's wire format, roughly 3 600 lines.
+`src/vpanel/` (~825 lines) was here: panel twins used as a test oracle and a no-hardware
+dev loop. **Deleted** — they were application-shaped code shipped as library surface.
+`setSelfAck()` covers the dev loop, and a decoder over `isotp::Reassembler` +
+`affa::screen` covers the oracle in about thirty lines; `test_bench_surface` and
+`examples/90_bench_ota` each carry one.
+
+**The short version:** `core/` + `util/` + `link/` + `proto/IsoTp.*` + `widget/` is the
+reusable transport, protocol and UI machinery — roughly 3 900 lines with no panel knowledge
+that is not supplied as data. Everything under `carminat/`, `updatelist/` and
+`proto/ScreenDecode.*` is one specific panel family's wire format, roughly 2 400 lines.
 
 ### B.2 Moving to an OLED (or any display that is not an AFFA panel)
 
@@ -262,5 +268,4 @@ Not a sales pitch — a list of things that are easy to not notice you were gett
 * a wall-clock sync watchdog rather than a call counter (the original defect);
 * self-frame suppression at all three points that need it — auto-ACK, ACK matching, key
   decode — which is what makes a loopback test behave like hardware;
-* 200 host tests that run in about twelve seconds with no hardware, including the two
-  panel twins.
+* 206 host tests that run in about fourteen seconds with no hardware.

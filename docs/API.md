@@ -84,11 +84,7 @@ no `std::function`, no heap after `begin()`.
 | `proto/IsoTp.{h,cpp}` | `IsoTp::fragment()` (the transmit layout, shared with the TX FSM) and `IsoTp::Reassembler` (the receive direction). Entire `.cpp` body gated on `AFFA_ENABLE_ISOTP_RX`. | `core/AffaTypes.h` | yes |
 | `proto/ScreenModel.h` | `ScreenModel` — the decoded "what is on the panel" state. A plain aggregate, no methods beyond `clear()`. Header-only, so it costs nothing unless something instantiates it. | `<cstdint>` | yes |
 | `proto/ScreenDecode.{h,cpp}` | Payload offsets and `menu()` / `segText()` / `frame()` / `asciiz()` — reassembled bytes → `ScreenModel`. Same gate as `IsoTp.cpp`. | `ScreenModel.h`, `core/AffaTypes.h` | yes |
-| `vpanel/IVirtualPanel.h` | `IVirtualPanel` — the twin port: `onFrame`, `pressKey`, `screen()`. | `core/*`, `proto/ScreenModel.h` | yes |
-| `vpanel/VirtualPanelBase.{h,cpp}` | `VirtualPanelProfile` (alias `VdProtocol`) + the shared twin mechanics: ISO-TP reassembly, auto-ACK, sync reply, key transmit, the PASSIVE/EMULATION switch. Entire body gated on `AFFA_ENABLE_VIRTUAL_PANEL`. | `core/*`, `proto/*` | yes |
-| `vpanel/CarminatVirtualPanel.{h,cpp}` | The Carminat twin: one `decode()` over `0x151`, plus the `07 29 01` highlight frame. Gated on `AFFA_ENABLE_VIRTUAL_PANEL && AFFA_PANEL_CARMINAT`. | as above | yes |
-| `vpanel/UpdateListSegVirtualPanel.{h,cpp}` | The 8-segment twin: `0x121` `setText` payload decode. Gated on `AFFA_ENABLE_VIRTUAL_PANEL && AFFA_PANEL_UPDATELIST`. | as above | yes |
-| `vpanel/UpdateListLcdVirtualPanel.{h,cpp}` | The LCD twin. Gated on `AFFA_ENABLE_VIRTUAL_PANEL && AFFA_PANEL_UPDATELIST_MENU`. | as above | yes |
+| `widget/Marquee.{h,cpp}` | `MarqueeGeometry` + `Marquee` — a scrolling text window, no panel knowledge. Gated on `AFFA_ENABLE_MARQUEE`. | `AffaConfig.h`, `util/AffaText.h` | yes |
 | `carminat/CarminatConstants.h` | `0x3AF`, `0x3CF`, `0x151`, `0x1F1`, `0x1C1`, filler `0x00`, scroll-indicator values, the Carminat `SyncProfile` instance. | `core/*` | yes |
 | `carminat/CarminatDisplay.{h,cpp}` | Carminat frame builders: `setText`, `setTime`, `showMenu`, `highlightItem`, popup/fullscreen/confirm/info, key decode for `0x1C1`. Gated on `AFFA_PANEL_CARMINAT`. | `core/*`, `util/*`, `<Arduino.h>` permitted in the **.cpp only** | `.h` yes, `.cpp` yes if it avoids `<Arduino.h>` — it must |
 | `widget/MenuGeometry.h` | `MenuGeometry` — `rows`, `rowChars`, `wrap`. The shape of the display, injected. Gated on `AFFA_ENABLE_MENU`. | `AffaConfig.h` | yes |
@@ -113,8 +109,8 @@ no `std::function`, no heap after `begin()`.
   is gone entirely (§7b.7b).
 * `core/` and `util/` are compiled by `test/` for `platform = native`. If a change
   breaks that build, the change is wrong, not the test.
-* `proto/` and `vpanel/` are host-compilable for the same reason and a stronger one:
-  the twins exist to be the test oracle and the no-hardware development loop (§2.14).
+* `proto/` and `widget/` are host-compilable for the same reason and a stronger one: the
+  decoder is the test oracle and the widgets have no panel to need (§2.14).
   A `<Arduino.h>` or a driver type anywhere in either folder destroys their only
   purpose. They talk to `ICanLink` and `IClock` and to nothing else.
 
@@ -258,8 +254,7 @@ enum class Feature : uint8_t {
   KeyTx,        // this panel family has a key-transmit id, so pressKey(..., Wire)
                 // can put a frame on the bus (§7b.6)
   RadioText,    // the ISO-TP reassembler is compiled in (AFFA_ENABLE_ISOTP_RX), so
-                // inbound text CAN be reconstructed. A COMPILE GATE, nothing more:
-                // no panel routes reassembled text to the application (§6)
+                // inbound text is reconstructed and delivered to onText() (§2.14.1)
 };
 
 // Navigation intent. Mapped to (Key, KeyEdge) by AffaDisplayBase::nav() — see §8.
@@ -1562,228 +1557,134 @@ void asciiz(const uint8_t* payload, uint8_t len, uint8_t a, uint8_t b,
 > facts are load-bearing, and every golden vector for `showMenu` is parameterised by ACK
 > model rather than carrying a bare frame count.
 
-### 2.14 `vpanel/` — the panel twins
+### 2.14 Reading the wire back — `onText()` and `affa::screen`
 
-A twin is a faithful model of a real panel: it reassembles what the library transmits,
-decodes it into a `ScreenModel`, auto-ACKs each frame the way the panel does, answers
-the sync handshake, and can transmit keys back. It buys two things nothing else can:
+`src/vpanel/` was here: `IVirtualPanel`, `VirtualPanelBase` and three panel twins, about
+825 lines, behind `AFFA_ENABLE_VIRTUAL_PANEL`. They were **deleted**. They bought two
+genuinely useful things, and both are still available in smaller pieces that are not
+library surface:
 
-* **a semantic test oracle** — `twin.screen().header` is `"CLOCK"`, rather than a byte
-  comparison that passes for the wrong reason and fails on a harmless layout change;
-* **a no-hardware development loop** — the whole library runs on the host, or on a
-  bench ESP32 with no panel attached, against something that behaves like the panel.
+| What the twins were for | What does it now |
+| --- | --- |
+| a no-hardware development loop — the library running against something that ACKs like a panel | `setSelfAck(true)` (§2.6), plus one injected `61 11` to complete the handshake |
+| a semantic test oracle — `twin.screen().header == "CLOCK"` rather than a byte comparison | `isotp::Reassembler` + `affa::screen::*`, driven from the Layer-0 tap. Thirty lines; `test_bench_surface::decodeTx()` and `examples/90_bench_ota`'s `BenchScreen` are the two worked copies |
 
-It is **off by default on target** (`AFFA_ENABLE_VIRTUAL_PANEL = 0`) and on by default
-on the host. A consumer who turns it on gets the loop and pays the flash for it; the
-README carries the measured figure.
+The reason for the deletion is the one that runs through this whole document: a model of a
+panel is an *application* of the protocol, not part of it. Nothing in the library called
+the twins, no consumer could reach them without opting into a gate, and a library that
+ships its own test oracle has put its thumb on the scale — the oracle is worth more when
+the code under test cannot see it.
+
+Both replacements are behind **`AFFA_ENABLE_ISOTP_RX`**, off on target and on for the host.
+
+#### 2.14.1 `onText()` — inbound text, with an emitter
+
+Earlier revisions declared `EventKind::RadioText` and never constructed it (§6). It was
+removed with a note in `AffaTypes.h` saying to re-add it *with* its emitter and never
+before. This is that emitter, as a callback rather than an event:
 
 ```cpp
-// vpanel/IVirtualPanel.h
-#pragma once
-#include "../AffaConfig.h"
-#if AFFA_ENABLE_VIRTUAL_PANEL
-
-#include "../core/AffaTypes.h"
-#include "../core/ICanLink.h"
-#include "../core/IClock.h"
-#include "../proto/ScreenModel.h"
-
-namespace affa {
-
-struct IVirtualPanel {
-  virtual ~IVirtualPanel() = default;
-
-  // The twin transmits its ACKs, sync replies and keys through this link.
-  virtual bool begin(ICanLink& link, IClock& clock) = 0;
-
-  // Feed it one frame the library transmitted. The harness owns the wiring; the twin
-  // does not drain a link of its own, so it can sit downstream of a real bus, a
-  // LoopbackLink, or a recorded capture with no change.
-  virtual void onFrame(const Frame& f) = 0;
-
-  // Transmit a key, display -> radio. `code` is the raw wire code (Key's value).
-  // Named transmitKey, not pressKey: on the twin this is only the WIRE half, and
-  // reusing the name of AffaDisplayBase::pressKey — which by default also has a local
-  // effect — is exactly the lookalike-function trap KeySource exists to close.
-  // Renamed from IVirtualDisplay::pressKey (§7).
-  virtual bool transmitKey(uint16_t code, bool hold) = 0;
-
-  virtual const ScreenModel& screen() const = 0;
-};
-
-} // namespace affa
-#endif
+// AffaDisplayBase — behind AFFA_ENABLE_ISOTP_RX
+using TextCb = void (*)(const char* text, void* ctx);
+void onText(TextCb cb, void* ctx);
 ```
 
+Text that **another node** drew on the panel's text channel, reassembled from its ISO-TP
+frames and delivered once per complete message. In the radio role nothing else produces it
+— we are the node that normally writes that channel — so this is the sniff/MITM seam, and
+it is why the callback costs a gate rather than shipping on.
+
+Three properties worth stating, because each is a silent failure if it goes the other way:
+
+* **`text` points into library storage** and is valid only for the duration of the
+  callback. Copy it if you need it afterwards.
+* **Completion is the DECLARED length**, `2 + payload[1]`, not a frame count. Emitting per
+  appended frame would deliver the same screen once per continuation. The one exception is
+  the `AFFA_MAX_PAYLOAD` ceiling: the reassembler stops appending there, so a message
+  declaring more than it can hold is delivered short rather than dropped in silence.
+* **Our own renders never arrive here.** A self-sent frame coming back off an echoing link
+  carries `fromSelf` and is dropped before the decoder, so `onText` is never a mirror of
+  `setText`.
+
+The split between base and panel follows `packetFiller()` / `keyTxId()`:
+
 ```cpp
-// vpanel/VirtualPanelBase.h
-#pragma once
-#include "../AffaConfig.h"
-#if AFFA_ENABLE_VIRTUAL_PANEL
-
-#include "IVirtualPanel.h"
-#include "../proto/IsoTp.h"
-
-namespace affa {
-
-// Everything that differs between the twins is data in here — the same technique as
-// SyncProfile, and for the same reason.
-// PRIMARY NAME: VirtualPanelProfile — it pairs with SyncProfile by eye in a file listing.
-// `using VdProtocol = VirtualPanelProfile;` is kept so this section's spelling and any
-// existing call site still compile.
-struct VirtualPanelProfile {
-  uint16_t ctrlId;       // primary text/control frames from us (decode + ACK)
-  uint16_t textId;       // secondary text id (UpdateList 0x121); == ctrlId if unused
-  uint16_t keyId;        // key transmit id, display -> radio (Carminat 0x1C1)
-  uint16_t syncId;       // the id WE transmit sync on  (0x3AF / 0x3DF)
-  uint16_t syncReplyId;  // the id the panel answers on (0x3CF)
-  uint16_t replyFlag;    // 0x400
-  uint8_t  filler;       // 0x00 / 0x81
-
-  // Four APPENDED fields, all defaulted, so the seven-field aggregate initialisation
-  // printed above still compiles unchanged. They are not decoration:
-  uint8_t  aliveByte   = 0;   // radio heartbeat byte; 0 = do not answer heartbeats
-  uint8_t  requestByte = 0;   // radio sync-request byte; 0 = do not answer requests
-  // The panel's FUNCTION TABLE, in registration order. The twin must ACK ALL of it, not
-  // just ctrlId/textId: the lazy 0x70 registration burst walks the whole table (Carminat
-  // 0x151 AND 0x1F1), and a twin that acknowledges only ctrlId stalls the second probe
-  // for AFFA_ACK_TIMEOUT_MS and then fails the payload queued behind it. Must outlive
-  // the twin; nullptr means "ctrlId and textId only".
-  const uint16_t* funcIds   = nullptr;
-  uint8_t         funcCount = 0;
-};
-using VdProtocol = VirtualPanelProfile;
-
-class VirtualPanelBase : public IVirtualPanel {
- public:
-  explicit VirtualPanelBase(const VirtualPanelProfile& p) : _p(p) {}
-
-  bool begin(ICanLink& link, IClock& clock) override;
-  void onFrame(const Frame& f) override;
-  bool transmitKey(uint16_t code, bool hold) override;
-  const ScreenModel& screen() const override { return _screen; }
-
-  // EMULATION vs PASSIVE. PASSIVE decodes only — no ACK, no sync reply — which is how
-  // you run a twin ALONGSIDE a real panel on a live bus to see what the panel sees
-  // without transmitting a byte. Two ACKers on one bus is the failure this prevents.
-  // Default: EMULATION.
-  void setEmulate(bool on) { _emulate = on; }
-  bool emulating() const   { return _emulate; }
-
-  // Per-frame ACK content. Done (0x74) finishes a transfer; Partial (30 01 00) tells
-  // the sender to keep going. Answering Partial to EVERY frame is what makes a real
-  // radio emit a complete multi-frame buffer for capture — it stops only on Done.
-  //
-  // DECLARED IS THE ONLY MODE THAT MODELS A PANEL, and it is what a twin used as an
-  // oracle should be set to: answer Partial while the declared FF_DL is unsatisfied and
-  // Done at it, which is what the hardware does. It reproduces every frame count in
-  // WIRE-SPEC without being told them — showMenu 13 frames ending at PCI 0x2C (not the
-  // emulator's 14 / 0x2D), Carminat setText 3, UpdateList setText 4, the LCD variant 5.
-  //
-  // Neither of the other two can. Under Done the transmit FSM correctly treats "DONE
-  // while bytes remain" as SUCCESS, so a 96-byte screen terminates after frame 0 and the
-  // twin sees 8 bytes of it — screen() stays Mode::None, which test_twin asserts. Under
-  // Partial the last frame is answered Partial with no bytes left and the sender reports
-  // SendFailed. The default is Done for backward compatibility with this section as
-  // originally published; examples/07_virtual_panel and 90_bench_ota both set Declared
-  // and say why. Prefer Declared in new code.
-  enum class AckMode : uint8_t { Done, Partial, Declared };
-  void setAckMode(AckMode m) { _ackMode = m; }
-
-  bool     synced()       const { return _synced; }
-  uint32_t lastDecodeMs() const { return _lastDecodeMs; }
-
  protected:
-  // Decode one control/text frame into _screen. Called for every frame on
-  // ctrlId/textId. Implementations use _asm + affa::screen::*.
-  virtual void decode(const Frame& f) = 0;
+  // 0 (the default) means this panel decodes no inbound text and the reassembler is
+  // never fed. Carminat 0x151, UpdateList 0x121.
+  virtual uint16_t textRxId() const { return 0; }
 
-  void autoAck(uint16_t id);   // 0x74 + filler on (id | replyFlag). No-op in PASSIVE.
-
-  VirtualPanelProfile _p;
-  ICanLink*           _link  = nullptr;
-  IClock*             _clock = nullptr;
-  ScreenModel         _screen;
-  isotp::Reassembler  _asm;
-  bool                _emulate = true;
-  bool                _synced  = false;
-  AckMode             _ackMode = AckMode::Done;
-  uint32_t            _lastDecodeMs = 0;
-};
-
-// The three concrete twins add a constructor that fills VirtualPanelProfile and a
-// decode(). They declare nothing else.
-class CarminatVirtualPanel       final : public VirtualPanelBase { /* 0x151, 0x1C1, 0x3AF */ };
-class UpdateListSegVirtualPanel  final : public VirtualPanelBase { /* 0x121, 0x0A9, 0x3DF */ };
-class UpdateListLcdVirtualPanel  final : public VirtualPanelBase { /* as above, LCD decode */ };
-
-} // namespace affa
-#endif
+  // Panel-specific because the command byte is: Carminat text is 0x74/0x77,
+  // UpdateList's is 0x76/0x7F. Return false for a payload that is not text — a menu
+  // screen, an info row — and nothing is delivered.
+  virtual bool decodeText(const uint8_t* payload, uint8_t len,
+                          char* out, uint8_t outSize) const;
 ```
 
-> **`IVirtualPanel` is fed, never polled — and that has two consequences worth knowing.**
-> There is no `poll()` on the interface, so the twin has no timer of its own. Its
-> peer-alive `0x69` is emitted **in answer** to the radio's ~1 Hz heartbeat, rate-limited
-> to one per 500 ms against `IClock`. Same cadence, same effect on the driver's 5000 ms
-> watchdog, and no poll for a harness to forget — but (a) a twin fed only data frames
-> never pings, and (b) a twin whose model is reset (`begin()` again) keeps answering, so
-> the driver sees a perfectly healthy link while the panel has forgotten everything. Only
-> silence, or a panel-initiated `61 11`, restarts the handshake, and this twin cannot
-> initiate one. A twin that had to model a power-cycled panel would need that seam.
+The base owns the reassembly, the completion rule and the callback plumbing; the panel owns
+the command byte and the offsets. `Feature::RadioText` reports this gate, and for the first
+time it reports something the library can actually deliver.
 
-> **Twin ACKs are padded with `_p.filler`** (`0x00` / `0x81`), matching the layout above.
-> A REAL panel pads `0xA3`. This is harmless — finding #6 forbids matching on a received
-> filler anywhere, and nothing does — but a golden vector recorded **from the twin** will
-> differ from a bus capture in the pad bytes, and that is the twin being a twin, not the
-> twin being wrong.
+#### 2.14.2 Decoding a screen yourself
 
-**The key transmit layout**, which the twin and §8.4 must agree on byte for byte:
-
-```
-keyId : 03 89 <code>>8> <code&0xFF | hold?0xC0:0> <filler x4>
-```
-
-with the exception that decides §8.3: the wheel codes `0x0101` and `0x0141` are **never**
-hold-masked, because they already use those bits. A hold edge on a wheel code has no wire
-representation at all. The twin's `transmitKey(0x0101, true)` therefore transmits exactly
-what `transmitKey(0x0101, false)` transmits — it is a raw code-level call and it is
-allowed to be that blunt — whereas the library's `pressKey(RollUp, Hold, KeySource::Wire)`
-refuses with `Result::NotSupported` and transmits nothing, because silently downgrading a
-coarse step to a fine one is a wrong screen the caller cannot detect (§7b.6). This is not
-the twin being lenient — it is the panel being incapable, and it is why
-`NavCommand::Increase` and `Decrease` are reachable only with a source of `Local`.
-
-**Wiring a twin to the library** is the harness's job, not the library's. The fabric
-lives in `test/`, because connecting two `ICanLink` endpoints is a test concern and
-putting it in `src/` would invite an application to ship it:
+`onText()` gives you a string. When you want the whole screen — header, both rows, the
+highlight, the info rows — decode it yourself; that is what the twins did and it is not
+much code:
 
 ```cpp
-affa::LoopbackLink<>          radioLink;   // what the library transmits through
-affa::LoopbackLink<>          panelLink;   // what the twin transmits through
-affa::CarminatVirtualPanel    twin;
-FakeClock                     clock;
-affa::CarminatDisplay         display(radioLink, clock);
+isotp::Reassembler asmb;
+ScreenModel        model;
 
-twin.begin(panelLink, clock);
-display.begin();
+// from a Layer-0 tap, or a subscribe(), or a replayed capture
+void onFrame(const Frame& f) {
+  if (f.id != carminat::kIdSetText || f.len == 0) return;
+  if (screen::frame(f, model)) return;     // the standalone 07 29 01 highlight
+  if (!asmb.onFrame(f)) return;
 
-// One "bus cycle": deliver each side's traffic to the other, then pump the library.
-for (int i = 0; i < 200; ++i) {
-  affa::Frame f;
-  while (radioLink.takeSent(f)) twin.onFrame(f);      // library -> panel
-  while (panelLink.takeSent(f)) radioLink.inject(f);  // panel   -> library
-  display.poll();
-  clock.advance(5);
+  const uint8_t* p = asmb.buffer();
+  const uint8_t  n = asmb.len();
+  if (n < 4) return;                       // p[2] is the command, p[3] its first operand
+  switch (p[2]) {
+    case screen::kMenuCmd:
+      if (p[3] == screen::kMenuModeWin) screen::menu(p, n, model);
+      break;
+    case screen::kWinTextCmdFull:
+    case screen::kWinTextCmdWindow:
+      screen::windowText(p, n, model);
+      break;
+    case screen::kInfoCmd:
+      screen::infoRow(p, n, model);
+      break;
+    default: break;                        // unmodelled: decoded as nothing, not a guess
+  }
 }
-
-display.showMenu("CLOCK", "Hours", "Minutes");
-// ... a few more cycles ...
-TEST_ASSERT_EQUAL_STRING("CLOCK", twin.screen().header);  // the oracle: meaning, not bytes
 ```
 
-Note that the twin is fed frames and never drains a link itself. That keeps it usable
-in three places without modification: this host harness, a bench ESP32 sitting on a real
-bus in PASSIVE mode, and a replay of a `notes/device-monitor-*.log` capture.
+Four traps, all of them paid for once already:
+
+1. **Feed EVERY frame to the reassembler**, including first frames whose command you do not
+   decode. Returning early on an unrecognised first frame leaves the previous message
+   active, and its continuations then append to *that* buffer — which grew the menu past
+   its end on every info popup.
+2. **The highlight is a standalone single frame**, not ISO-TP, and `screen::frame()` carries
+   the full `07 29 01` guard because `0x151` also carries `03 52 …`, `05 56 …` and
+   `02 54 03`. A looser test manufactures a highlight out of one of them.
+3. **Menu mode `0x05` is the fullscreen variant** and has a different layout entirely.
+   Decoding it with the windowed-menu offsets produces a confident wrong screen, which is
+   the one thing a semantic oracle must never do.
+4. **Decode the frames you TRANSMITTED, not a model of a panel that consumed them.** Both
+   worked copies read the Layer-0 tap, which is one layer closer to the glass than the
+   twins were, and it is the same wiring whether a real panel is attached or not.
+
+#### 2.14.3 What this does not prove
+
+The same caveat the twins carried, and it has not moved: agreement between two halves of
+one repository is not evidence about hardware. The decoder reads what our own encoder
+produced. It is an *independent witness* only in the sense that it was transcribed from
+`docs/WIRE-SPEC.md` rather than sharing code with the builders — which is why a decoder
+reporting a field one byte off from what a render call put there is a **finding**, not a
+calibration error. Do not move an offset to make a test pass.
+
 
 ---
 
@@ -2423,28 +2324,28 @@ The development-loop gates follow the same shape, with one difference: their def
 depends on where you are building.
 
 ```cpp
-// The panel twins + the ISO-TP reassembler and screen decoder they need. They exist to
-// give the tests a semantic oracle and to let you develop with NO PANEL AT ALL. On a
-// host build that is the point of the library being testable, so it is on. On target it
-// is dead weight for everyone who is not running a bench emulator, so it is off.
-// PlatformIO defines ARDUINO for a framework=arduino build and not for platform=native.
-#ifndef AFFA_ENABLE_VIRTUAL_PANEL
+// Inbound multi-frame decode: the ISO-TP reassembler, the screen decoder, and the
+// onText() callback they feed. For sniffing another head unit or replaying a capture —
+// nothing in the radio role needs it, so it is off on target and on for the host, where
+// the tests live. PlatformIO defines ARDUINO for framework=arduino and not for native.
+//
+// AFFA_ENABLE_VIRTUAL_PANEL (removed) gated vpanel/, a set of panel twins used as a test
+// oracle and as a dev loop with no panel attached. They were application-shaped code
+// shipped as library surface; setSelfAck() covers the no-panel loop, and a decoder built
+// on the two headers this gate buys covers the oracle. See section 2.14.
+#ifndef AFFA_ENABLE_ISOTP_RX
 #  if defined(ARDUINO)
-#    define AFFA_ENABLE_VIRTUAL_PANEL 0
+#    define AFFA_ENABLE_ISOTP_RX 0
 #  else
-#    define AFFA_ENABLE_VIRTUAL_PANEL 1
+#    define AFFA_ENABLE_ISOTP_RX 1
 #  endif
 #endif
 
-// The reassembler and screen decoder ALONE, without the twins — for a consumer who
-// wants to decode inbound multi-frame traffic (sniff another head unit, decode a
-// capture) and does not want a panel model. The twins cannot work without it.
-#ifndef AFFA_ENABLE_ISOTP_RX
-#  define AFFA_ENABLE_ISOTP_RX AFFA_ENABLE_VIRTUAL_PANEL
-#endif
-
-#if AFFA_ENABLE_VIRTUAL_PANEL && !AFFA_ENABLE_ISOTP_RX
-#  error "AffaDisplay: AFFA_ENABLE_VIRTUAL_PANEL requires AFFA_ENABLE_ISOTP_RX=1."
+// src/widget/Marquee and, with it, UpdateListDisplay's setScrollText / setScrollActive /
+// reassert. A widget rather than protocol, like the menu — but ON by default, because it
+// is small and eight segment cells do not hold a track title.
+#ifndef AFFA_ENABLE_MARQUEE
+#  define AFFA_ENABLE_MARQUEE 1
 #endif
 ```
 
@@ -2459,11 +2360,14 @@ not a feature. Its reverse-engineered pattern table survives in `docs/PROTOCOL-N
 library makes. `AFFA_ENABLE_MENU` still carries the same principle — default 0, because
 the menu is a widget and not the protocol (§5.3).
 
-The dependency is an `#error` and not a silent `#undef`/`#define` promotion, unlike
-`AFFA_PANEL_UPDATELIST_MENU` above. The difference is intent: selecting the LCD panel
-without its base is obviously a spelling of "I want the LCD panel", whereas asking for
-the twins while explicitly switching off the decoder they are built on means one of the
-two flags is a mistake, and guessing which would hide it.
+`AFFA_ENABLE_ISOTP_RX` used to carry a dependent gate above it — the twins, which could not
+work without the decoder — and the pair was policed by an `#error` rather than a silent
+`#undef`/`#define` promotion, unlike `AFFA_PANEL_UPDATELIST_MENU`. With `src/vpanel/` gone
+the gate stands alone and there is nothing left to contradict, so the `#error` went with it.
+The principle it stood on is still the live one: selecting the LCD panel without its base is
+obviously a spelling of "I want the LCD panel" and gets promoted, whereas two flags that
+directly contradict each other mean one of them is a mistake, and guessing which would hide
+it.
 
 Every gate is `#define`d to 0 rather than left undefined, and every use is `#if`, never
 `#ifdef`. A `-Wundef` build (which the library's own `platformio.ini` turns on) then
@@ -2494,8 +2398,8 @@ the image", which the map file and the flash number report.
 | `AFFA_ENABLE_LOG` | 1 | The `AFFA_LOG*` macros and `AffaLog.cpp`. | 0: every macro expands to `do {} while (0)`; **no format strings enter flash**. Side effects written inside a log argument vanish (§2.6). |
 | `AFFA_LOG_LEVEL` | 3 (info) | 0 off … 5 trace. Compile-time: levels above it emit nothing at all. | Too high on a live bus floods the sink; the `0x3AF`/`0x3CF` sync chatter is ~2 frames/s and trace prints all of it. |
 | `AFFA_ENABLE_ESP32CAN_LINK` | 1 | `Esp32CanLink.{h,cpp}` and the `<esp32_can.h>` dependency. | 0 on a project that uses a different CAN driver: nothing pulls `esp32_can` in, and you supply your own `ICanLink`. 1 without the dependency in `lib_deps`: link error. |
-| `AFFA_ENABLE_VIRTUAL_PANEL` | 0 on target, 1 on host | The panel twins (`vpanel/`) and, through them, `AFFA_ENABLE_ISOTP_RX`. Buys a semantic test oracle and a development loop with no panel attached. **This is the most expensive optional block in the library** — a twin carries a `ScreenModel` (~100 B RAM each) plus the decoder; the README's measured table quotes the flash. | 1 on a shipping target: you pay for a panel model you are not using. 0 on the host: every oracle-based test in `test_isotp` stops compiling — which is the point, since a host build without them tests bytes instead of meaning. |
-| `AFFA_ENABLE_ISOTP_RX` | follows `AFFA_ENABLE_VIRTUAL_PANEL` | `isotp::Reassembler` + `screen::*` **without** the twins, for decoding inbound multi-frame traffic (sniffing another head unit, replaying a capture). | 0 with `AFFA_ENABLE_VIRTUAL_PANEL=1`: `#error` at compile time, deliberately (§5.2). 1 alone: a few hundred bytes for a decoder nothing calls — harmless, and `--gc-sections` removes most of it. |
+| `AFFA_ENABLE_ISOTP_RX` | 0 on target, 1 on host | `isotp::Reassembler` + `screen::*` + the `onText()` path — decoding inbound multi-frame traffic (sniffing another head unit, replaying a capture) and the callback that reports it (§2.14). | 1 on a shipping target in the radio role: you pay ~900 B flash / ~384 B RAM for a decode path nothing in that role calls. 0 on the host: `test_seam`'s `onText` cases and `test_bench_surface`'s wire oracle stop compiling — which is the point, since a host build without them tests bytes instead of meaning. |
+| `AFFA_ENABLE_MARQUEE` | 1 | `widget::Marquee`, and with it `UpdateListDisplay::setScrollText` / `setScrollActive` / `reassert` / `setReassertOnAux`. A widget, not protocol — but a cheap one. | 0 on a Carminat-only build: it costs nothing there anyway, since nothing names it. 0 on an UpdateList build: the 8-segment panel shows the first eight characters of a title and no more, which is usually not what anyone wants. |
 | `AFFA_ENABLE_TASK` | — | **NOT IMPLEMENTED.** An owned FreeRTOS task that calls `poll()` was specified here and written nowhere: there is no `vTaskCreate` under `src/`, and there will not be one while "no `vTaskDelay` in `src/`" (§4) is the contract. Until the review that found this, the knob existed, defaulted to 0 and was referenced by nothing — so a consumer who set it to 1 got a library that never polled, with no diagnostic. | Setting it to 1 is now an `#error`. Own the loop: call `poll()` from exactly one task. `AFFA_TASK_PERIOD_MS`, `AFFA_TASK_STACK` and `AFFA_TASK_PRIO` were removed with it. |
 | `AFFA_TX_COALESCE` | 1 | Latest-value-wins replacement of a queued, not-yet-started render of the same `RenderSlot` (§3b.4). Costs one linear scan of at most `AFFA_TX_QUEUE_DEPTH` entries per enqueue, and 4 bytes per `TxJob`. Buys a bounded queue under any render rate. | 0: a repeated render stacks. At `f` Hz in front of a `T`-second transfer you get `min(⌈f·T⌉, depth−1)` stale messages on screen after the key and `QueueFull` for the rest (§3b.7) — the panel keeps counting after Pause. Set it to 0 only when consecutive same-slot messages are a sequence that must all be seen, and prefer `TxOptions::coalesce = false` on those specific messages instead. |
 | `AFFA_TX_QUEUE_DEPTH` | 6 | `sizeof(TxJob)` ≈ `AFFA_MAX_PAYLOAD + 12` bytes each ≈ 750 B of static RAM at the defaults. 6 and not 4 because `showInfoPopup` is three non-coalescing messages and the first call after a resync also carries two registration probes: 2 + 3 = 5 outstanding, plus one slot of headroom for an `Urgent`. | Below 3 the lazy registration burst (2 probes + 1 payload for either panel) cannot fit and the first send after a resync returns `QueueFull` forever. Below what your app bursts: renders start returning `QueueFull`. |
@@ -2551,27 +2455,33 @@ bool supports(Feature f) const;   // pure virtual on AffaDisplayBase; each panel
 with `AFFA_ENABLE_POPUP=0` reports `supports(Feature::Popup) == false`, and
 `showPopupText` returns `Result::NotSupported`.
 
-> **`Feature::RadioText` reports a COMPILE GATE, and only that.** Both panels answer it
-> with `AFFA_ENABLE_ISOTP_RX != 0`: the ISO-TP reassembler in `proto/` is built, so inbound
-> text *can* be reconstructed. **No panel routes reassembled text to the application.** The
-> reassembler has never been wired into the RX path for either family — `carminat/` and
-> `updatelist/` depend on `core/` and `util/` only, by design (§2).
+> **`Feature::RadioText` reports a compile gate — and, since `onText()`, a gate that buys
+> something.** Both panels answer it with `AFFA_ENABLE_ISOTP_RX != 0`, and with that gate on
+> the base reassembles inbound ISO-TP on the panel's text id and delivers a decoded string
+> to `onText()` (§2.14.1). For most of this library's life the answer was true about the
+> reassembler being *compiled* and false about anything reaching the application; that gap
+> is closed.
 >
 > Earlier revisions carried an `EventKind::RadioText` and an `EventKind::ScreenChanged`
 > against that future wiring, plus a canary test asserting that neither ever fired. **Both
-> enumerators have been removed**, and the canary with them. A value the library can never
-> emit is a promise in the public API that is simply false, and two years of "not yet" is
-> an answer. When someone wires `proto/` into the RX path, they add the event **and** its
-> emitter in the same change — which is the only order in which either is honest.
+> enumerators were removed**, and the canary with them, with a note in `AffaTypes.h` saying
+> to re-add them *with* an emitter and never before. `onText()` is that emitter — as a
+> callback rather than an event, because it carries a pointer into library storage and the
+> event union's arms were the delicate part. The rule stands for anything that comes next:
+> the emitter and the thing it emits land in the same change.
 >
 > **What did NOT go, and must not be confused with it:** `UpdateListBase` decodes the
 > radio's inbound `0x121` text and reports it through the protected virtual
 > `onRadioText(bool isAux)`. That hook is real, it is exercised, and it stays. It is a
-> subclass seam, not a published event.
+> single-frame AUX heuristic on a subclass seam — not `onText()`, which delivers the whole
+> reassembled string, and not a published event.
 >
-> An application that wants inbound text today uses `subscribe()` (Layer 1) on the panel's
-> text id and decodes the frames itself. `examples/08_radio_mitm` does exactly that, and
-> `docs/PROTOCOL-NOTES.md` §8 has the pattern table that used to live in `AuxModeTracker`.
+> An application that wants inbound text as a **string** uses `onText()`. One that needs
+> the raw bytes — because the discriminator it wants is a header byte a decoded string does
+> not carry — uses `subscribe()` (Layer 1) on the panel's text id instead.
+> `examples/08_radio_mitm` is the second case: its AUX classifier needs the `setText` format
+> byte. `docs/PROTOCOL-NOTES.md` §8 has the pattern table that used to live in
+> `AuxModeTracker`.
 
 > **The one deliberate behaviour change versus the code being extracted.** The legacy
 > `IDisplay` gave `showInfoPopup`, `showConfirmBox`, `showFullscreenText`,
@@ -2624,12 +2534,12 @@ with `AFFA_ENABLE_POPUP=0` reports `supports(Feature::Popup) == false`, and
 | `AuxModeTracker::onCanMessage(const CAN_FRAME&)` | your own `FrameCb` on a `subscribe()` of `0x151` | **deleted**, gate and all. It was extracted out of the RX path, then shipped default-off, then removed once it was clear nothing used it. The seven patterns are tabulated in `docs/PROTOCOL-NOTES.md` §8 and implemented in `examples/08_radio_mitm` — §7b.7b |
 | `_aux.onCanMessage(*packet)` inside `CarminatDisplay::recv` | *(removed)* | the display no longer feeds the tracker. Subscribe and feed it yourself, or write your own heuristic |
 | hold-Load hard-wired in `Menu::handleKey` | `setMenuHotkey(Key, KeyEdge)` / `clearMenuHotkey()` | same default (Load + Hold), now replaceable — §7b.7c |
-| `IVirtualDisplay::pressKey(uint16_t, bool)` | `IVirtualPanel::transmitKey(uint16_t, bool)` | renamed so it cannot be confused with `AffaDisplayBase::pressKey`, which by default also has a local effect (§2.14) |
+| `IVirtualDisplay::pressKey(uint16_t, bool)` | *(gone with the twins)* | it was renamed to `transmitKey` first, so it could not be confused with `AffaDisplayBase::pressKey`, which by default also has a local effect. To impersonate a panel now, call `pressKey(k, e, KeySource::Wire)` on a display — that is the same wire half, and it is public API (§7b.6) |
 | `attachMediaRouter` / `setMediaInfo` / `tickMedia` / `onElmUpdate` / `onBtDisconnected` | *(not in the library)* | media, ANCS and ELM stay in the application; drive the library with `setText`/`showMenu` |
 | `ISettings` (NVS for menu items) | *(not in the library)* | the application owns persistence; put your NVS write in `MenuItem::onChange` |
 | `IsoTp::Reassembler` / `IsoTp::fragment` (global `IsoTp` namespace) | `affa::isotp::*` in `proto/` | unchanged semantics; `int` lengths become `uint8_t` and `MAX_PAYLOAD` becomes `AFFA_MAX_PAYLOAD` (§2.13) |
 | `ScreenDecode::*`, `ScreenModel` | `affa::screen::*`, `affa::ScreenModel` in `proto/` | `item0`/`item1` → `row0`/`row1`; `Mode` becomes an `enum class` |
-| `vdisplay/IVirtualDisplay`, `VirtualDisplayBase`, `*VirtualDisplay` | `vpanel/IVirtualPanel`, `VirtualPanelBase`, `*VirtualPanel` | renamed for the panel/display split; `begin(ICanBus&, IClock&)` → `begin(ICanLink&, IClock&)`, and the twin is now **fed** frames through `onFrame()` instead of subscribing to a push callback (§2.14) |
+| `vdisplay/IVirtualDisplay`, `VirtualDisplayBase`, `*VirtualDisplay` | *(not in the library)* | briefly `vpanel/IVirtualPanel` etc., then **deleted**: a model of a panel is an application of the protocol, not part of it. `setSelfAck(true)` replaces the ACK half; `isotp::Reassembler` + `affa::screen` replace the decode half, in about thirty lines you own (§2.14) |
 | `extern bool _autoTime` | *(gone)* | it was a host global reaching into the display |
 
 Minimal shape of the migrated bring-up:

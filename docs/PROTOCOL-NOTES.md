@@ -235,10 +235,12 @@ The reference therefore ACKs **every** frame it receives — including consecuti
 mid-message, and including frames on ids it does not own — with an unconditional DONE. We
 know PARTIAL exists only because a real panel *sends* it to us. This matters twice:
 
-* The **virtual panel** (`vpanel/`) has no reference behaviour to copy for deciding when to
+* **Anything emulating a panel** has no reference behaviour to copy for deciding when to
   answer PARTIAL versus DONE. It must derive it from the transport: PARTIAL while the
   declared content length has not been reached, DONE on the frame that completes it. That
-  rule is inferred from our own receiver, not observed from a sender.
+  rule is inferred from our own receiver, not observed from a sender. The library's own
+  `setSelfAck()` implements exactly it; the deleted `vpanel/` twins called the same rule
+  `AckMode::Declared`.
 * An auto-ACK that answers everything with DONE would tell a peer "message complete" halfway
   through its multi-frame message. The library's ACK responder must be scoped to the ids it
   actually owns, which the reference's was not.

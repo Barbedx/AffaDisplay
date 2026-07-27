@@ -333,7 +333,7 @@ before `MenuModel` existed:
 | --- | --- |
 | `test_nav` | key routing, the page stack, and **frame counts on the wire** for wheel moves, edit entry and exit |
 | `test_bench_surface` | the web console's acceptance list, driven through the same public API |
-| `test_twin` | the virtual panel decoding real menu screens off the bus |
+| `test_twin` | the virtual panel decoding real menu screens off the bus — **suite deleted since**, with `src/vpanel/`; `test_bench_surface` now carries a local decoder over the transmitted frames instead |
 | `test_seam` | that hold-`Load` is the OEM open gesture and `getMenu()` is reachable through the seam |
 | `test_core`, `test_updatelist_wire` | that a panel with no menu still answers `supports(Feature::Menu)` with false |
 
@@ -372,7 +372,7 @@ multiplies by a `rowChars` it is handed and reaches the panel through a virtual
 who expected deleting a file to shrink the binary should look at this row and adjust.
 
 **Every build that does not use a menu is byte-identical.** `size_min`, `size_all`,
-`ex02_carminat_text`, both UpdateList examples, the twin — all zero. The whole-body `#if`
+`ex02_carminat_text`, both UpdateList examples — all zero. The whole-body `#if`
 discipline held through the migration; you do not pay for the widget unless you name it.
 
 **The one row that shrank is the argument in miniature.** `ex09_menu_widget` lost 1 390 B

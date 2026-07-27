@@ -28,7 +28,7 @@ repository root. On Windows the launcher is
 pio test -e native
 ```
 
-Expect **200 test cases across 13 suites in about twelve seconds**. The suites are worth
+Expect **206 test cases across 13 suites in about fourteen seconds**. The suites are worth
 knowing by name, because when you break something one of them tells you *what*:
 
 | Suite | What it pins |
@@ -43,9 +43,9 @@ knowing by name, because when you break something one of them tells you *what*:
 | `test_nav` | a full menu script through `CarminatDisplay`, decoded back with the independent screen decoder, asserting the FRAME COUNT of every step |
 | `test_menu_widget` | `widget::MenuModel` alone, at `rows` = 2, 3 and 6, against a recording renderer — no panel, no CAN (`docs/MENU-WIDGET.md` §6) |
 | `test_seam` | subscriptions, the tap, and every event kind |
-| `test_bench_surface` | the web console's acceptance list, driven through the public API |
 | `test_latency` | key delivery in exactly one `poll()`, coalescing, preemption |
-| `test_twin` | driver and twin talking to each other over a two-ended link |
+| `test_bench_surface` | the console's acceptance list, and a local wire decoder standing in for the deleted twin |
+| `test_marquee` | `widget::Marquee` alone — the window as a function of the clock, at widths and step rates that are not this panel's |
 
 Run one suite while you iterate:
 
@@ -53,45 +53,50 @@ Run one suite while you iterate:
 pio test -e native -f test_carminat_wire
 ```
 
-### 1.2 Run the whole library against a panel twin
+### 1.2 Run the whole library against a decoder
 
-```
-pio run -e ex07_virtual_panel -t exec
-```
+`src/vpanel/` used to hold **panel twins** — models of the panel that reassembled what the
+library transmitted, answered the sync handshake and acknowledged frame by frame — and
+`examples/07_virtual_panel` drove one on the host. Both are **deleted**: they were
+application-shaped code shipped as library surface, and the two halves they welded together
+are separately available and smaller.
 
-This builds and runs `examples/07_virtual_panel` on your laptop. A **twin** is a model of
-the panel: it reassembles what the library transmits, decodes it into a `ScreenModel`,
-answers the sync handshake, acknowledges frame by frame, and can transmit keys back. The
-output is the decoded glass after each step, e.g.:
-
-```
-=== 3. showMenu("CLOCK", "Hours", "Minutes")
-    enqueue -> Ok
-    data frames on the wire for this step : 13   (heartbeats excluded)
-    twin.screen()  mode=MENU  scroll=0x0B  sel=-1  decoded@890ms
-      header : "CLOCK"
-      row0   : "Hours"   (tag 0x7E)
-      row1   : "Minutes"   (tag 0x7F)
+```cpp
+display.setSelfAck(true);                 // the ACK half
+link.inject(affatest::panelSyncRequest()); // the handshake half
 ```
 
-> ### Set `AckMode::Declared`, and know why
+That is enough for the whole library to run to `registered()` on `LoopbackLink` with no
+panel anywhere. To see what was *drawn* rather than what was sent, decode the transmitted
+frames back — `AFFA_ENABLE_ISOTP_RX` buys exactly the two pieces you need:
+
+```cpp
+isotp::Reassembler asmb;                 // feed it every TX frame on the text id
+if (asmb.onFrame(f) && asmb.len() >= 4)
+  screen::windowText(asmb.buffer(), asmb.len(), model);   // or screen::menu(), infoRow()
+```
+
+`test_bench_surface` carries a thirty-line `decodeTx()` built from exactly that, and
+`examples/90_bench_ota` carries the same thing as `BenchScreen` to drive `/api/screen`.
+Copy whichever is closer to what you need.
+
+> ### Self-ACK is the `Declared` rule, and that is the one that models a panel
 >
-> `VirtualPanelBase` has three ACK models and only one of them models a panel:
+> There are three imaginable ACK models and only one of them is a panel:
 >
-> | Mode | Behaviour | Result |
+> | Model | Behaviour | Result |
 > | --- | --- | --- |
-> | `Done` (the default) | answers `0x74` to every frame | The transmit FSM correctly treats "DONE while bytes remain" as **success**, so a 96-byte screen terminates after frame 0 and the twin has seen 8 bytes of it. `screen()` stays `Mode::None`. |
-> | `Partial` | answers `30 01 00` to every frame | The last frame is answered "keep going" with nothing left to send, and the sender reports `SendFailed`. |
-> | **`Declared`** | `30 01 00` while the declared FF_DL is unsatisfied, `0x74` at it | **What the hardware does.** Reproduces every frame count in `WIRE-SPEC.md` without being told them: `showMenu` 13 frames ending at PCI `0x2C`, Carminat `setText` 3, UpdateList `setText` 4, the LCD variant 5. |
+> | DONE to everything | answers `0x74` to every frame | The transmit FSM correctly treats "DONE while bytes remain" as **success**, so a 96-byte screen terminates after frame 0 and a decoder has seen 8 bytes of it. |
+> | PARTIAL to everything | answers `30 01 00` to every frame | The last frame is answered "keep going" with nothing left to send, and the sender reports `SendFailed`. |
+> | **Declared** | `30 01 00` while the declared FF_DL is unsatisfied, `0x74` at it | **What the hardware does**, and what `setSelfAck(true)` implements. |
 >
-> The default is `Done` only because that is what `docs/API.md` §2.14 originally published.
-> **Anything that claims to model a panel should set `Declared`.** `test_twin` asserts that
-> `Done` *cannot* decode a menu, so this is not an opinion.
+> The deleted twins made this a selectable `AckMode` and defaulted to the wrong one, which
+> is why this box used to be a warning. There is nothing to select now.
 
-The counterpart trap: a **self-ACK emulator** (`LoopbackLink::setAutoAck`) terminates at the
-length you *built*, not the length you *declared*, so `showMenu` is **14** frames there and
-**13** on hardware. Any golden vector that carries a bare `14` is wrong for one of the two
-worlds. The suites parameterise it (`_HW` / `_EMU`) and so should yours.
+The remaining trap is the opposite one and it is real: `setSelfAck()` terminates at the
+length you *built*, not the length you *declared*, so `showMenu` is **14** frames under it
+and **13** on hardware. Any golden vector that carries a bare `14` is wrong for one of the
+two worlds. The suites parameterise it (`_HW` / `_EMU`) and so should yours.
 
 ### 1.3 Write a host test for your own change
 
@@ -125,11 +130,12 @@ middle of a golden vector.
 
 **One ESP32-C3 (or ESP32) on a USB cable. Nothing else.** You get a browser console with a
 live frame ring, the decoded panel screen, key injection, a working menu and latency
-counters — against a twin running on the board itself.
+counters — with the board standing in for the panel it does not have.
 
 ### 2.1 Flash the bench console
 
-`examples/90_bench_ota` already has `AFFA_ENABLE_VIRTUAL_PANEL=1` in its environment.
+`examples/90_bench_ota` already has `AFFA_ENABLE_ISOTP_RX=1` in its environment, which is
+what `/api/screen` decodes with.
 
 ```
 pio run -e ex90_bench_ota                 # build (≈898 kB, 1.4 MB OTA slot)
@@ -161,13 +167,13 @@ or the button on the page. `real` and `virtual` are a **runtime flag on one `ICa
 (`BenchLink`), not a second display and not a driver mode change:
 
 * **real** — `send()`/`recv()` go to `Esp32CanLink`;
-* **virtual** — `send()` accepts the frame and puts it nowhere; the twin's replies are
-  injected back on the next loop pass.
+* **virtual** — `send()` accepts the frame and puts it nowhere; `setSelfAck(true)` supplies
+  the per-frame ACK and `loop()` injects the two sync frames a panel would send.
 
-In *both* modes the twin is fed from the **Layer-0 tap**, not from `send()`. That is why the
-same wiring serves two jobs: emulation with no transceiver, and **passive decode next to a
-real panel** — so `/api/screen` answers with live hardware attached, without the twin
-transmitting a byte.
+In *both* modes the decoder is fed from the **Layer-0 tap**, not from `send()`. That is why
+the same wiring serves two jobs: emulation with no transceiver, and **passive decode next to
+a real panel** — so `/api/screen` answers with live hardware attached, and the decoder never
+transmits a byte in either mode.
 
 ### 2.4 Drive it
 
@@ -177,7 +183,7 @@ curl "http://affabench.local/api/menu"              # build/render the demo menu
 curl "http://affabench.local/api/nav?c=next"        # next | prev | select | back | open
 curl "http://affabench.local/api/key?k=0&hold=1&src=local"   # hold Load, locally
 curl "http://affabench.local/api/key?k=257&src=wire"         # RollUp, onto the bus
-curl "http://affabench.local/api/screen"            # the twin's decoded glass
+curl "http://affabench.local/api/screen"            # the decoded glass
 curl "http://affabench.local/api/status"            # sync, counters, latency
 curl "http://affabench.local/api/frames?n=50"       # the live frame ring
 curl "http://affabench.local/api/log?n=100"
@@ -192,15 +198,15 @@ the frame ring is the clearest demonstration of the input seam there is.
 `ackN/ackMinUs/ackMeanUs/ackMaxUs`, the **panel's ACK turnaround**. Counters reset on a mode
 switch so a virtual figure can never be mistaken for a hardware one.
 
-### 2.5 What a twin run does **not** prove
+### 2.5 What a virtual run does **not** prove
 
-* Not that a real panel accepts your bytes. The twin decodes what our own encoder produced;
+* Not that a real panel accepts your bytes. The decoder reads what our own encoder produced;
   agreement between two halves of one repository is not evidence about hardware.
-* Not the pad bytes. The twin pads with the profile filler (`0x00` / `0x81`); a **real panel
-  pads `0xA3`**. A golden vector recorded from a twin will differ from a capture there, and
-  that is the twin being a twin. (Nothing in the library ever matches on a received filler —
-  and nothing you write should either.)
-* Not timing. The twin answers instantly; a panel does not.
+* Not the pad bytes. We pad with the profile filler (`0x00` / `0x81`); a **real panel pads
+  `0xA3`**. A golden vector recorded in virtual mode will differ from a capture there, and
+  that is the emulation being an emulation. (Nothing in the library ever matches on a
+  received filler — and nothing you write should either.)
+* Not timing. Self-ACK answers instantly; a panel does not.
 
 ---
 
@@ -434,11 +440,16 @@ Copy the shape, change the bytes:
 | `test/test_keys/` | only if your family has a key channel; assert the guard byte, the hold mask and that an unknown code arrives with its raw value |
 | `test/test_isotp_edges/` | if your payloads reach the 113-byte ceiling |
 
-Then, if you want the no-hardware loop for your family, add a twin: `src/vpanel/`, a
-`VirtualPanelProfile`, and a `decode()` that reads *your* payload layout. Set
-`AckMode::Declared` and your frame counts should fall out of the arithmetic on their own —
-if they do not, either the twin or the spec is wrong, and finding out which is exactly what
-the twin is for.
+Then, if you want the no-hardware loop for your family, write a `decode()` that reads *your*
+payload layout on top of `isotp::Reassembler`, and drive it from the Layer-0 tap as
+`test_bench_surface` and `examples/90_bench_ota` do — thirty lines, in your own test or
+application, not in the library. With `setSelfAck(true)` your frame counts should fall out of
+the arithmetic on their own; if they do not, either your decoder or the spec is wrong, and
+finding out which is exactly what the exercise is for.
+
+You would also implement `textRxId()` and `decodeText()` for your panel if you want
+`onText()` to work — the base owns the reassembly and the completion rule, and your panel
+owns nothing but the command byte and the offsets of the text within the payload.
 
 ### Step 5 — the documentation, in the same commit
 
