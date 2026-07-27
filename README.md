@@ -6,7 +6,7 @@
 **[English](#english) · [Українська](#українська)**
 
 MIT · ESP32 / ESP32-C3 · Arduino + PlatformIO · no heap after `begin()` · no `delay()` anywhere ·
-140 host tests, no hardware required
+187 host tests, no hardware required
 
 ---
 
@@ -201,6 +201,27 @@ Two honest caveats, both also recorded in `docs/API.md` §6:
   "`setAuxMode()` works". No shipped panel overrides `setAuxMode()`, so it returns
   `NotSupported` everywhere.
 
+### The menu is a widget, not the protocol
+
+What the Carminat panel actually defines is two calls, and they are available
+unconditionally: `showMenu(header, row0, row1, scrollByte)` — the 96-byte `0x21/0x01` screen
+— and `highlightItem(rowTag)`. Header, two rows, which one is lit, which arrows. Everything
+above that (which items exist, which is selected, how a window slides over N of them, when
+Select advances to the next field) is a UI state machine the panel knows nothing about, which
+is why `AFFA_ENABLE_MENU` defaults to `0`.
+
+If you want that state machine rather than your own, `src/widget/` now holds it in a form that
+is **not welded to one panel's geometry**: `MenuModel` + `IMenuRenderer` + `MenuGeometry`.
+Rows, characters-per-row and wrap are injected, so the same algorithm drives the 2 × 26
+Carminat menu screen, the 3 × 8 info-row screen (`showInfoPopup`) and a 6 × 20 OLED. The model
+speaks *row index* and hands you already-truncated, already-transliterated text; row tags,
+highlight frames and what a redraw costs stay in the adapter you write — usually under thirty
+lines. It compiles on the host with no Arduino, no CAN and no panel header.
+
+Read [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md); run `examples/09_menu_widget`, which puts
+one identical menu on three different displays. The original `Menu` / `MenuController` /
+`IPage` are untouched and still ship under the same gate.
+
 ### Configuration knobs
 
 `src/AffaConfig.h` is the single knob header; every gate is documented there with what it
@@ -213,7 +234,8 @@ defaults.
 | `AFFA_PANEL_UPDATELIST` | `0`¹ | UpdateList 8-segment panel |
 | `AFFA_PANEL_UPDATELIST_MENU` | `0`¹ | UpdateList mono-LCD variant (implies the line above) |
 | `AFFA_PANEL_DEFAULT_ALL` | `0`¹ | opt in to "compile all three panels". Only for a first look and for the footprint reference builds. |
-| `AFFA_ENABLE_MENU` | `1` | `Menu`, `MenuController`, `IPage`, `nav()`, `getMenu()`. The largest optional block. |
+| `AFFA_ENABLE_MENU` | **`0`** | `Menu`, `MenuController`, `IPage`, `nav()`, `getMenu()`. The largest optional block, and **off by default**: the menu is a widget, not protocol. `showMenu` / `highlightItem` stay available with it off. |
+| ↳ `src/widget/` | *same gate* | `MenuModel` + `IMenuRenderer` + `MenuGeometry` — the same sliding-window algorithm with rows, characters-per-row and wrap as **parameters**, for any display. Panel-free, host-testable, no heap after construction. See [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md). |
 | `AFFA_ENABLE_POPUP` | `1` | `showPopupText` / `hidePopup` |
 | `AFFA_ENABLE_FULLSCREEN` | `1` | `showFullscreenText` / `hideFullscreenText` |
 | `AFFA_ENABLE_CONFIRMBOX` | `1` | `showConfirmBox` (sits at exactly the 113-byte ceiling) |
@@ -508,8 +530,8 @@ peripheral happens.
 ### Documents and tests
 
 ```
-pio test -e native      # 140 host test cases across 11 suites, no hardware
-pio run                 # all 14: two host environments plus 12 ESP32-C3 targets
+pio test -e native      # 187 host test cases across 13 suites, no hardware
+pio run                 # all 15: two host environments plus 13 ESP32-C3 targets
 ```
 
 | Document | What it is |
@@ -518,6 +540,7 @@ pio run                 # all 14: two host environments plus 12 ESP32-C3 targets
 | [`docs/WIRE-SPEC.md`](docs/WIRE-SPEC.md) | The byte-level oracle: every frame layout, ready-to-paste golden vectors each tagged with the strongest witness that attests it, and the arithmetic for every frame count. **Where the code and this document disagree about a byte, the code is wrong.** |
 | [`docs/PROTOCOL-NOTES.md`](docs/PROTOCOL-NOTES.md) | Provenance: every byte traced to a capture, an OEM log or a third-party reference, plus the open questions each phrased as the experiment that closes it. |
 | [`docs/ESP32CAN-CONTRACT.md`](docs/ESP32CAN-CONTRACT.md) | What `collin80/esp32_can` actually guarantees, with citations, and the 21 rules that follow. |
+| [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md) | The optional, display-agnostic menu: what `MenuModel` owns, what a renderer owns, the `MenuGeometry` fields, the `IMenuRenderer` contract, and a worked adapter for a display the library has never seen. |
 | [`docs/PORTING.md`](docs/PORTING.md) | Moving an application off the old classes — and how to drop this library entirely, including which files are panel-specific and which are the reusable transport core. |
 | [`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HARDWARE.md) | The three tiers above, in full, plus capturing traffic and adding a panel. |
 
@@ -722,6 +745,28 @@ ACK id завжди **обчислюється** як `funcId | 0x400`, і ні�
   «`setAuxMode()` працює». Жодна панель не перевизначає `setAuxMode()`, тож він усюди
   повертає `NotSupported`.
 
+### Меню — це віджет, а не протокол
+
+Насправді панель Carminat визначає рівно два виклики, і вони доступні беззастережно:
+`showMenu(header, row0, row1, scrollByte)` — 96-байтовий екран `0x21/0x01` — і
+`highlightItem(rowTag)`. Заголовок, два рядки, який із них підсвічено, які стрілки. Усе, що
+вище (які пункти існують, який вибрано, як вікно ковзає по N пунктах, коли Select переходить
+до наступного поля) — це стан інтерфейсу, про який панель нічого не знає; саме тому
+`AFFA_ENABLE_MENU` типово дорівнює `0`.
+
+Якщо вам потрібен саме цей автомат, а не власний, то `src/widget/` тепер тримає його у формі,
+**не привареній до геометрії однієї панелі**: `MenuModel` + `IMenuRenderer` + `MenuGeometry`.
+Кількість рядків, символів у рядку і зациклення передаються ззовні, тож той самий алгоритм
+працює на екрані меню Carminat 2 × 26, на інформаційному екрані 3 × 8 (`showInfoPopup`) і на
+OLED 6 × 20. Модель оперує *індексом рядка* і віддає вже обрізаний і вже транслітерований
+текст; теги рядків, кадр підсвічування і ціна перемальовування лишаються в адаптері, який ви
+пишете самі — зазвичай менш ніж на тридцять рядків. Збирається на хості без Arduino, без CAN
+і без заголовків панелі.
+
+Читайте [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md); запустіть `examples/09_menu_widget`, де
+одне й те саме меню виводиться на три різні дисплеї. Старі `Menu` / `MenuController` / `IPage`
+не змінені й далі постачаються під тим самим прапорцем.
+
 ### Перемикачі конфігурації
 
 `src/AffaConfig.h` — єдиний заголовок із перемикачами; кожен описано там разом із ціною і
@@ -734,7 +779,8 @@ ACK id завжди **обчислюється** як `funcId | 0x400`, і ні�
 | `AFFA_PANEL_UPDATELIST` | `0`¹ | восьмисегментна UpdateList |
 | `AFFA_PANEL_UPDATELIST_MENU` | `0`¹ | моно-LCD різновид UpdateList (вмикає рядок вище) |
 | `AFFA_PANEL_DEFAULT_ALL` | `0`¹ | явна згода «зібрати всі три панелі». Лише для першого знайомства і для довідкових збірок обсягу. |
-| `AFFA_ENABLE_MENU` | `1` | `Menu`, `MenuController`, `IPage`, `nav()`, `getMenu()`. Найбільший опціональний блок. |
+| `AFFA_ENABLE_MENU` | **`0`** | `Menu`, `MenuController`, `IPage`, `nav()`, `getMenu()`. Найбільший опціональний блок, і **типово вимкнений**: меню — це віджет, а не протокол. `showMenu` / `highlightItem` доступні й з вимкненим меню. |
+| ↳ `src/widget/` | *той самий прапорець* | `MenuModel` + `IMenuRenderer` + `MenuGeometry` — той самий алгоритм ковзного вікна, але кількість рядків, символів у рядку і зациклення стали **параметрами**, для будь-якого дисплея. Без панелі, тестується на хості, без купи після конструювання. Див. [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md). |
 | `AFFA_ENABLE_POPUP` | `1` | `showPopupText` / `hidePopup` |
 | `AFFA_ENABLE_FULLSCREEN` | `1` | `showFullscreenText` / `hideFullscreenText` |
 | `AFFA_ENABLE_CONFIRMBOX` | `1` | `showConfirmBox` (рівно на стелі в 113 байтів) |
@@ -1032,8 +1078,8 @@ platformio_footprint.ini` відтворює всі числа звідси, в�
 ### Документи і тести
 
 ```
-pio test -e native      # 140 хостових тестів в 11 наборах, без заліза
-pio run                 # усі 14: два хостові середовища плюс 12 цілей ESP32-C3
+pio test -e native      # 187 хостових тестів в 13 наборах, без заліза
+pio run                 # усі 15: два хостові середовища плюс 13 цілей ESP32-C3
 ```
 
 | Документ | Що це |
@@ -1042,6 +1088,7 @@ pio run                 # усі 14: два хостові середовища 
 | [`docs/WIRE-SPEC.md`](docs/WIRE-SPEC.md) | Побайтовий оракул: усі розкладки кадрів, готові до вставки золоті вектори з позначкою найсильнішого свідка і арифметика для кожної кількості кадрів. **Якщо код і цей документ розходяться щодо байта — помиляється код.** |
 | [`docs/PROTOCOL-NOTES.md`](docs/PROTOCOL-NOTES.md) | Походження: кожен байт зведено до захоплення шини, OEM-логу або сторонньої реалізації, плюс відкриті питання, кожне сформульоване як експеримент, що його закриває. |
 | [`docs/ESP32CAN-CONTRACT.md`](docs/ESP32CAN-CONTRACT.md) | Що насправді гарантує `collin80/esp32_can`, з посиланнями, і 21 правило, яке з цього випливає. |
+| [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md) | Опціональне меню, незалежне від дисплея: що належить `MenuModel`, що — рендереру, поля `MenuGeometry`, контракт `IMenuRenderer` і готовий приклад адаптера для дисплея, якого бібліотека ніколи не бачила. |
 | [`docs/PORTING.md`](docs/PORTING.md) | Як перевести застосунок зі старих класів — і як відмовитися від цієї бібліотеки взагалі, включно з тим, які файли специфічні для панелі, а які є придатним до повторного використання транспортним ядром. |
 | [`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HARDWARE.md) | Три рівні вище, докладно, плюс зняття трафіку і додавання панелі. |
 
