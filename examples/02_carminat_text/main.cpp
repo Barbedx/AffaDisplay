@@ -47,7 +47,6 @@ const char* resultName(affa::Result r) {
     case affa::Result::BadArgument:  return "BadArgument";
     case affa::Result::LinkDown:     return "LinkDown";
     case affa::Result::Cancelled:    return "Cancelled";
-    case affa::Result::Busy:         return "Busy";
     case affa::Result::Aborted:      return "Aborted";
   }
   return "?";

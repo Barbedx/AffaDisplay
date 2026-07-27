@@ -149,6 +149,14 @@ class CarminatDisplay final : public AffaDisplayBase {
   bool onFrame(const Frame& f) override;
   void onPoll() override;
 
+#if AFFA_ENABLE_ISOTP_RX
+  // 0x151 is the id WE render on, so inbound text there is another head unit's — the only
+  // way text arrives at a node in the radio role. Feeds onText().
+  uint16_t textRxId() const override { return carminat::kIdSetText; }
+  bool decodeText(const uint8_t* payload, uint8_t len, char* out,
+                  uint8_t outSize) const override;
+#endif
+
 #if AFFA_ENABLE_MENU
   bool menuOpen() const override;
   bool openMenu() override;

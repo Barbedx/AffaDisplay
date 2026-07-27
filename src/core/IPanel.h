@@ -5,10 +5,14 @@ namespace affa {
 
 // The minimal RENDERING port: "how to draw", nothing else.
 //
-// Menu and any future page draws through this, not through the concrete display, so the
-// menu widget is unit-testable against a fake panel and a future WebPanel (render to a
-// browser, no CAN) satisfies the same four calls. No defaults: a rendering caller passes
-// every argument explicitly.
+// An IPage, and the menu ADAPTER (carminat/CarminatMenuRenderer), draw through this rather
+// than through the concrete display, so both are unit-testable against a fake panel and a
+// future WebPanel (render to a browser, no CAN) satisfies the same four calls.
+//
+// The menu STATE MACHINE does not appear in that list any more: widget::MenuModel draws
+// through widget::IMenuRenderer and has no idea this interface exists — CarminatMenuRenderer
+// is the only thing between the two. No defaults: a rendering caller passes every argument
+// explicitly.
 struct IPanel {
   virtual ~IPanel() = default;
 

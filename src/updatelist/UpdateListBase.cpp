@@ -5,6 +5,9 @@
 #if AFFA_PANEL_UPDATELIST
 
 #include "UpdateListBase.h"
+#if AFFA_ENABLE_ISOTP_RX
+#  include "../proto/ScreenDecode.h"
+#endif
 
 namespace affa {
 namespace {
@@ -49,14 +52,12 @@ bool UpdateListBase::familySupports(Feature f) {
     case Feature::ConfirmBox: return false;
     case Feature::InfoPopup:  return false;
 
-    case Feature::AuxTracking: return (AFFA_ENABLE_AUX_TRACKER != 0);
-
-    // Per docs/API.md §6, and identical to CarminatDisplay's answer. NOTE that nothing in
-    // updatelist/ emits EventKind::RadioText today: reassembly lives in proto/, and
-    // API.md §2's dependency table says this folder depends on core/ and util/ ONLY, so
-    // the panel deliberately does not reach into the reassembler. What it does with
-    // inbound 0x121 is the single-frame AUX sniff in onFrame(). Whoever wires the
-    // reassembler to the event sink owns closing that gap for BOTH families at once.
+    // Per docs/API.md §6, and identical to CarminatDisplay's answer. It reports the
+    // COMPILE GATE only: reassembly lives in proto/, and API.md §2's dependency table
+    // says this folder depends on core/ and util/ ONLY, so the panel deliberately does
+    // not reach into the reassembler. What it does with inbound 0x121 is the single-frame
+    // AUX sniff in onFrame(), reported through the protected onRadioText() hook — a
+    // subclass seam, not this capability and not a published Event.
     case Feature::RadioText:  return (AFFA_ENABLE_ISOTP_RX != 0);
   }
   return false;
@@ -134,6 +135,28 @@ bool UpdateListBase::onFrame(const Frame& f) {
 
   return false;
 }
+
+#if AFFA_ENABLE_ISOTP_RX
+// Both AFFA2 text encodings carry the SAME two fields — the text the panel will show
+// ("new") and the text it is replacing ("old") — at different offsets, because 0x7F adds a
+// three-byte icon header in front. We report `new`: it is what the sender is putting on the
+// glass. The icon latch that distinguishes the two is not modelled here; a caller that
+// needs it subscribes to the raw frames.
+bool UpdateListBase::decodeText(const uint8_t* payload, uint8_t len, char* out,
+                                uint8_t outSize) const {
+  uint8_t from = 0, to = 0;
+  if (payload[2] == screen::kSegCmd && len >= screen::kSegMinLen) {
+    from = screen::kSegNew; to = 25;
+  } else if (payload[2] == screen::kSegIconCmd && len >= screen::kSegIconMinLen) {
+    from = screen::kSegIconNew; to = 28;
+  } else {
+    return false;
+  }
+  if (to > len - 1) to = static_cast<uint8_t>(len - 1);
+  screen::asciiz(payload, len, from, to, out, outSize);
+  return true;
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Keys

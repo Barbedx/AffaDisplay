@@ -140,8 +140,10 @@ inline constexpr uint8_t kConfirmCapMax  = 7;   // 6 is the safe maximum — see
                                                 // CarminatDisplay::showConfirmBox
 inline constexpr uint8_t kClockDigits    = 4;   // "HHMM"
 
-// Scroll-arrow indicator, byte 10 of the menu screen. Derived from the selection's
-// position in the list by Menu::scrollIndicator(); exposed because showMenu() takes it.
+// Scroll-arrow indicator, byte 10 of the menu screen. Derived from the window's position
+// in the list by widget::MenuModel::scrollMask(), whose four return values ARE these bytes
+// (which is why CarminatMenuRenderer passes the mask straight through); exposed because
+// showMenu() takes it.
 enum ScrollIndicator : uint8_t {
   kScrollNone = 0x00,   // no arrows
   kScrollUp   = 0x07,   // top arrow only

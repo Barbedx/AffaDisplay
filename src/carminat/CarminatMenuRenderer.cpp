@@ -4,7 +4,6 @@
 // compiles this translation unit to an empty object file. See AffaConfig.h.
 #if AFFA_PANEL_CARMINAT && AFFA_ENABLE_MENU
 
-#include "CarminatConstants.h"
 #include <cstddef>
 
 namespace affa {
@@ -59,11 +58,16 @@ bool CarminatMenuRenderer::highlightOnly(uint8_t index) {
 }
 
 Result CarminatMenuRenderer::sendHighlight(uint8_t index) {
-  static constexpr uint8_t kRowTag[kRows] = {carminat::kRowTagTop, carminat::kRowTagBottom};
-  const uint8_t tag = kRowTag[index < kRows ? index : 0];
-  // highlightItem() takes the row NUMBER and writes the tag byte itself; the table above is
-  // what makes the index -> physical row mapping explicit at this end of the seam.
-  return _panel.highlightItem(tag == carminat::kRowTagBottom ? 1 : 0);
+  // THE MAPPING IS THE IDENTITY, and saying so is the whole function. A model row index
+  // (0 = top of the window) is already what CarminatDisplay::highlightItem() takes, and
+  // that builder is the ONE place that turns a row number into the tag byte
+  // (carminat::kRowTagTop 0x7E / kRowTagBottom 0x7F, docs/WIRE-SPEC.md §8.4).
+  //
+  // This used to go index -> tag -> index through a local table, which stated the tag
+  // ordering a second time and then threw the tag away. It looked like a drift guard and
+  // was not one: swapping the two constants in CarminatConstants.h changed nothing here.
+  // One statement of the ordering, in the builder that puts it on the wire.
+  return _panel.highlightItem(index < kRows ? index : 0);
 }
 
 }  // namespace affa

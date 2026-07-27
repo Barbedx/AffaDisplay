@@ -3,13 +3,10 @@
 
 namespace affa {
 
-// One sync FSM, two panel families. Everything that differed between
-// CarminatDisplay::tick() and UpdateListBase::tick() is data in here; the code is in
-// AffaDisplayBase::pumpSync().
-//
-// Duplicating the FSM is what let the same two defects live twice: a watchdog that
-// counted tick() CALLS instead of milliseconds, and a delay(100) in the sync-request
-// branch. Both are fixed once, here, for both families.
+// One sync FSM, two panel families: everything family-specific is data here, the code is
+// in AffaDisplayBase::pumpSync(). Duplicating the FSM is what let the same two defects
+// live twice — a watchdog counting tick() CALLS instead of milliseconds, and a delay(100)
+// in the sync-request branch.
 struct SyncProfile {
   uint16_t syncId;        // Carminat 0x3AF   UpdateList 0x3DF   (we transmit here)
   uint16_t syncReplyId;   // both 0x3CF                          (panel transmits here)

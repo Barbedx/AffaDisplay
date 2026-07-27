@@ -1177,3 +1177,71 @@ cadence changed, and it changed on purpose.
   state the sender is required to track. It belongs to the display instance, must be
   invalidated on every resync, and must never be a function-local `static` the way the
   reference implementation had it.
+
+---
+
+## 8. AUX-source detection — an application writes this, not the library
+
+**An application that wants to know which source the radio is playing implements the table
+below itself, against a `subscribe()` on the panel's text id.** The library ships no such
+feature and no decoded-text event: this is a heuristic about *someone else's product*, and
+a library that asserts it as fact is lying on behalf of a radio it has never met.
+
+This was `carminat/AuxModeTracker`, gated off by default behind `AFFA_ENABLE_AUX_TRACKER`.
+The class is deleted — no test covered it, no example used it, nothing in the library
+depended on it, and a default-off class that nobody switches on is dead weight with a
+maintenance cost. The **patterns** are kept here because they cost real bench time to find
+and throwing away working reverse-engineering would be the worse mistake.
+
+### 8.1 Scope, and why it is narrow
+
+These patterns describe **one Renault radio family** — the head unit that happened to be on
+the bench bus (W1). They are not the panel, not the protocol, and quite possibly not your
+car. Every verdict is a **guess**; none of it is a protocol fact.
+
+### 8.2 The mechanism
+
+Watch **`0x151` frames sent by the radio** (Carminat text channel; the UpdateList
+equivalent is `0x121`, §9.6). Pair a `0x10` **first frame** with the `0x21` **continuation**
+that follows it within **200 ms**, keep both, and classify.
+
+Three things make this work on raw frames rather than on a reassembled string:
+
+* The discriminator includes **header byte 6** — the `setText` format byte (§3.2), where
+  `0x59`-`0x7F` is plain ASCII and `0x19`-`0x3F` is the radio-digit style. A reassembled
+  string does not carry it. Two of the seven tests below need it.
+* `text[0]` of the `0x21` frame is the **last byte of the header region, not text**. Every
+  index below therefore starts at 1. Getting this wrong shifts every pattern by one and
+  the classifier silently never matches.
+* The 200 ms pairing window must be tracked with a **flag, not a zero timestamp**: at boot
+  `millis()` is under 200, so a stale `0 + 200` window looks open.
+
+### 8.3 The table
+
+`text[]` is the `0x21` continuation frame's 8 bytes; `header[]` is the `0x10` frame's.
+
+| # | Test | Verdict |
+|---|---|---|
+| 1 | `text[1..3] == "AUX"` | **AUX** |
+| 2 | `text[1..7] == "RENAULT"` | radio (the idle banner) |
+| 3 | `text[1..3] == "TR "`, `text[4]` space-or-digit, `text[5]` digit, `text[6] == ' '`, `text[7] == 'C'` | CD |
+| 4 | `text[1..2] == "> "`, `text[3] != ' '`, `header[6] >= 0x59` | radio (short form) |
+| 5 | `text[1] == 'M'`, `text[2] == ' '`, `text[3]` space-or-digit, `text[4..6]` digits, `text[7] == ' '` | radio (manual preset) |
+| 6 | `text[1] == 'L'`, `text[2..3] == "  "`, `text[4..6]` digits, `text[7] == ' '` | radio (list preset) |
+| 7 | `text[1..3] == "   "`, `text[4..7]` digits, `header[6] < 0x59` | radio (bare frequency) |
+| — | none of the above | **retain the previous verdict** |
+
+Tests are applied in order; the first match wins. Only #1 yields AUX — everything else is
+evidence *against* it, which is why the fallback is "retain" and not "not AUX". A classifier
+that flipped to `false` on an unrecognised screen would toggle the application's source
+state every time the radio drew something this table has never seen.
+
+`digit` means `c >= '0' && c <= '9'`, spelled out rather than taken from `<cctype>`:
+`isdigit()` takes an `int` and is locale-dependent, and Arduino's `isDigit()` is neither of
+those and does not exist off-target.
+
+### 8.4 Worked example
+
+`examples/08_radio_mitm` implements tests #1 and #2 this way in about twenty lines,
+including the header pairing — enough to show the shape without pretending the remaining
+five are universal. The full seven is a copy of this table into a `classify()` of your own.

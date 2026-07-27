@@ -1,5 +1,7 @@
 #include "MenuController.h"
 
+// The ENTIRE body is inside the gate, so a build without the menu — or without this panel —
+// compiles this translation unit to an empty object file. See AffaConfig.h.
 #if AFFA_PANEL_CARMINAT && AFFA_ENABLE_MENU
 
 namespace affa {

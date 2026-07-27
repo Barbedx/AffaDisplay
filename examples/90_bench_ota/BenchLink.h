@@ -4,19 +4,18 @@
 // The display holds a BenchLink& for its whole life; the switch is a runtime flag, never a
 // second display object and never a driver mode change.
 //
-//   REAL    : send() -> Esp32CanLink, recv() -> Esp32CanLink. The twin still sees every
-//             transmitted frame through the Layer-0 tap and decodes it PASSIVELY, so
-//             /api/screen works with a real panel on the bus too.
+//   REAL    : send() -> Esp32CanLink, recv() -> Esp32CanLink. BenchScreen still sees every
+//             transmitted frame through the Layer-0 tap and decodes it, so /api/screen
+//             works with a real panel on the bus too.
 //   VIRTUAL : send() accepts the frame and puts it nowhere. The frame still reaches the
-//             tap (AffaDisplayBase::txFrame observes only frames the link ACCEPTED), the
-//             tap feeds the twin, the twin is in EMULATION and answers through its own
-//             LoopbackLink, and main.cpp drains that back into inject() here. The
-//             controller is not touched at all — there need not be one.
+//             tap (AffaDisplayBase::txFrame observes only frames the link ACCEPTED) and is
+//             decoded there. The two halves a panel would supply come from elsewhere:
+//             setSelfAck() for the per-frame ACK, and main.cpp's 1 Hz sync frames through
+//             inject() below. The controller is not touched at all — there need not be one.
 //
-// WHY THE TAP AND NOT send(): feeding the twin from inside send() would run panel code
-// inside the library's own transmit path. Feeding it from the tap keeps the twin exactly
-// where a sniffer would be, which is the position it is designed for, and means the same
-// wiring serves both modes.
+// WHY THE TAP AND NOT send(): decoding from inside send() would run application code inside
+// the library's own transmit path. The tap is where a sniffer sits, and the same wiring
+// then serves both modes.
 #pragma once
 
 #include <AffaDisplay.h>

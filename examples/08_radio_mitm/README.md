@@ -12,7 +12,7 @@ API, with no library internal touched, no `friend`, and no blocking:
 | Was | Is now |
 | --- | --- |
 | `sendPasswordSequence()` — `delay(1000)` + four `delay(200)` inside the receive path | `subscribe(FrameMatch{...})` to detect, `pressKey(k, e, KeySource::Wire)` to answer, two deadlines on the application's own clock |
-| `AuxModeTracker` fed unconditionally from `recv()` | twelve lines against `EventKind::RadioText` |
+| `AuxModeTracker` fed unconditionally from `recv()` | a `subscribe()` on `0x151` and twenty lines of pattern matching |
 | "hold Load opens the menu", welded into `Menu::handleKey` | `clearMenuHotkey()` + `nav(NavCommand::Open)` on a double-click |
 
 ## (a) The password sequence
@@ -51,26 +51,42 @@ id (`0x1C1` here, `0x0A9` on UpdateList). `pressKey(Load, Hold, Wire)` transmits
 
 ## (b) AUX detection
 
+A second `subscribe()`, this one id-only on `0x151` — every frame the radio sends on the
+text channel. The callback pairs a `0x10` header frame with the `0x21` continuation that
+follows it within 200 ms and reads the text cells:
+
 ```cpp
-void onEvent(const affa::Event& ev, void*) {
-  if (ev.kind != affa::EventKind::RadioText) return;
-  const bool aux = (std::strstr(ev.text.text, "AUX") != nullptr);
-  ...
+void onRadioFrame(const affa::Frame& f, void*) {
+  if (f.data[0] == 0x10) { /* keep the header and its arrival time */ return; }
+  if (f.data[0] != 0x21 || !g_haveHead) return;
+  if (affa::expired(g_clock.millis(), g_headMs + 200)) return;
+  if (f.data[1] == 'A' && f.data[2] == 'U' && f.data[3] == 'X') ...
 }
 ```
 
-`ev.text.text` and `ev.text.raw` point at library-internal storage and **die when the
-callback returns** — copy what you keep.
+Three things this shows, and they are the reasons it is written this way:
 
-> **Known gap, stated rather than hidden.** `EventKind::RadioText` requires
-> `AFFA_ENABLE_ISOTP_RX` (reassembly is what turns a pair of frames into a string), and
-> as of this writing **no panel emits it**: `supports(Feature::RadioText)` reports the
-> compile gate, but the reassembler in `proto/` is not yet wired into the RX path for
-> either family. On target the gate is 0 by default, so this example prints
-> `RadioText supported=0` and part (b) stays quiet. Parts (a) and (c) do not depend on it.
-> The pattern is what is being demonstrated; when the wiring lands, this file needs no
-> change. If you want the heuristics today, `AFFA_ENABLE_AUX_TRACKER=1` gives you
-> `AuxModeTracker`, fed by a `subscribe()` on `0x151` — see `docs/API.md` §7b.7b.
+* **It works on raw frames, not on a decoded string, on purpose.** The full discriminator
+  includes *header* byte 6 — the `setText` format byte, which separates the radio-digit
+  style from plain ASCII — and no reassembled string carries it. The library publishes no
+  decoded-text event and nothing in it reassembles inbound ISO-TP, so there was nothing to
+  give up.
+* **`data[0]` of the `0x21` frame is the last byte of the header region, not text.** Every
+  index starts at 1. Off by one here and the classifier silently never matches.
+* **No pattern matched means retain the previous verdict**, never flip to "not AUX". A
+  classifier that flipped would toggle the application's source state on every screen the
+  table has not seen.
+
+Two patterns are implemented, which is enough to show the shape. **The full seven —
+`"AUX"`, `"RENAULT"`, `"TR n CD"`, `"M nnnn"`, `"L nnnn"`, the leading `"> "`, and the
+digits-only frequency case — are tabulated in `docs/PROTOCOL-NOTES.md` §8**, together with
+why each index and the `0x59` threshold are what they are. They describe *one Renault radio
+family*, not the panel and not your car, which is exactly why they are a table in a
+document and not a class in the library.
+
+> This used to be `AuxModeTracker` behind `AFFA_ENABLE_AUX_TRACKER`, and before that it was
+> wired unconditionally into `recv()`. The class is gone — nothing depended on it, no test
+> covered it and no example used it — and the knowledge it held is in §8.
 
 ## (c) The custom hotkey
 

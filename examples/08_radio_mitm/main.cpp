@@ -2,7 +2,7 @@
 // class, reimplemented ENTIRELY in application code against the public API:
 //
 //   a) the radio password sequence — subscribe(FrameMatch) + pressKey(..., KeySource::Wire)
-//   b) AUX-source detection       — EventKind::RadioText, a dozen lines
+//   b) AUX-source detection       — subscribe(0x151) + the pattern table, a dozen lines
 //   c) a custom menu-open gesture — clearMenuHotkey() + nav(NavCommand::Open)
 //
 // None of this is in the library, none of it needs to be, and if any of it had been
@@ -21,8 +21,9 @@
 #include <AffaDisplay.h>
 #include <cstring>
 
-#if !AFFA_PANEL_CARMINAT || !AFFA_ENABLE_MENU || AFFA_MAX_SUBSCRIPTIONS < 1
-#  error "08_radio_mitm needs AFFA_PANEL_CARMINAT=1, AFFA_ENABLE_MENU=1, subscriptions > 0"
+// Two subscriptions: the PIN prompt (a) and the radio's text channel (b).
+#if !AFFA_PANEL_CARMINAT || !AFFA_ENABLE_MENU || AFFA_MAX_SUBSCRIPTIONS < 2
+#  error "08_radio_mitm needs AFFA_PANEL_CARMINAT=1, AFFA_ENABLE_MENU=1, subscriptions > 1"
 #endif
 
 namespace {
@@ -100,17 +101,52 @@ PinEntry g_pin(g_display, g_clock);
 // ---------------------------------------------------------------------------
 // (b) AUX-source detection, in a dozen lines
 // ---------------------------------------------------------------------------
-bool g_inAux = false;
+// This is application policy end to end. The library publishes no decoded text event —
+// nothing in it reassembles inbound ISO-TP into a string — so the detection is written
+// against the RAW frames, which is where the discriminator lives anyway: the classifier
+// needs header byte 6, the setText format byte, and a reassembled string does not carry
+// it. Pair the 0x10 header with the 0x21 continuation that follows it within 200 ms and
+// read the text cells.
+//
+// Two patterns are implemented here because two is enough to show the shape. The full
+// seven-pattern table reverse-engineered off the bench — "AUX", "RENAULT", "TR n CD",
+// "M nnnn", "L nnnn", the leading "> ", and the digits-only case, with the 0x59 format
+// threshold two of them need — is in docs/PROTOCOL-NOTES.md §8. It describes ONE Renault
+// radio family, not the panel and not your car, which is exactly why it is a table in a
+// document and not a class in the library.
+constexpr uint32_t kPairWindowMs = 200;
 
-void onEvent(const affa::Event& ev, void*) {
-  if (ev.kind != affa::EventKind::RadioText) return;
-  // ev.text.text is NUL-terminated and already transliterated; ev.text.raw is the
-  // reassembled payload for byte-level heuristics. BOTH DIE WHEN THIS RETURNS.
-  const bool aux = (std::strstr(ev.text.text, "AUX") != nullptr);
+bool     g_inAux     = false;
+bool     g_haveHead  = false;   // NOT just a zero timestamp: at boot millis() < 200 makes
+uint32_t g_headMs    = 0;       // a stale `0 + 200` window look open
+uint8_t  g_head[8]   = {0};
+
+// Layer 1 callback on 0x151, every frame, id-only match.
+void onRadioFrame(const affa::Frame& f, void*) {
+  if (f.len < 8) return;                       // short DLCs are real on this bus
+
+  if (f.data[0] == 0x10) {                     // the setText/screen first frame
+    memcpy(g_head, f.data, 8);
+    g_headMs   = g_clock.millis();
+    g_haveHead = true;
+    return;
+  }
+  if (f.data[0] != 0x21 || !g_haveHead) return;
+  if (affa::expired(g_clock.millis(), g_headMs + kPairWindowMs)) return;
+
+  // text[0] is the last byte of the header region, not text — indexing starts at 1.
+  const uint8_t* t = f.data;
+  bool aux = g_inAux;                          // no pattern matched -> RETAIN the verdict.
+                                               // Flipping here would toggle the source
+                                               // state on every unrecognised screen.
+  if (t[1] == 'A' && t[2] == 'U' && t[3] == 'X') aux = true;
+  if (t[1] == 'R' && t[2] == 'E' && t[3] == 'N' && t[4] == 'A' && t[5] == 'U' &&
+      t[6] == 'L' && t[7] == 'T')
+    aux = false;
+
   if (aux == g_inAux) return;
   g_inAux = aux;
-  Serial.printf("[aux ] source is now %s (\"%s\")\n", aux ? "AUX" : "not AUX",
-                ev.text.text);
+  Serial.printf("[aux ] source is now %s\n", aux ? "AUX" : "not AUX");
 }
 
 // ---------------------------------------------------------------------------
@@ -164,18 +200,19 @@ void setup() {
   if (!g_display.subscribe(m, &PinEntry::onPrompt, &g_pin).valid())
     Serial.println("[mitm] subscription table full");   // never ignore this
 
-  g_display.onEvent(&onEvent, nullptr);
+  // (b): every frame the radio sends on 0x151. len stays 0 — id only, no payload rule.
+  affa::FrameMatch text{};
+  text.id  = 0x151;
+  text.dir = affa::Direction::Rx;          // what the RADIO sent, never our own echo
+  if (!g_display.subscribe(text, &onRadioFrame, nullptr).valid())
+    Serial.println("[aux ] subscription table full");   // never ignore this
+
   g_display.onKey(&onKey, nullptr);
   g_display.clearMenuHotkey();             // (c): nav(Open) becomes the only way in
   g_display.begin();
   buildMenu();
 
-  // Honest reporting rather than a promise: (b) is written against the event the library
-  // publishes, and that event needs the reassembler. With AFFA_ENABLE_ISOTP_RX=0 — the
-  // default on target — supports() answers false and onEvent() will simply never see a
-  // RadioText. (a) and (c) do not depend on it.
-  Serial.printf("RadioText supported=%d (ISOTP_RX=%d), menu hotkey cleared\n",
-                g_display.supports(affa::Feature::RadioText), AFFA_ENABLE_ISOTP_RX);
+  Serial.println("menu hotkey cleared; watching 0x151 for the source banner");
 }
 
 void loop() {

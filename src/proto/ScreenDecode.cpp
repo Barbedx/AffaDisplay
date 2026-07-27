@@ -1,7 +1,7 @@
 // Entire translation unit gated — see AffaConfig.h.
 #include "ScreenDecode.h"
 
-#if (AFFA_ENABLE_VIRTUAL_PANEL || AFFA_ENABLE_ISOTP_RX)
+#if AFFA_ENABLE_ISOTP_RX
 
 namespace affa {
 namespace screen {
@@ -138,4 +138,4 @@ bool frame(const Frame& f, ScreenModel& m) {
 }  // namespace screen
 }  // namespace affa
 
-#endif  // AFFA_ENABLE_VIRTUAL_PANEL || AFFA_ENABLE_ISOTP_RX
+#endif  // AFFA_ENABLE_ISOTP_RX

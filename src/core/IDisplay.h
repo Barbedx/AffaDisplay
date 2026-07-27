@@ -25,7 +25,6 @@ struct IDisplay {
   [[nodiscard]] virtual Result setText(const char* text, uint8_t digit = 255) = 0;
   [[nodiscard]] virtual Result setTime(const char* hhmm)                      = 0;
   [[nodiscard]] virtual Result setPower(bool on)                              = 0;
-  [[nodiscard]] virtual Result setAuxMode(bool on)                            = 0;
 
   [[nodiscard]] virtual Result showMenu(const char* header, const char* row0,
                                         const char* row1,

@@ -1135,12 +1135,17 @@ Reference OEM capture: `76 60 41 .. AUX ON`, `76 60 44 .. AF ON`, `76 60 48 .. S
 
 `hideInfoPopup()` is a best-effort dismiss: it just calls `setText("RENAULT", 0)`.
 
-### 8.11 Inbound AUX-mode classifier
+### 8.11 Inbound AUX-mode classifier — observed, and NOT shipped
 
-Not a transmit path, but a wire decoder the library keeps
-(`AFFA_ENABLE_AUX_TRACKER`). It watches **`0x151` frames sent by the radio**, pairs a
-`0x10` header frame with the `0x21` continuation that follows it within 200 ms, and
-classifies the text:
+Not a transmit path, and **not library code**. This was `AuxModeTracker`, behind the
+default-off `AFFA_ENABLE_AUX_TRACKER`; both are deleted. The observation is recorded here
+because it is a real reading of a real bus, and the application-facing version — the same
+table plus the reasons each index and threshold is what it is — is
+`docs/PROTOCOL-NOTES.md` §8.
+
+It watches **`0x151` frames sent by the radio**, pairs a `0x10` header frame with the
+`0x21` continuation that follows it within 200 ms, and classifies the text. The verdicts
+describe one Renault radio family, not the panel and not the protocol:
 
 | Test on the `0x21` frame | Verdict |
 |---|---|

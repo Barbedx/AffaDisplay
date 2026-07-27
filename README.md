@@ -6,7 +6,7 @@
 **[English](#english) · [Українська](#українська)**
 
 MIT · ESP32 / ESP32-C3 · Arduino + PlatformIO · no heap after `begin()` · no `delay()` anywhere ·
-187 host tests, no hardware required
+200 host tests, no hardware required
 
 ---
 
@@ -17,6 +17,7 @@ MIT · ESP32 / ESP32-C3 · Arduino + PlatformIO · no heap after `begin()` · no
 * [Wiring](#wiring)
 * [Supported panels](#supported-panels)
 * [Capability matrix](#capability-matrix)
+* [The menu is a widget, not the protocol](#the-menu-is-a-widget-not-the-protocol)
 * [Configuration knobs](#configuration-knobs)
 * [Footprint](#footprint)
 * [Threading and the non blocking contract](#threading-and-the-non-blocking-contract)
@@ -109,8 +110,9 @@ Installation, `platformio.ini`:
 ```ini
 lib_deps =
   https://github.com/andruxa/AffaDisplay.git
-  collin80/can_common
-  https://github.com/collin80/esp32_can.git
+  collin80/can_common@0.4.0
+  ; PINNED. docs/ESP32CAN-CONTRACT.md is a file:line reading of exactly this commit.
+  https://github.com/collin80/esp32_can.git#c329e6be6931e86f82e38e0f982c9ed951c45cca
 
 build_flags =
   -std=gnu++17
@@ -119,9 +121,39 @@ build_unflags =
   -std=gnu++11        ; the ESP32-C3 Arduino core still defaults to gnu++11
 ```
 
-With `-D AFFA_ENABLE_ESP32CAN_LINK=0` you need neither `can_common` nor `esp32_can`:
-nothing else in the library includes a driver header, and you supply your own `ICanLink`
-(three methods).
+**The CAN driver is pinned on purpose.** `esp32_can` is taken at commit
+`c329e6be6931e86f82e38e0f982c9ed951c45cca` (its `library.properties` says `0.3.1`, which
+has not moved in years and identifies nothing) and `can_common` at `0.4.0`, because
+[`docs/ESP32CAN-CONTRACT.md`](docs/ESP32CAN-CONTRACT.md) is 800 lines of `file:line`
+citations against those two revisions. With a bare git URL a clean build takes whatever
+`master` is that day and every citation in that document rots silently. `library.json`
+pins the same pair; bumping either means re-verifying that document, which is its own
+rule 21.
+
+#### Building without a CAN driver at all
+
+`-D AFFA_ENABLE_ESP32CAN_LINK=0` and your own `ICanLink` (three methods) is a supported
+configuration: `src/link/Esp32CanLink.cpp` is the only file in the library that includes a
+driver header, and its entire body is behind that gate. **What the gate cannot do is
+un-declare a PlatformIO dependency.** `library.json` lists `can_common` and `esp32_can`
+unconditionally because a manifest has no way to say "only if this `-D` is set", so both
+are *installed* whatever you build. What follows from the gate is narrower, and it is
+what actually matters:
+
+* **Neither library reaches your image.** Measured on `tools/footprint/gate_probe` with
+  `AFFA_ENABLE_ESP32CAN_LINK=0`, an ESP32-C3 build is byte-identical — **263 278 B flash /
+  18 596 B RAM** — whether the two dependencies are declared, not declared, or declared
+  and `lib_ignore`d. PlatformIO archives each library and the linker pulls no object file
+  nothing references. (That is today's absolute figure for the gate-off probe build; it is
+  not comparable with the deltas in *[What each gate is actually
+  worth](#what-each-gate-is-actually-worth)*, which predate the menu migration.)
+* **To keep them out of the build graph as well**, add `lib_ignore = ESP32_CAN,
+  can_common` to your env. Same bytes; it just stops the LDF compiling two libraries whose
+  objects are then discarded.
+* **To stop them being downloaded at all**, vendor this library — copy it into your
+  project's `lib/AffaDisplay/` and delete the two entries from its `library.json`. That is
+  the only mechanism PlatformIO offers, and it is a fork of the manifest, so say so in
+  your own README.
 
 ### Wiring
 
@@ -186,20 +218,19 @@ Ask `display.supports(affa::Feature::X)` before you call; every unsupported call
 | `Fullscreen` | if `AFFA_ENABLE_FULLSCREEN` | no | no |
 | `ConfirmBox` | if `AFFA_ENABLE_CONFIRMBOX` | no | no |
 | `InfoPopup` | if `AFFA_ENABLE_INFOPOPUP` | no | no |
-| `AuxTracking` | if `AFFA_ENABLE_AUX_TRACKER` (off by default) | same | same |
 | `KeyTx` | yes (`0x1C1`) | yes (`0x0A9`) | yes (`0x0A9`) |
 | `RadioText` | if `AFFA_ENABLE_ISOTP_RX` | same | same |
 
-Two honest caveats, both also recorded in `docs/API.md` §6:
+One honest caveat, also recorded in `docs/API.md` §6:
 
-* `Feature::RadioText` reports the **compile gate**, and as of 0.1.0 **nothing emits
-  `EventKind::RadioText`** — the reassembler in `proto/` has not been wired into the RX
-  path for either family. On a host build (gate on by default) the capability
-  over-promises; on target the gate is off by default and the two agree. A canary test
-  (`test_seam`) fails the day someone closes this, which is the point of it.
-* `Feature::AuxTracking` means "the `AuxModeTracker` helper is compiled in", not
-  "`setAuxMode()` works". No shipped panel overrides `setAuxMode()`, so it returns
-  `NotSupported` everywhere.
+* `Feature::RadioText` reports a **compile gate and nothing more** — that the ISO-TP
+  reassembler in `proto/` is built, so inbound text *can* be reconstructed. **No panel
+  routes reassembled text to the application**, and there is no event for it: the
+  never-emitted `EventKind::RadioText` was removed rather than left standing as a
+  promise the library could not keep. What UpdateList does with inbound `0x121` is a
+  single-frame AUX sniff reported through the protected `UpdateListBase::onRadioText(bool)`
+  hook — a subclass seam, unaffected by that removal. An application that wants inbound
+  text today subscribes to the raw frames; see `docs/PROTOCOL-NOTES.md` §8.
 
 ### The menu is a widget, not the protocol
 
@@ -254,7 +285,6 @@ defaults.
 | `AFFA_ENABLE_FULLSCREEN` | `1` | `showFullscreenText` / `hideFullscreenText` |
 | `AFFA_ENABLE_CONFIRMBOX` | `1` | `showConfirmBox` (sits at exactly the 113-byte ceiling) |
 | `AFFA_ENABLE_INFOPOPUP` | `1` | `showInfoPopup` / `hideInfoPopup` (three messages) |
-| `AFFA_ENABLE_AUX_TRACKER` | **`0`** | `AuxModeTracker`. Off because it describes *someone else's radio*, not the panel. ~0.4 kB of pattern strings. |
 | `AFFA_ENABLE_TRANSLITERATION` | `1` | `toAscii` + its table (~1.2 kB). **0 is dangerous**: UTF-8 then reaches the wire unchanged and renders as garbage — a visual failure, not a compile error. |
 | `AFFA_ENABLE_LOG` | `1` | the `AFFA_LOG*` macros. 0: no format strings enter flash at all, so never put a side effect in a log argument. |
 | `AFFA_LOG_LEVEL` | `3` | 0 off, 1 error, 2 warn, 3 info, 4 debug, 5 trace. Compile-time. |
@@ -404,7 +434,6 @@ baselines above and the two `#error` guards, which are environments expected to 
 | `AFFA_ENABLE_CONFIRMBOX=0` | −276 B | 0 | `showConfirmBox` 0xEC → 4 bytes |
 | `AFFA_ENABLE_INFOPOPUP=0` | −276 B | 0 | `showInfoMenu` 0x52 + 0xAE lambda → 4 bytes |
 | `AFFA_ENABLE_POPUP=0` | −232 B | 0 | `showPopupText` 0xC8 → 4 bytes |
-| `AFFA_ENABLE_AUX_TRACKER=1` (default is 0) | **+852 B** | +32 B | `AuxModeTracker::*` appears |
 | `AFFA_ENABLE_VIRTUAL_PANEL=1` (default is 0 on target) | **+2 774 B** | +312 B | `VirtualPanelBase::*`, `isotp::Reassembler::onFrame`, `screen::menu/infoRow/windowText` appear |
 
 Two honest readings of that table:
@@ -447,10 +476,11 @@ Two honest readings of that table:
   `src/`" is the contract above. Own the loop yourself. (An `AFFA_ENABLE_TASK` knob was
   documented in earlier revisions and implemented by nothing; setting it now `#error`s
   rather than silently producing a library that never polls.)
-* The one exception to "nothing here waits" is opt-in and visible in its name:
-  `sendBlocking(ticket, timeoutMs)` spins on `poll()` until that ticket completes. It cannot
-  deadlock — it is itself pumping the thing it waits for — but it is a busy loop, and it is
-  for examples and setup code, not for `loop()`.
+* **There is no exception.** Earlier revisions offered one, `sendBlocking(ticket,
+  timeoutMs)`, which spun on `poll()` until a ticket completed. It is gone: nothing in
+  `src/`, `examples/` or `test/` ever called it, and a library whose headline promise is
+  that it never blocks should not ship the one call that does. Wait on `onComplete()` — or
+  on `EventKind::TxComplete` — from your own loop.
 
 ### Latency and preemption
 
@@ -531,7 +561,7 @@ commands is **[`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HA
 
 1. **Laptop only — no board at all.**
    ```
-   pio test -e native            # 140 cases, ~10 s
+   pio test -e native            # 200 cases, ~12 s
    pio run -e ex07_virtual_panel -t exec
    ```
    The whole library runs on the host against a **twin**: a model of the panel that
@@ -582,7 +612,7 @@ peripheral happens.
 ### Documents and tests
 
 ```
-pio test -e native      # 187 host test cases across 13 suites, no hardware
+pio test -e native      # 200 host test cases across 13 suites, no hardware
 pio run                 # all 15: two host environments plus 13 ESP32-C3 targets
 ```
 
@@ -614,6 +644,7 @@ Licence: **MIT**, see [`LICENSE`](LICENSE).
 * [Підключення](#підключення)
 * [Підтримувані панелі](#підтримувані-панелі)
 * [Матриця можливостей](#матриця-можливостей)
+* [Меню — це віджет, а не протокол](#меню--це-віджет-а-не-протокол)
 * [Перемикачі конфігурації](#перемикачі-конфігурації)
 * [Обсяг прошивки](#обсяг-прошивки)
 * [Багатозадачність і неблокуючий контракт](#багатозадачність-і-неблокуючий-контракт)
@@ -706,8 +737,10 @@ void loop() {
 ```ini
 lib_deps =
   https://github.com/andruxa/AffaDisplay.git
-  collin80/can_common
-  https://github.com/collin80/esp32_can.git
+  collin80/can_common@0.4.0
+  ; ЗАФІКСОВАНО. docs/ESP32CAN-CONTRACT.md — це читання саме цього коміту з посиланнями
+  ; на файл і рядок.
+  https://github.com/collin80/esp32_can.git#c329e6be6931e86f82e38e0f982c9ed951c45cca
 
 build_flags =
   -std=gnu++17
@@ -716,8 +749,36 @@ build_unflags =
   -std=gnu++11        ; ядро Arduino для ESP32-C3 досі стоїть на gnu++11
 ```
 
-З `-D AFFA_ENABLE_ESP32CAN_LINK=0` вам не потрібні ні `can_common`, ні `esp32_can`: більше
-ніщо в бібліотеці не підключає заголовок драйвера, а свій `ICanLink` — це три методи.
+**Драйвер CAN зафіксовано навмисне.** `esp32_can` береться на коміті
+`c329e6be6931e86f82e38e0f982c9ed951c45cca` (у його `library.properties` стоїть `0.3.1`,
+яка не рухалася роками й не означає нічого), а `can_common` — на `0.4.0`, бо
+[`docs/ESP32CAN-CONTRACT.md`](docs/ESP32CAN-CONTRACT.md) — це 800 рядків посилань
+`файл:рядок` саме на ці дві ревізії. З «голим» git-URL чиста збірка бере той `master`,
+який трапиться того дня, і кожне посилання в тому документі тихо протухає. `library.json`
+фіксує ту саму пару; підняти версію — означає перевірити документ наново, і це його
+власне правило 21.
+
+#### Збірка взагалі без драйвера CAN
+
+`-D AFFA_ENABLE_ESP32CAN_LINK=0` плюс власний `ICanLink` (три методи) — підтримувана
+конфігурація: `src/link/Esp32CanLink.cpp` — єдиний файл бібліотеки, що підключає заголовок
+драйвера, і все його тіло стоїть за цим перемикачем. **Чого перемикач не може — це
+скасувати залежність PlatformIO.** `library.json` перелічує `can_common` і `esp32_can`
+беззастережно, бо маніфест не вміє сказати «лише якщо задано цей `-D`», тож обидві
+бібліотеки *встановлюються* за будь-якої збірки. З перемикача випливає менше — і саме те,
+що має значення:
+
+* **Жодна з них не потрапляє у ваш образ.** Виміряно на `tools/footprint/gate_probe` з
+  `AFFA_ENABLE_ESP32CAN_LINK=0`: збірка для ESP32-C3 байт у байт однакова — **263 278 Б
+  флеш / 18 596 Б RAM** — байдуже, чи ці дві залежності оголошені, не оголошені, чи
+  оголошені разом із `lib_ignore`. PlatformIO пакує кожну бібліотеку в архів, а лінкер не
+  тягне об'єктний файл, на який ніхто не посилається.
+* **Щоб їх не було і в графі збірки**, додайте у своє середовище
+  `lib_ignore = ESP32_CAN, can_common`. Байти ті самі; просто LDF більше не компілює дві
+  бібліотеки, чиї об'єктні файли все одно відкидаються.
+* **Щоб вони взагалі не завантажувалися**, візьміть бібліотеку до себе: скопіюйте її в
+  `lib/AffaDisplay/` свого проєкту й видаліть ці два записи з її `library.json`. Іншого
+  механізму PlatformIO не дає, і це форк маніфесту — напишіть про це у власному README.
 
 ### Підключення
 
@@ -782,20 +843,19 @@ ACK id завжди **обчислюється** як `funcId | 0x400`, і ні�
 | `Fullscreen` | якщо `AFFA_ENABLE_FULLSCREEN` | ні | ні |
 | `ConfirmBox` | якщо `AFFA_ENABLE_CONFIRMBOX` | ні | ні |
 | `InfoPopup` | якщо `AFFA_ENABLE_INFOPOPUP` | ні | ні |
-| `AuxTracking` | якщо `AFFA_ENABLE_AUX_TRACKER` (типово вимкнено) | так само | так само |
 | `KeyTx` | так (`0x1C1`) | так (`0x0A9`) | так (`0x0A9`) |
 | `RadioText` | якщо `AFFA_ENABLE_ISOTP_RX` | так само | так само |
 
-Два чесні застереження, обидва також зафіксовані в `docs/API.md` §6:
+Одне чесне застереження, також зафіксоване в `docs/API.md` §6:
 
-* `Feature::RadioText` повідомляє про **прапорець компіляції**, і станом на 0.1.0 **ніщо не
-  породжує `EventKind::RadioText`** — збирач із `proto/` ще не під'єднано до RX-шляху для
-  жодної з родин. У хостовому білді (де прапорець типово увімкнений) можливість обіцяє
-  більше, ніж є; на цільовій платі прапорець типово вимкнений і суперечності немає.
-  Тест-канарка в `test_seam` впаде того дня, коли хтось це закриє, — у цьому й сенс.
-* `Feature::AuxTracking` означає «помічник `AuxModeTracker` скомпільовано», а не
-  «`setAuxMode()` працює». Жодна панель не перевизначає `setAuxMode()`, тож він усюди
-  повертає `NotSupported`.
+* `Feature::RadioText` повідомляє про **прапорець компіляції й нічого більше** — що збирач
+  ISO-TP із `proto/` зібрано, тож вхідний текст *можна* відновити. **Жодна панель не
+  передає відновлений текст застосунку**, і події для цього немає: ніколи не породжувану
+  `EventKind::RadioText` видалено, а не залишено обіцянкою, якої бібліотека не виконує. Те,
+  що UpdateList робить із вхідним `0x121`, — однокадрова перевірка на AUX, і вона
+  повідомляється через захищений гак `UpdateListBase::onRadioText(bool)`; це шов для
+  підкласу, і видалення його не зачепило. Застосунок, якому потрібен вхідний текст сьогодні,
+  підписується на сирі кадри — див. `docs/PROTOCOL-NOTES.md` §8.
 
 ### Меню — це віджет, а не протокол
 
@@ -851,7 +911,6 @@ OLED 6 × 20. Модель оперує *індексом рядка* і від�
 | `AFFA_ENABLE_FULLSCREEN` | `1` | `showFullscreenText` / `hideFullscreenText` |
 | `AFFA_ENABLE_CONFIRMBOX` | `1` | `showConfirmBox` (рівно на стелі в 113 байтів) |
 | `AFFA_ENABLE_INFOPOPUP` | `1` | `showInfoPopup` / `hideInfoPopup` (три повідомлення) |
-| `AFFA_ENABLE_AUX_TRACKER` | **`0`** | `AuxModeTracker`. Вимкнено, бо описує *чуже радіо*, а не панель. ~0.4 кБ рядків-шаблонів. |
 | `AFFA_ENABLE_TRANSLITERATION` | `1` | `toAscii` і його таблиця (~1.2 кБ). **0 — небезпечно**: UTF-8 тоді потрапляє на шину як є і малюється сміттям — це візуальна помилка, а не помилка компіляції. |
 | `AFFA_ENABLE_LOG` | `1` | макроси `AFFA_LOG*`. При 0 жоден формат-рядок не потрапляє у флеш, тому ніколи не ховайте побічний ефект в аргументі логу. |
 | `AFFA_LOG_LEVEL` | `3` | 0 off, 1 error, 2 warn, 3 info, 4 debug, 5 trace. На етапі компіляції. |
@@ -998,7 +1057,6 @@ platformio_footprint.ini` відтворює всі числа звідси, в�
 | `AFFA_ENABLE_CONFIRMBOX=0` | −276 Б | 0 | `showConfirmBox` 0xEC → 4 байти |
 | `AFFA_ENABLE_INFOPOPUP=0` | −276 Б | 0 | `showInfoMenu` 0x52 + лямбда 0xAE → 4 байти |
 | `AFFA_ENABLE_POPUP=0` | −232 Б | 0 | `showPopupText` 0xC8 → 4 байти |
-| `AFFA_ENABLE_AUX_TRACKER=1` (типово 0) | **+852 Б** | +32 Б | з'являються `AuxModeTracker::*` |
 | `AFFA_ENABLE_VIRTUAL_PANEL=1` (на платі типово 0) | **+2 774 Б** | +312 Б | з'являються `VirtualPanelBase::*`, `isotp::Reassembler::onFrame`, `screen::menu/infoRow/windowText` |
 
 Два чесні висновки з цієї таблиці:
@@ -1041,10 +1099,11 @@ platformio_footprint.ini` відтворює всі числа звідси, в�
   Циклом володієте ви. (Перемикач `AFFA_ENABLE_TASK` описувався в ранніх редакціях і не був
   реалізований нічим; тепер його ввімкнення дає `#error`, а не бібліотеку, яка мовчки не
   опитується.)
-* Єдиний виняток із «тут ніщо не чекає» вмикається явно і названий чесно:
-  `sendBlocking(ticket, timeoutMs)` крутить `poll()`, доки квиток не завершиться. Заблокувати
-  себе він не може — він сам качає те, чого чекає, — але це активне очікування, і воно для
-  прикладів та коду ініціалізації, а не для `loop()`.
+* **Винятку немає.** У ранніх редакціях він був — `sendBlocking(ticket, timeoutMs)`, який
+  крутив `poll()`, доки квиток не завершиться. Його видалено: його не викликало ніщо в
+  `src/`, `examples/` чи `test/`, а бібліотека, головна обіцянка якої — ніколи не блокувати,
+  не має постачати єдиний виклик, що блокує. Чекайте через `onComplete()` або
+  `EventKind::TxComplete` у власному циклі.
 
 ### Затримка і витіснення
 
@@ -1127,7 +1186,7 @@ platformio_footprint.ini` відтворює всі числа звідси, в�
 
 1. **Лише ноутбук — узагалі без плати.**
    ```
-   pio test -e native            # 140 випадків, ~10 с
+   pio test -e native            # 200 випадків, ~12 с
    pio run -e ex07_virtual_panel -t exec
    ```
    Уся бібліотека працює на хості проти **twin-а**: моделі панелі, яка збирає передане,
@@ -1179,7 +1238,7 @@ platformio_footprint.ini` відтворює всі числа звідси, в�
 ### Документи і тести
 
 ```
-pio test -e native      # 187 хостових тестів в 13 наборах, без заліза
+pio test -e native      # 200 хостових тестів у 13 наборах, без заліза
 pio run                 # усі 15: два хостові середовища плюс 13 цілей ESP32-C3
 ```
 

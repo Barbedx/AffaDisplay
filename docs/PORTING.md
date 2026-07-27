@@ -99,9 +99,12 @@ decided inside the library, and your callback sees what was not consumed. There 
 + display.onComplete(&onDone, nullptr);
 ```
 
-If your application genuinely needs the old synchronous shape *during setup only*, there is
-`sendBlocking(ticket, timeoutMs)` — it pumps `poll()` itself, so it cannot deadlock. **Never
-call it from a callback or from `loop()`.**
+There is no synchronous shape to fall back to, not even for setup. A `sendBlocking(ticket,
+timeoutMs)` that pumped `poll()` itself was offered in earlier revisions and has been
+removed: nothing ever called it, and the one blocking call in a library that promises never
+to block is a trap, not a convenience. If setup must not proceed until a message lands, run
+`poll()` in your own loop and watch `onComplete()` — that is the same three lines, and it is
+visibly yours.
 
 **7. Expect coalescing.** `setText()` carries `RenderSlot::Text`, so a second call
 supersedes a queued, not-yet-started first one and the superseded ticket completes
@@ -116,7 +119,7 @@ is reimplementable with public API alone:
 | Was in the display class | Now |
 | --- | --- |
 | `sendPasswordSequence()` (with `delay(1000)`) | `examples/08_radio_mitm` — `subscribe()` arms a step machine, `pressKey(..., KeySource::Wire)` presses. Non-blocking. |
-| `_aux.onCanMessage()` wired into `recv()` | `AuxModeTracker` is default-off (`AFFA_ENABLE_AUX_TRACKER`) and no longer fed by the display. Subscribe and feed it yourself, or write your own policy. |
+| `_aux.onCanMessage()` wired into `recv()` | `AuxModeTracker` is **deleted**, gate and all. Its seven reverse-engineered patterns are tabulated in `docs/PROTOCOL-NOTES.md` §8; `subscribe()` to `0x151` and write the ~20-line classifier yourself, as `examples/08_radio_mitm` does. It is a heuristic about your radio, so it is your policy. |
 | `ISettings` / NVS writes for menu items | Your `MenuItem::onChange` callback. The library persists nothing. |
 | media / ANCS / ELM routing | Your application. Drive the library with `setText()` / `showMenu()`. |
 
@@ -259,4 +262,5 @@ Not a sales pitch — a list of things that are easy to not notice you were gett
 * a wall-clock sync watchdog rather than a call counter (the original defect);
 * self-frame suppression at all three points that need it — auto-ACK, ACK matching, key
   decode — which is what makes a loopback test behave like hardware;
-* 140 host tests that run in ten seconds with no hardware, including the two panel twins.
+* 200 host tests that run in about twelve seconds with no hardware, including the two
+  panel twins.

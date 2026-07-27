@@ -75,7 +75,9 @@ enum class Result : uint8_t {
   BadArgument  = 8,   // null pointer, len == 0, index out of range
   LinkDown     = 9,   // ICanLink::isLive() was false
   Cancelled    = 10,  // job discarded because sync was lost or begin() was re-run
-  Busy         = 11,  // refused: would have re-entered poll()
+  // 11 was Busy: the "would have re-entered poll()" refusal, which only sendBlocking()
+  // could return. Both are gone. The number is NOT reused — a migrating application that
+  // logged the raw value must not find 11 meaning something else.
   Aborted      = 12,  // discarded by the APPLICATION before any byte reached the wire:
                       // abortPending(), abortAll(), or superseded by a newer render of
                       // the same RenderSlot. onComplete only — never returned by an
@@ -119,11 +121,14 @@ enum class Feature : uint8_t {
   Fullscreen,   // showFullscreenText / hideFullscreenText
   ConfirmBox,   // showConfirmBox
   InfoPopup,    // showInfoPopup / hideInfoPopup
-  AuxTracking,  // the optional AuxModeTracker helper is compiled in; off by default —
-                // this is a radio heuristic, not a panel capability
   KeyTx,        // this panel family has a key-transmit id, so pressKey(..., Wire) can
                 // put a frame on the bus
-  RadioText,    // EventKind::RadioText can fire (needs AFFA_ENABLE_ISOTP_RX)
+  RadioText,    // the ISO-TP reassembler is compiled in (AFFA_ENABLE_ISOTP_RX), so
+                // inbound text CAN be reconstructed. It reports a COMPILE GATE and
+                // nothing more: no panel routes reassembled text to the application.
+                // UpdateList's own single-frame sniff of 0x121 is reported through the
+                // protected UpdateListBase::onRadioText() hook, which is a subclass
+                // seam, not this capability.
 };
 
 // Navigation intent. Mapped to (Key, KeyEdge) by AffaDisplayBase::nav().
@@ -237,11 +242,14 @@ enum class EventKind : uint8_t {
   PeerLost,      // ev.sync   — the peer-alive deadline expired
   Key,           // ev.key    — decoded from the wire OR from pressKey/nav with a source
                  //             that includes Local
-  RadioText,     // ev.text   — another node sent text on the panel's text id
-  ScreenChanged, // ev.screen — inbound screen decoded (AFFA_ENABLE_ISOTP_RX)
   TxComplete,    // ev.tx     — same information as CompleteCb
   LinkError,     // ev.error  — ring overflow, dropped TX, controller error
 };
+// RadioText and ScreenChanged used to be declared here. Nothing ever constructed either
+// one — reassembly lives in proto/ and the panels' dependency table does not include it —
+// so the public API was advertising two events that could not arrive. An application that
+// wants inbound text today subscribes to the raw frames on the panel's text id; see
+// docs/PROTOCOL-NOTES.md §8. Re-add them WITH their emitter, never before it.
 
 enum class LinkErrorKind : uint8_t {
   RingOverflow,     // Stats::ringOverflow advanced: frames were LOST
@@ -249,27 +257,22 @@ enum class LinkErrorKind : uint8_t {
   ControllerError,  // the driver's own error counters advanced
 };
 
-struct ScreenModel;   // proto/ScreenModel.h — pointer only, never dereferenced by core/,
-                      // and never non-null unless AFFA_ENABLE_ISOTP_RX
-
 // A tagged union, not std::variant and not a class hierarchy. std::variant costs an
 // index, alignment padding and a valueless-by-exception state this library (built
 // -fno-exceptions) cannot even reach; a hierarchy costs a vtable pointer per event and
 // forces the event to outlive the callback. This is POD built on the poll() stack, copied
 // nowhere, allocated never.
 //
-// EVERY POINTER INSIDE Event — text.text, text.raw, screen.model — points at
-// library-internal storage and is valid ONLY for the duration of the callback. Copy what
-// you need. Keeping the pointer compiles, and works, right up until the next frame
-// arrives; this is a review-by-eye rule, not a compiler-enforced one.
+// The union carried two more arms, `text` and `screen`, whose only readers would have been
+// EventKind::RadioText and EventKind::ScreenChanged. Both went with those enumerators. If
+// either event ever gains a real emitter, its arm comes back WITH it — and so does the
+// rule that made them delicate: a pointer into library-internal storage is valid ONLY for
+// the duration of the callback.
 struct Event {
   EventKind kind;
   union {
     struct { SyncState prev; SyncState now; }            sync;
     struct { Key key; KeyEdge edge; }                    key;
-    struct { uint16_t id; const char* text;
-             const uint8_t* raw; uint8_t rawLen; }       text;
-    struct { const ScreenModel* model; }                 screen;
     struct { TxTicket ticket; Result result; }           tx;
     struct { LinkErrorKind kind; uint32_t count; }       error;
   };

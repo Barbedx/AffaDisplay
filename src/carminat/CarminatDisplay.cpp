@@ -7,6 +7,9 @@
 
 #include "../util/AffaText.h"
 #include "../util/AffaLog.h"
+#if AFFA_ENABLE_ISOTP_RX
+#  include "../proto/ScreenDecode.h"
+#endif
 #include <cstring>
 
 namespace affa {
@@ -64,8 +67,6 @@ bool CarminatDisplay::supports(Feature f) const {
     case Feature::Fullscreen:  return AFFA_ENABLE_FULLSCREEN != 0;
     case Feature::ConfirmBox:  return AFFA_ENABLE_CONFIRMBOX != 0;
     case Feature::InfoPopup:   return AFFA_ENABLE_INFOPOPUP != 0;
-    // Not a panel capability: it answers "the optional radio heuristic is compiled in".
-    case Feature::AuxTracking: return AFFA_ENABLE_AUX_TRACKER != 0;
     case Feature::KeyTx:       return true;                        // 0x1C1
     case Feature::RadioText:   return AFFA_ENABLE_ISOTP_RX != 0;
   }
@@ -106,6 +107,25 @@ bool CarminatDisplay::onFrame(const Frame& f) {
   routeKey(k, e);
   return true;
 }
+
+#if AFFA_ENABLE_ISOTP_RX
+// The 0x74 (full window) and 0x77 (windowed radio text) screens are the two that carry a
+// text line; everything else on 0x151 — the 0x21 menu, the 0x76 info row — is a screen, and
+// returning false leaves it to a subscribe() that wants the raw bytes.
+//
+// Text runs from kOffWinText to the last byte RECEIVED, not to the declared length: setText
+// declares 0x0E and transmits 20 (WIRE-SPEC §8.1), so trusting the declaration here would
+// cut the string short. asciiz() stops at the first NUL and drops the panel filler.
+bool CarminatDisplay::decodeText(const uint8_t* payload, uint8_t len, char* out,
+                                 uint8_t outSize) const {
+  if (len < screen::kWinTextMinLen) return false;
+  if (payload[2] != screen::kWinTextCmdFull && payload[2] != screen::kWinTextCmdWindow)
+    return false;
+  screen::asciiz(payload, len, screen::kOffWinText, static_cast<uint8_t>(len - 1), out,
+                 outSize);
+  return true;
+}
+#endif
 
 void CarminatDisplay::onPoll() {
 #if AFFA_ENABLE_MENU

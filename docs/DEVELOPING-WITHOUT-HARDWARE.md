@@ -28,7 +28,7 @@ repository root. On Windows the launcher is
 pio test -e native
 ```
 
-Expect **140 test cases across 11 suites in about ten seconds**. The suites are worth
+Expect **200 test cases across 13 suites in about twelve seconds**. The suites are worth
 knowing by name, because when you break something one of them tells you *what*:
 
 | Suite | What it pins |
@@ -40,8 +40,10 @@ knowing by name, because when you break something one of them tells you *what*:
 | `test_isotp_edges` | the 113-byte ceiling, "DONE while bytes remain", `fragment()` vs the transmit FSM |
 | `test_keys` | the `03 89` guard, the hold mask, the wheel collision, unknown codes |
 | `test_keysource` | `Local` / `Wire` / `Both`, and the three `fromSelf` drop points |
-| `test_nav` | a full menu script, decoded back with the independent screen decoder |
+| `test_nav` | a full menu script through `CarminatDisplay`, decoded back with the independent screen decoder, asserting the FRAME COUNT of every step |
+| `test_menu_widget` | `widget::MenuModel` alone, at `rows` = 2, 3 and 6, against a recording renderer — no panel, no CAN (`docs/MENU-WIDGET.md` §6) |
 | `test_seam` | subscriptions, the tap, and every event kind |
+| `test_bench_surface` | the web console's acceptance list, driven through the public API |
 | `test_latency` | key delivery in exactly one `poll()`, coalescing, preemption |
 | `test_twin` | driver and twin talking to each other over a two-ended link |
 

@@ -12,6 +12,7 @@
 #include "../affa_test_support.h"
 
 #include "carminat/CarminatDisplay.h"
+#include <cstring>
 
 using namespace affa;
 using affatest::mk;
@@ -42,8 +43,8 @@ int g_tap2 = 0;
 void tapSecond(const Frame&, Direction, void*) { ++g_tap2; }
 
 struct EventLog {
-  int sync = 0, registered = 0, peerLost = 0, key = 0, radioText = 0;
-  int screenChanged = 0, txComplete = 0, linkError = 0;
+  int sync = 0, registered = 0, peerLost = 0, key = 0;
+  int txComplete = 0, linkError = 0;
   SyncState prev = SyncState::None, now = SyncState::None;
   Key       lastKey = Key::Load;
   KeyEdge   lastEdge = KeyEdge::Click;
@@ -62,8 +63,6 @@ void record(const Event& e, void*) {
     case EventKind::PeerLost:      ++g_ev.peerLost; break;
     case EventKind::Key:
       ++g_ev.key; g_ev.lastKey = e.key.key; g_ev.lastEdge = e.key.edge; break;
-    case EventKind::RadioText:     ++g_ev.radioText; break;
-    case EventKind::ScreenChanged: ++g_ev.screenChanged; break;
     case EventKind::TxComplete:
       ++g_ev.txComplete; g_ev.lastTicket = e.tx.ticket; g_ev.lastResult = e.tx.result; break;
     case EventKind::LinkError:
@@ -591,32 +590,89 @@ void test_linkerror_reports_a_ring_overflow(void) {
   TEST_ASSERT_GREATER_OR_EQUAL(1u, d.stats().ringOverflow);
 }
 
-void test_radiotext_and_screenchanged_have_no_emitter_yet(void) {
-  // DOCUMENTED GAP, not a specification. Both EventKinds are declared, both panels answer
-  // supports(Feature::RadioText) with AFFA_ENABLE_ISOTP_RX — and NOTHING in carminat/ or
-  // updatelist/ ever emits either one, because reassembly lives in proto/ and the panels'
-  // dependency table does not include it.
-  //
-  // WHEN THE REASSEMBLER IS WIRED INTO THE RX PATH, DELETE THIS TEST and assert the events
-  // instead. It exists so the gap is visible in code rather than only in a report.
-  Rig r;
-  r.up();
-  g_ev = EventLog{};
-  r.d.onEvent(&record, nullptr);
+// ---------------------------------------------------------------------------
+// Layer 2b — onText, the inbound text callback
+// ---------------------------------------------------------------------------
+// test_radiotext_and_screenchanged_have_no_emitter_yet was here. It asserted that two
+// declared EventKinds were never emitted, and existed to make the choice between wiring an
+// emitter and deleting the enumerators unavoidable. The choice was made twice: the two
+// enumerators went, and then inbound text came back as onText WITH the emitter these tests
+// exercise. UpdateListBase's protected onRadioText(bool) hook is a different thing and is
+// unaffected — a single-frame AUX heuristic on a subclass seam, not a published event.
 
-  // A complete inbound windowed-text message on our own text id: exactly the traffic a
-  // RadioText event would be decoded from.
-  r.link.inject(mk(0x151, {0x10, 0x0E, 0x77, 0x55, 0x55, 0xFF, 0x60, 0x01}));
-  r.link.inject(mk(0x151, {0x21, 'R', 'A', 'D', 'I', 'O', 0x00, 0x00}));
-  r.link.inject(mk(0x151, {0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}));
+#if AFFA_ENABLE_ISOTP_RX
+int  g_textN = 0;
+char g_textLast[64];
+void recordText(const char* t, void*) {
+  ++g_textN;
+  std::strncpy(g_textLast, t, sizeof(g_textLast) - 1);
+  g_textLast[sizeof(g_textLast) - 1] = '\0';
+}
+
+// The three frames another head unit puts on 0x151 for setText("RENAULT") — the golden
+// vector from test_carminat_wire, played back at us instead of by us.
+void injectRenault(LoopbackLink<256>& link) {
+  link.inject(mk(0x151, {0x10, 0x0E, 0x77, 0x55, 0x55, 0xFF, 0x60, 0x01}));
+  link.inject(mk(0x151, {0x21, 0x52, 0x45, 0x4E, 0x41, 0x55, 0x4C, 0x54}));
+  link.inject(mk(0x151, {0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}));
+}
+
+void test_onText_delivers_a_reassembled_inbound_string(void) {
+  Rig r; g_textN = 0; g_textLast[0] = '\0';
+  r.d.begin();
+  r.d.onText(&recordText, nullptr);
+
+  injectRenault(r.link);
   r.d.poll();
 
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_ev.radioText,
-                                "no emitter exists yet — see the openIssues note");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_ev.screenChanged, "likewise ScreenChanged");
-  TEST_ASSERT_TRUE_MESSAGE(r.d.supports(Feature::RadioText),
-                           "the capability nevertheless answers true, which over-promises");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_textN, "one complete message must deliver exactly once");
+  TEST_ASSERT_EQUAL_STRING("RENAULT", g_textLast);
 }
+
+// The failure this guards: emitting on every appended frame instead of at the declared
+// length, which delivers the same screen once per continuation.
+void test_onText_does_not_fire_on_a_partial_message(void) {
+  Rig r; g_textN = 0;
+  r.d.begin();
+  r.d.onText(&recordText, nullptr);
+
+  r.link.inject(mk(0x151, {0x10, 0x0E, 0x77, 0x55, 0x55, 0xFF, 0x60, 0x01}));
+  r.link.inject(mk(0x151, {0x21, 0x52, 0x45, 0x4E, 0x41, 0x55, 0x4C, 0x54}));
+  r.d.poll();
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_textN, "an incomplete transfer must deliver nothing");
+
+  r.link.inject(mk(0x151, {0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}));
+  r.d.poll();
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_textN, "the last frame completes it");
+}
+
+// Our OWN renders come back off an echoing link stamped fromSelf. Decoding those into
+// onText would report every string we transmit as inbound text.
+void test_onText_never_reports_our_own_render(void) {
+  Rig r; g_textN = 0;
+  r.up();                                  // synced + registered, self-ACK on
+  r.link.setEcho(true);
+  r.d.onText(&recordText, nullptr);
+
+  ASSERT_RESULT(Ok, r.d.setText("HELLO", 255));
+  pumpUntilIdle(r.d);
+  r.d.poll();
+
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_textN, "a self-sent render is not inbound text");
+}
+
+// A screen is not a text line. The 0x21 windowed menu shares the id and must not be
+// delivered as a string by the 0x74/0x77 decoder.
+void test_onText_ignores_a_payload_that_is_not_text(void) {
+  Rig r; g_textN = 0;
+  r.d.begin();
+  r.d.onText(&recordText, nullptr);
+
+  r.link.inject(mk(0x151, {0x10, 0x04, 0x21, 0x01, 0x7E, 0x80, 0x00, 0x00}));
+  r.d.poll();
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_textN, "a menu screen is not a text line");
+}
+#endif  // AFFA_ENABLE_ISOTP_RX
 
 // ---------------------------------------------------------------------------
 
@@ -643,6 +699,11 @@ int main(int, char**) {
   RUN_TEST(test_the_key_event_fires_whether_or_not_the_menu_consumed_it);
   RUN_TEST(test_linkerror_reports_a_dropped_transmission);
   RUN_TEST(test_linkerror_reports_a_ring_overflow);
-  RUN_TEST(test_radiotext_and_screenchanged_have_no_emitter_yet);
+#if AFFA_ENABLE_ISOTP_RX
+  RUN_TEST(test_onText_delivers_a_reassembled_inbound_string);
+  RUN_TEST(test_onText_does_not_fire_on_a_partial_message);
+  RUN_TEST(test_onText_never_reports_our_own_render);
+  RUN_TEST(test_onText_ignores_a_payload_that_is_not_text);
+#endif
   return UNITY_END();
 }

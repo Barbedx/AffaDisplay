@@ -43,8 +43,8 @@
 #if !AFFA_PANEL_CARMINAT
 #  error "90_bench_ota needs -D AFFA_PANEL_CARMINAT=1"
 #endif
-#if !AFFA_ENABLE_VIRTUAL_PANEL
-#  error "90_bench_ota needs -D AFFA_ENABLE_VIRTUAL_PANEL=1 (it runs the twin)"
+#if !AFFA_ENABLE_ISOTP_RX
+#  error "90_bench_ota needs -D AFFA_ENABLE_ISOTP_RX=1 (it decodes the wire for /api/screen)"
 #endif
 #if !AFFA_ENABLE_MENU
 #  error "90_bench_ota drives the menu seam from the browser; it needs AFFA_ENABLE_MENU=1"
@@ -96,24 +96,68 @@ BenchLink                  g_bench(g_hw);
 ArduinoClock               g_clock;
 affa::CarminatDisplay      g_display(g_bench, g_clock);
 
-// The twin. In REAL mode it is PASSIVE and only decodes what we transmit, so /api/screen
-// answers even with a live panel on the bus. In VIRTUAL mode it EMULATES and answers
-// through its own loopback, which main's loop drains back into BenchLink::inject().
+// What /api/screen reports: our OWN transmissions, decoded back. This used to be
+// affa::CarminatVirtualPanel, a panel twin the library shipped; the twins are gone, and
+// what replaces them is the thirty lines below plus setSelfAck() for the no-panel case.
+// Everything it needs is still published — isotp::Reassembler and affa::screen — because
+// decoding somebody else's traffic is what AFFA_ENABLE_ISOTP_RX buys.
 //
-// AckMode::Declared and not the Done default: Declared answers PARTIAL while the declared
-// FF_DL is unsatisfied and DONE at it, which is what the hardware does. With Done the twin
-// would terminate every multi-frame transfer after frame 0 — the transmit FSM treats
-// "DONE while bytes remain" as SUCCESS, because showMenu depends on exactly that — and the
-// twin would see 8 bytes of a 96-byte screen. Declared is the only mode that reproduces
-// showMenu at 13 frames (last PCI 0x2C), which is the hardware count.
-affa::CarminatVirtualPanel g_twin;
-affa::LoopbackLink<32>     g_twinLink;
+// It is fed from the Layer-0 tap, which is where a sniffer sits: the same wiring serves a
+// live panel and an empty bus, and no panel code runs inside the library's transmit path.
+class BenchScreen {
+ public:
+  // Transcribed from the deleted CarminatVirtualPanel::decode(), including the trap it
+  // recorded: EVERY multi-frame message goes through the reassembler, including first
+  // frames whose command we do not decode. Returning early on an unrecognised first frame
+  // leaves the previous message active and its continuations append to THAT buffer, which
+  // grew the menu past its end on every info popup.
+  void onFrame(const affa::Frame& f) {
+    if (f.id != affa::carminat::kIdSetText || f.len == 0) return;
+
+    // The highlight is a STANDALONE single frame, not ISO-TP, and screen::frame() carries
+    // the full `07 29 01` guard — 0x151 also carries `03 52 …`, `05 56 …` and `02 54 03`.
+    if (affa::screen::frame(f, _s)) { _lastMs = millis(); return; }
+    if (!_asm.onFrame(f)) return;
+
+    const uint8_t* p = _asm.buffer();
+    const uint8_t  n = _asm.len();
+    if (n < 4) return;                    // p[2] is the command, p[3] its first operand
+    switch (p[2]) {
+      // Mode 0x05 is the FULLSCREEN variant; its payload has a different layout entirely,
+      // and decoding it with the menu offsets would produce a confident wrong screen.
+      case affa::screen::kMenuCmd:
+        if (p[3] == affa::screen::kMenuModeWin) affa::screen::menu(p, n, _s);
+        break;
+      case affa::screen::kWinTextCmdFull:
+      case affa::screen::kWinTextCmdWindow:
+        affa::screen::windowText(p, n, _s);
+        break;
+      case affa::screen::kInfoCmd:
+        affa::screen::infoRow(p, n, _s);
+        break;
+      default:
+        return;                           // unmodelled: decoded as nothing, not as a guess
+    }
+    _lastMs = millis();
+  }
+
+  const affa::ScreenModel& model() const { return _s; }
+  uint32_t lastDecodeMs() const { return _lastMs; }
+
+ private:
+  affa::ScreenModel        _s{};
+  affa::isotp::Reassembler _asm;
+  uint32_t                 _lastMs = 0;
+};
+
+BenchScreen g_screen;
 
 PsychicHttpServer          g_server;
 
 bool     g_canUp     = false;   // Esp32CanLink::begin() succeeded
 bool     g_txGate    = true;    // the user's software TX gate setting
 uint32_t g_rebootAt  = 0;       // 0 = no reboot scheduled
+uint32_t g_vPanelNextMs = 0;    // next virtual-panel sync frame; VIRTUAL mode only
 
 // ---------------------------------------------------------------------------
 // Rings
@@ -255,7 +299,6 @@ const char* resultName(affa::Result r) {
     case affa::Result::BadArgument:  return "BadArgument";
     case affa::Result::LinkDown:     return "LinkDown";
     case affa::Result::Cancelled:    return "Cancelled";
-    case affa::Result::Busy:         return "Busy";
     case affa::Result::Aborted:      return "Aborted";
   }
   return "?";
@@ -510,9 +553,9 @@ void onTap(const affa::Frame& f, affa::Direction d, void*) {
   const uint32_t us = micros();
 
   if (d == affa::Direction::Tx) {
-    // The twin sees exactly what a sniffer on the bus would see, in both modes. In REAL
-    // mode it is PASSIVE and decodes only; in VIRTUAL mode it EMULATES and answers.
-    g_twin.onFrame(f);
+    // The decoder sees exactly what a sniffer on the bus would see, in both modes: it only
+    // ever reads, so there is nothing to switch between REAL and VIRTUAL.
+    g_screen.onFrame(f);
 
     if (id == affa::carminat::kIdSetText || id == affa::carminat::kIdNav) {
       if (g_awaitTx) { g_keyToWireUs = us - g_keyCbUs; g_awaitTx = false; }
@@ -721,12 +764,10 @@ void jStatus() {
      static_cast<unsigned long>(g_ackN ? (uint32_t)(g_ackSumUs / g_ackN) : 0),
      static_cast<unsigned long>(g_ackMaxUs));
 
-  jf("\"twin\":{\"emulating\":%s,\"synced\":%s,\"acks\":%lu,\"syncReplies\":%lu,"
-     "\"lastDecodeMs\":%lu},",
-     g_twin.emulating() ? "true" : "false", g_twin.synced() ? "true" : "false",
-     static_cast<unsigned long>(g_twin.acksSent()),
-     static_cast<unsigned long>(g_twin.syncRepliesSent()),
-     static_cast<unsigned long>(g_twin.lastDecodeMs()));
+  jf("\"decoder\":{\"emulating\":%s,\"synced\":%s,\"selfAck\":%s,\"lastDecodeMs\":%lu},",
+     g_bench.isVirtual() ? "true" : "false", g_display.synced() ? "true" : "false",
+     g_bench.isVirtual() ? "true" : "false",
+     static_cast<unsigned long>(g_screen.lastDecodeMs()));
 
   jf("\"selftest\":{\"ran\":%s,\"running\":%s,\"ok\":%s,",
      g_st.ran ? "true" : "false",
@@ -790,7 +831,7 @@ void jKeys() {
 }
 
 void jScreen() {
-  const affa::ScreenModel& s = g_twin.screen();
+  const affa::ScreenModel& s = g_screen.model();
   jclear();
   jf("{"); jkv("mode", modeName(s.mode)); jf(",");
   jkv("header", s.header); jf(",");
@@ -804,7 +845,7 @@ void jScreen() {
     if (i) jf(",");
     jstr(s.info[i]);
   }
-  jf("],\"lastDecodeMs\":%lu,", static_cast<unsigned long>(g_twin.lastDecodeMs()));
+  jf("],\"lastDecodeMs\":%lu,", static_cast<unsigned long>(g_screen.lastDecodeMs()));
   jf("\"nowMs\":%lu,", static_cast<unsigned long>(millis()));
   jkv("panel", g_bench.isVirtual() ? "virtual" : "real");
   jf("}");
@@ -871,9 +912,9 @@ void jSelfTest() {
   jf("{"); jkv("name", "delivered"); jf(",\"ok\":%s,\"ms\":%lu,",
      g_st.textOk ? "true" : "false", static_cast<unsigned long>(g_st.deliverMs));
   jkv("detail", resultName(g_st.delivered)); jf("},");
-  jf("{"); jkv("name", "twin decoded"); jf(",\"ok\":%s,",
-     g_twin.screen().header[0] ? "true" : "false");
-  jkv("detail", g_twin.screen().header);
+  jf("{"); jkv("name", "wire decoded"); jf(",\"ok\":%s,",
+     g_screen.model().header[0] ? "true" : "false");
+  jkv("detail", g_screen.model().header);
   jf("}]}");
 }
 
@@ -1042,9 +1083,11 @@ void execCmd(const Cmd& c) {
       const bool wantVirtual = (strcmp(c.s1, "virtual") == 0);
       if (wantVirtual != g_bench.isVirtual()) {
         g_bench.setVirtual(wantVirtual);
-        g_twinLink.clear();
-        g_twin.setEmulate(wantVirtual);          // EMULATION off the bus, PASSIVE on it
-        g_twin.begin(g_twinLink, g_clock);
+        // Self-ACK only off the bus. With a real panel attached it would answer our frames
+        // alongside the panel's own ACKs, and the transfer would advance on whichever
+        // arrived first — two ACKers on one bus, in the library instead of on the wire.
+        g_display.setSelfAck(wantVirtual);
+        g_vPanelNextMs = millis();
         if (g_canUp) g_hw.setTxEnabled(g_txGate && !wantVirtual);
         // begin() resets the FSMs and cancels the queue; the handshake restarts against
         // whichever peer is now on the other side.
@@ -1055,7 +1098,7 @@ void execCmd(const Cmd& c) {
       }
       jclear();
       jf("{"); jkv("panel", g_bench.isVirtual() ? "virtual" : "real");
-      jf(",\"emulating\":%s,\"txGate\":%s}", g_twin.emulating() ? "true" : "false",
+      jf(",\"emulating\":%s,\"txGate\":%s}", g_bench.isVirtual() ? "true" : "false",
          g_txGate ? "true" : "false");
       break;
     }
@@ -1344,12 +1387,10 @@ void setup() {
   g_display.onSync(&onSyncChanged, nullptr);
   buildDemoMenu();
 
-  // 4. The twin. PASSIVE next to a real panel — two ACKers on one bus is the failure this
-  //    switch exists to prevent — EMULATION when there is no bus.
-  g_twin.setAckMode(affa::VirtualPanelBase::AckMode::Declared);
-  g_twin.setEmulate(!g_canUp);
-  g_twin.begin(g_twinLink, g_clock);
+  // 4. With no bus, be the panel: self-ACK plus the two sync frames loop() injects. Never
+  //    next to a real panel — two ACKers is the failure this switch exists to prevent.
   g_bench.setVirtual(!g_canUp);
+  g_display.setSelfAck(!g_canUp);
   if (g_canUp) g_hw.setTxEnabled(true);
 
   g_display.begin();
@@ -1368,13 +1409,22 @@ void loop() {
   g_pollLastUs = nowUs;
   if (dt > g_pollMaxUs && dt < 1000000u) g_pollMaxUs = dt;
 
-  // 2. Hand the twin's replies back. In REAL mode the twin is PASSIVE and this is empty.
-  {
-    affa::Frame f;
-    while (g_twinLink.takeSent(f)) g_bench.inject(f);
-  }
-
   const uint32_t now = millis();
+
+  // 2. With no panel on the bus, be the half of one that the handshake needs. The per-frame
+  //    ACK comes from setSelfAck() inside the library; the two sync frames are these. `61
+  //    11` is what clears FAILED and draws the hello out of us, `69` is the ~1 Hz
+  //    peer-alive ping the watchdog is counting on. Deadline-driven, never a call counter.
+  if (g_bench.isVirtual() && affa::expired(now, g_vPanelNextMs)) {
+    g_vPanelNextMs = now + 1000;
+    affa::Frame r{};
+    r.id  = affa::carminat::kIdSyncReply;
+    r.len = 8;
+    for (uint8_t i = 0; i < 8; ++i) r.data[i] = 0xA3;   // the panel's filler, from capture
+    if (!g_display.synced()) { r.data[0] = 0x61; r.data[1] = 0x11; }
+    else                     { r.data[0] = 0x69; }
+    g_bench.inject(r);
+  }
 
   // 3. Deadline-driven application work. No counters, no delays.
   counterTick(now);

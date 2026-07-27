@@ -53,29 +53,26 @@ inline constexpr uint8_t kAckPartial2   = 0x00;
 // before the first payload after a resync. [CAP]
 inline constexpr uint8_t kRegisterByte = 0x70;
 
-// ISO-TP-ish transport. Frame 0 carries EIGHT raw payload bytes with no PCI added by the
-// transport — the 0x10 at the head of a screen payload is byte 0 of the payload, built by
-// the caller, not a transport byte. Continuation frames carry seven, prefixed with the
-// counter below.
+// Frame 0 carries EIGHT raw payload bytes with no transport PCI — the 0x10 at the head of
+// a screen payload is payload byte 0, built by the caller. Continuations carry seven,
+// prefixed with the counter below.
 inline constexpr uint8_t kFrame0Bytes = 8;
 inline constexpr uint8_t kFrameNBytes = 7;
 
-// Continuation PCI. The counter WRAPS: 0x20 | (num & 0x0F).
-// Legacy wrote `0x20 + num`, which produces 0x30 at num == 16 — the ISO-TP flow-control
-// PCI, not a consecutive frame. The OEM head unit wraps modulo 16 on its 302-byte 0x1F1
-// message (every distinct PCI seen there is 11 20 21..2A 2C 2D 2E 2F, with 0x20 present
-// and nothing above 0x2F), so wrapping is both correct and byte-identical to legacy for
-// every message in our repertoire. [CAP] docs/WIRE-SPEC.md §3.3
+// Continuation PCI; the counter WRAPS. Legacy `0x20 + num` produces 0x30 at num == 16 —
+// the ISO-TP flow-control PCI, not a consecutive frame. The OEM head unit wraps modulo 16
+// on its 302-byte 0x1F1 message (distinct PCIs there: 11 20 21..2A 2C 2D 2E 2F, 0x20
+// present, nothing above 0x2F). [CAP] docs/WIRE-SPEC.md §3.3
 inline constexpr uint8_t kIsoTpCfBase = 0x20;
 inline constexpr uint8_t kIsoTpCfMask = 0x0F;
 inline constexpr uint8_t isoTpCf(uint8_t num) {
   return static_cast<uint8_t>(kIsoTpCfBase | (num & kIsoTpCfMask));
 }
 
-// Frames a payload of `len` bytes occupies on the wire, if nothing stops the sender
-// early. The panel DOES stop it early when the declared FF_DL is shorter than what the
-// builder holds — showMenu is the one over-run in the repertoire, ending at PCI 0x2C —
-// so this is the ceiling, not always the count. docs/WIRE-SPEC.md §3.6
+// Frames a `len`-byte payload occupies if nothing stops the sender early. The panel DOES
+// stop early when the declared FF_DL is shorter than the builder holds — showMenu is the
+// one over-run in the repertoire, ending at PCI 0x2C — so this is a ceiling, not always
+// the count. docs/WIRE-SPEC.md §3.6
 constexpr uint8_t isoTpFrameCount(uint8_t len) {
   return (len <= kFrame0Bytes)
              ? 1

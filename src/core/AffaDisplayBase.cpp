@@ -30,8 +30,6 @@ bool AffaDisplayBase::begin() {
   _lastCompleted  = kNoTicket;
   _lastEnqueued   = kNoTicket;
   _lastResult     = Result::Ok;
-  _watchTicket    = kNoTicket;
-  _watchDone      = false;
   _lastOverflow   = _link.stats().ringOverflow;
 
   AFFA_LOGI(kTag, "begin: syncId=0x%03X reply=0x%03X funcs=%u",
@@ -68,6 +66,9 @@ void AffaDisplayBase::onComplete(CompleteCb cb, void* ctx) { _cplCb = cb; _cplCt
 void AffaDisplayBase::onSync(SyncCb cb, void* ctx)    { _syncCb = cb; _syncCtx = ctx; }
 void AffaDisplayBase::onFrame(FrameTap cb, void* ctx) { _tap = cb;   _tapCtx = ctx; }
 void AffaDisplayBase::onEvent(EventCb cb, void* ctx)  { _evCb = cb;  _evCtx = ctx; }
+#if AFFA_ENABLE_ISOTP_RX
+void AffaDisplayBase::onText(TextCb cb, void* ctx)    { _textCb = cb; _textCtx = ctx; }
+#endif
 
 SubHandle AffaDisplayBase::subscribe(const FrameMatch& m, FrameCb cb, void* ctx) {
 #if AFFA_MAX_SUBSCRIPTIONS > 0
@@ -214,6 +215,9 @@ void AffaDisplayBase::pumpRx() {
     if (!_passive && !isOurTxId(static_cast<uint16_t>(f.id)) && shouldAutoAck(f))
       sendGenericAck(static_cast<uint16_t>(f.id));
 
+#if AFFA_ENABLE_ISOTP_RX
+    pumpText(f);
+#endif
     onFrame(f);
   }
 
@@ -229,6 +233,39 @@ void AffaDisplayBase::pumpRx() {
     }
   }
 }
+
+#if AFFA_ENABLE_ISOTP_RX
+// Reached only for a frame that came off the wire (fromSelf is dropped above), so this
+// never decodes our own renders back into onText.
+void AffaDisplayBase::pumpText(const Frame& f) {
+  const uint16_t id = textRxId();
+  if (!_textCb || id == 0 || f.id != id) return;
+  if (!_textAsm.onFrame(f)) return;                 // not an ISO-TP data frame
+
+  const uint8_t* p   = _textAsm.buffer();
+  const uint8_t  len = _textAsm.len();
+  if (len < 2) return;
+
+  // COMPLETION IS THE DECLARED LENGTH, not a frame count: payload[1] is the content length
+  // and payload[0..1] are not content, so the message ends at 2 + p[1]. Emitting per
+  // appended frame instead would deliver the same screen once per continuation.
+  //
+  // The second arm is the ceiling: Reassembler stops appending at AFFA_MAX_PAYLOAD, so a
+  // message declaring more than that never satisfies the first and would otherwise be
+  // dropped in silence. We deliver what we have — short, which the decoders reject on
+  // length if it is too short to mean anything.
+  const uint16_t need = static_cast<uint16_t>(2u + p[1]);
+  if (len < need && len < AFFA_MAX_PAYLOAD) return;
+
+  char out[AFFA_TEXT_MAX];
+  const bool ok = decodeText(p, len, out, sizeof(out));
+  // Reset BEFORE the callback, never after: the callback may render, and a render may
+  // re-enter poll() in an application that pumps from one. It must not find a transfer
+  // this call has already consumed.
+  _textAsm.reset();
+  if (ok) _textCb(out, _textCtx);
+}
+#endif
 
 bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
   if (_passive) return true;              // a real radio owns the handshake
@@ -663,7 +700,6 @@ void AffaDisplayBase::completeTicket(TxTicket t, Result r) {
   if (t == kNoTicket) return;
   _lastCompleted = t;
   _lastResult    = r;
-  if (_watchTicket == t) { _watchResult = r; _watchDone = true; }
   if (_cplCb) _cplCb(t, r, _cplCtx);
 
   Event ev;
@@ -718,30 +754,6 @@ bool AffaDisplayBase::pending(RenderSlot s) const {
     if (!_queue[i].started && _queue[i].kind == JobKind::Payload && _queue[i].slot == s)
       return true;
   return false;
-}
-
-Result AffaDisplayBase::sendBlocking(TxTicket t, uint32_t timeoutMs) {
-  if (_inPoll) return Result::Busy;       // would re-enter poll()
-  if (t == kNoTicket) return Result::BadArgument;
-  if (_lastCompleted == t) return _lastResult;   // already finished before we got here
-
-  _watchTicket = t;
-  _watchDone   = false;
-  _watchResult = Result::Ok;
-  const uint32_t deadline = _clock.millis() + timeoutMs;
-
-  // It cannot deadlock, because the thing it waits for is delivered by the poll() it is
-  // calling. That is the whole reason this is safe to offer at all.
-  for (;;) {
-    poll();
-    if (_watchDone) break;
-    if (expired(_clock.millis(), deadline)) {
-      _watchTicket = kNoTicket;
-      return Result::Timeout;             // THE TICKET IS STILL QUEUED
-    }
-  }
-  _watchTicket = kNoTicket;
-  return _watchResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -916,7 +928,6 @@ Stats     AffaDisplayBase::stats() const { return _link.stats(); }
 Result AffaDisplayBase::setText(const char*, uint8_t) { return Result::NotSupported; }
 Result AffaDisplayBase::setTime(const char*) { return Result::NotSupported; }
 Result AffaDisplayBase::setPower(bool) { return Result::NotSupported; }
-Result AffaDisplayBase::setAuxMode(bool) { return Result::NotSupported; }
 Result AffaDisplayBase::showMenu(const char*, const char*, const char*, uint8_t) {
   return Result::NotSupported;
 }

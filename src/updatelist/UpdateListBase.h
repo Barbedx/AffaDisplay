@@ -1,16 +1,10 @@
-// UpdateListBase — everything the AFFA2 family shares below the text encoding.
+// Everything the AFFA2 family shares below the text encoding: the SyncProfile and function
+// table (0x121, 0x1B1), setPower's 0x1B1 payload, the 0x0A9 key channel, the 0x121 inbound
+// radio-text sniff, and the AMS key-forwarding gesture with its non-blocking feedback.
 //
-// ABSTRACT ON PURPOSE. It does not implement setText and does not implement supports():
-// the two concrete panels differ in exactly the text encoding, and a base that answered
-// supports(Feature::Text) == true while returning NotSupported from setText would be a
-// capability lie in the one place applications are told to trust.
-//
-// What lives here:
-//   * the family's SyncProfile and function table (0x121, 0x1B1);
-//   * setPower  — the 0x1B1 display-control payload;
-//   * the 0x0A9 key channel: decode, the malformed-frame auto-ACK veto, routing;
-//   * the 0x121 inbound radio-text sniff;
-//   * the AMS key-forwarding gesture and its non-blocking on-screen feedback.
+// ABSTRACT ON PURPOSE — no setText and no supports(). The two concrete panels differ in
+// exactly the text encoding, and a base answering supports(Feature::Text) == true while
+// setText returned NotSupported would be a capability lie.
 #pragma once
 #include "../AffaConfig.h"
 #if AFFA_PANEL_UPDATELIST
@@ -24,12 +18,10 @@ class UpdateListBase : public AffaDisplayBase {
  public:
   UpdateListBase(ICanLink& link, IClock& clock);
 
-  // NAME HIDING, not decoration. The protected `bool onFrame(const Frame&)` hook below
-  // hides EVERY base member called onFrame, including the public Layer-0 tap
-  // `void onFrame(FrameTap, void*)` — so without this line `display.onFrame(&tap, ctx)`
-  // fails to compile through an UpdateListDisplay& and only works through an
-  // AffaDisplayBase&. The derived override still hides the base's same-signature member,
-  // so this changes nothing else. Found by examples/06_counter_preempt.
+  // NAME HIDING, not decoration. The protected `bool onFrame(const Frame&)` below hides
+  // EVERY base member called onFrame, including the public Layer-0 tap
+  // `void onFrame(FrameTap, void*)`; without this line `display.onFrame(&tap, ctx)` does
+  // not compile through an UpdateListDisplay&.
   using AffaDisplayBase::onFrame;
 
   // 0x1B1: `04 52 <state> FF FF` padded with 0x81. Enqueued on RenderSlot::Control, so it
@@ -37,15 +29,12 @@ class UpdateListBase : public AffaDisplayBase {
   [[nodiscard]] Result setPower(bool on) override;
 
   // ---- AMS key forwarding -------------------------------------------------
-  // "Hold Load toggles whether wheel keys reach the application, and the panel says so"
-  // is the extracted behaviour. It is UI policy that happens to be this installation's
-  // convention, so — boundary principle — it ships ON as a default that can be turned
-  // off, never as something an application cannot reach.
+  // "Hold Load toggles whether wheel keys reach the application, and the panel says so" —
+  // UI policy, so it ships on as a replaceable default.
   //
   // While forwarding is DISABLED, decoded keys other than the toggle gesture are dropped
-  // before KeyCb and before EventKind::Key. That is the legacy semantic and it is the
-  // point of the switch; Layer 0 (onFrame tap) and Layer 1 (subscribe) still see the raw
-  // 0x0A9 frames, so nothing goes unobservable.
+  // before KeyCb and before EventKind::Key. Layer 0 (onFrame tap) and Layer 1 (subscribe)
+  // still see the raw 0x0A9 frames, so nothing becomes unobservable.
   void setAmsHotkey(Key k, KeyEdge e);         // default: Key::Load, KeyEdge::Hold
   void clearAmsHotkey();                       // no gesture toggles; forwarding is fixed
   bool amsHotkey(Key& k, KeyEdge& e) const;    // false when cleared
@@ -67,32 +56,37 @@ class UpdateListBase : public AffaDisplayBase {
   // frame on 0x0A9 — including the panel's own `70` registration probe — is.
   bool shouldAutoAck(const Frame& f) const override;
 
-  // Applies the AMS policy, then chains to AffaDisplayBase::routeKey for the normal
-  // fall-through. It replaces the fall-through in exactly two cases, both of them the
-  // policy itself: the toggle gesture (which belongs to the panel) and every key while
-  // forwarding is disabled (which is what "disabled" means). Any other key reaches the
-  // base untouched.
+  // Applies the AMS policy, then chains to AffaDisplayBase::routeKey. It suppresses the
+  // fall-through only for the toggle gesture and for keys arriving while forwarding is
+  // disabled; anything else reaches the base untouched.
   void routeKey(Key k, KeyEdge e) override;
 
   // Advances the AMS banner repeat schedule. A subclass that overrides onPoll() MUST
   // call this first — UpdateListDisplay does.
   void onPoll() override;
 
+#if AFFA_ENABLE_ISOTP_RX
+  // 0x121 is the id WE render on, so inbound text there is another head unit's. Feeds
+  // onText(), which delivers the whole reassembled string — onRadioText(bool) below stays
+  // as it is: a single-frame AUX heuristic for the panel's own re-assert reaction, and
+  // deliberately not the same thing.
+  uint16_t textRxId() const override { return updatelist::kIdSetText; }
+  bool decodeText(const uint8_t* payload, uint8_t len, char* out,
+                  uint8_t outSize) const override;
+#endif
+
   // Called when another node (the radio) transmits the segment text encoding on 0x121.
-  // `isAux` is the extracted heuristic and nothing more: the first three cells of the
-  // sender's "old text" field spell AUX. Radio behaviour is application territory, so
-  // this hook exists for the one library-side reaction that is a panel concern —
-  // re-asserting our own content after someone else overwrote it.
+  // `isAux` is a heuristic and nothing more: the first three cells of the sender's "old
+  // text" field spell AUX. Exists for the one library-side reaction that is a panel
+  // concern — re-asserting our own content after someone else overwrote it.
   virtual void onRadioText(bool isAux) { (void)isAux; }
 
-  // True while the banner owns the screen — from the gesture until the last repeat's
-  // interval has elapsed, i.e. kAmsRepeats * kAmsRepeatMs. A renderer that would
-  // otherwise overwrite it must hold off for exactly that window, which is what the
-  // legacy delay(100) loop achieved by blocking the entire loop.
+  // True while the banner owns the screen: from the gesture until kAmsRepeats *
+  // kAmsRepeatMs has elapsed. A renderer that would overwrite it must hold off for exactly
+  // that window (the legacy delay(100) loop did this by blocking).
   bool amsFeedbackPending() const { return !expired(_clock.millis(), _amsHoldUntilMs); }
 
-  // Shared capability table, so the two concrete panels do not answer it twice. They
-  // differ in no Feature — only in the bytes setText builds.
+  // Shared capability table; the two concrete panels differ in no Feature, only in bytes.
   static bool familySupports(Feature f);
 
   // enqueue() + the Result mapping every render call in this family repeats.
@@ -107,9 +101,8 @@ class UpdateListBase : public AffaDisplayBase {
   Key      _amsHotkey      = Key::Load;
   KeyEdge  _amsHotkeyEdge  = KeyEdge::Hold;
 
-  // Per-instance, never file-static and never a function-local static: the extracted code
-  // kept its queue, its window index and its timeout at file scope, which in a library is
-  // shared state between two displays on two buses.
+  // Per-instance, never file-static: in a library that is shared state between two
+  // displays on two buses.
   const char* _amsBanner      = nullptr;  // string literal; no ownership, no copy
   uint8_t     _amsRepeatsLeft = 0;
   uint32_t    _amsNextMs      = 0;

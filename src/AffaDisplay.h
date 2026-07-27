@@ -5,7 +5,7 @@
 // Declares no types of its own. Everything below is behind the gate that owns it, so a
 // build that selected one panel does not even parse the other's declarations.
 //
-// The __has_include guards on the panel, protocol and twin folders are deliberate, not a
+// The __has_include guards on the panel and protocol folders are deliberate, not a
 // workaround: this umbrella must stay valid for a consumer who vendors only the parts
 // they use, and for the phased build-out of this repository. The AFFA_* gate is still
 // what decides whether a present file is compiled — __has_include only stops a missing
@@ -51,22 +51,6 @@
 #  endif
 #endif
 
-#if AFFA_ENABLE_VIRTUAL_PANEL
-#  if __has_include("vpanel/VirtualPanelBase.h")
-#    include "vpanel/IVirtualPanel.h"
-#    include "vpanel/VirtualPanelBase.h"
-#    if AFFA_PANEL_CARMINAT && __has_include("vpanel/CarminatVirtualPanel.h")
-#      include "vpanel/CarminatVirtualPanel.h"
-#    endif
-#    if AFFA_PANEL_UPDATELIST && __has_include("vpanel/UpdateListSegVirtualPanel.h")
-#      include "vpanel/UpdateListSegVirtualPanel.h"
-#    endif
-#    if AFFA_PANEL_UPDATELIST_MENU && __has_include("vpanel/UpdateListLcdVirtualPanel.h")
-#      include "vpanel/UpdateListLcdVirtualPanel.h"
-#    endif
-#  endif
-#endif
-
 #if AFFA_PANEL_CARMINAT
 #  if __has_include("carminat/CarminatDisplay.h")
 #    include "carminat/CarminatConstants.h"
@@ -75,9 +59,6 @@
 #      include "carminat/CarminatMenuRenderer.h"
 #      include "carminat/MenuController.h"
 #      include "carminat/IPage.h"
-#    endif
-#    if AFFA_ENABLE_AUX_TRACKER
-#      include "carminat/AuxModeTracker.h"
 #    endif
 #  endif
 #endif

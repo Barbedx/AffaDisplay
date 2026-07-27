@@ -3,7 +3,7 @@
 // See AffaConfig.h for why the gate has to be here and not in build_src_filter.
 #include "IsoTp.h"
 
-#if (AFFA_ENABLE_VIRTUAL_PANEL || AFFA_ENABLE_ISOTP_RX)
+#if AFFA_ENABLE_ISOTP_RX
 
 namespace affa {
 namespace isotp {
@@ -77,4 +77,4 @@ bool Reassembler::onFrame(const Frame& f) {
 }  // namespace isotp
 }  // namespace affa
 
-#endif  // AFFA_ENABLE_VIRTUAL_PANEL || AFFA_ENABLE_ISOTP_RX
+#endif  // AFFA_ENABLE_ISOTP_RX

@@ -1,12 +1,9 @@
-// UpdateListDisplay — the AFFA2 8-segment panel.
+// The AFFA2 8-segment panel: the 8+12 "old text / new text" segment encoding on 0x121
+// (docs/WIRE-SPEC.md §9.1) plus the marquee title scroll, a pure function of
+// IClock::millis() driven from onPoll() rather than a call-counted tick.
 //
-// Adds the 8+12 "old text / new text" segment encoding on 0x121 (docs/WIRE-SPEC.md §9.1)
-// and the marquee title scroll, which is now a pure function of IClock::millis() driven
-// from onPoll() instead of a call-counted tick.
-//
-// MediaInfo, artist/title composition and the Bluetooth connection state stay OUTSIDE the
-// library: what a track is called is application territory. What the library owns is the
-// eight-cell window and its cadence, so the seam is a plain string plus a play/pause bit.
+// Artist/title composition and connection state stay OUTSIDE the library; what it owns is
+// the eight-cell window and its cadence, so the seam is a string plus a play/pause bit.
 #pragma once
 #include "../AffaConfig.h"
 #if AFFA_PANEL_UPDATELIST
@@ -28,19 +25,18 @@ class UpdateListDisplay : public UpdateListBase {
 
   // ---- marquee ------------------------------------------------------------
   // The text to scroll through the eight-cell window. Transliterated and cleaned with
-  // affa::normalizeTitle(), then given a kScrollGap blank tail so the wrap-around reads
-  // as a gap rather than a collision. Passing nullptr or a string that normalises to
-  // nothing switches the marquee off and transmits nothing.
+  // affa::normalizeTitle(), then given a kScrollGap blank tail so the wrap reads as a gap
+  // rather than a collision. nullptr, or a string that normalises to nothing, switches the
+  // marquee off and transmits nothing.
   //
-  // Re-setting the SAME text is a no-op: the position is not reset, so an application
-  // that re-publishes the current track every second does not freeze the scroll on
+  // Re-setting the SAME text is a no-op that does NOT reset the position, so an
+  // application re-publishing the current track every second does not freeze the scroll on
   // character 0. That check is why this takes a const char* and copies.
   void setScrollText(const char* text);
 
-  // Running or frozen. Frozen draws the current window ONCE and then transmits nothing at
-  // all, which is what "paused" looked like on the extracted panel. Resuming continues
-  // from where it froze rather than restarting — the position is carried as a base plus
-  // an elapsed-time offset, not accumulated per call.
+  // Frozen draws the current window ONCE and then transmits nothing. Resuming continues
+  // where it froze: the position is a base plus an elapsed-time offset, not accumulated
+  // per call.
   void setScrollActive(bool on);
   bool scrollActive() const { return _active; }
 
@@ -48,10 +44,8 @@ class UpdateListDisplay : public UpdateListBase {
   // library-side reaction to another node overwriting our screen.
   void reassert() { _needsRedraw = true; }
 
-  // ON by default, because re-asserting after the radio has drawn over us is what the
-  // extracted panel did and it is the OEM-plausible behaviour. It is nevertheless a
-  // reaction to a RADIO, so it is a default that can be turned off (boundary principle),
-  // after which EventKind-level policy is the application's.
+  // On by default (the OEM-plausible behaviour), but it is a reaction to a RADIO, so it is
+  // a replaceable default; with it off, the policy is the application's.
   void setReassertOnAux(bool on) { _reassertOnAux = on; }
   bool reassertOnAux() const { return _reassertOnAux; }
 
@@ -59,13 +53,9 @@ class UpdateListDisplay : public UpdateListBase {
   void onPoll() override;
   void onRadioText(bool isAux) override;
 
-  // Copy `cells` bytes of `src` into `dst`, NUL-padding the tail.
-  //
-  // NUL, not space. `strncpy(buf, text, sizeof buf)` NUL-pads, and both extracted
-  // encodings therefore put NUL in every unused cell — including the LCD one, whose
-  // `{' ',' ',...}` initialiser is overwritten by strncpy for any input shorter than the
-  // field. Every capture and every golden vector in docs/WIRE-SPEC.md shows 0x00 there.
-  // Do not "fix" this to spaces: it is what these two panels have been rendering.
+  // Copy `cells` bytes of `src` into `dst`, padding the tail with NUL — not space. Every
+  // capture and every golden vector in docs/WIRE-SPEC.md shows 0x00 there; do not "fix"
+  // this to spaces.
   static void copyCells(const char* src, uint8_t* dst, uint8_t cells);
 
  private:
@@ -82,9 +72,8 @@ class UpdateListDisplay : public UpdateListBase {
   bool     _needsRedraw  = false;
   bool     _reassertOnAux = true;
 
-  // The gap is reserved out of this buffer, so anything at or below it leaves no room for
-  // a single window of actual text and the marquee could never move. Stated as the
-  // derived bound rather than a round number, because the round number would be a guess.
+  // The gap is reserved out of this buffer, so at or below this bound there is no room for
+  // one window of actual text and the marquee could never move.
   static_assert(AFFA_TEXT_MAX > updatelist::kScrollGap + updatelist::kScrollWidth,
                 "AffaDisplay: AFFA_TEXT_MAX must exceed kScrollGap + kScrollWidth or the "
                 "UpdateList marquee has nothing to scroll");

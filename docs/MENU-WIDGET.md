@@ -46,8 +46,8 @@ src/widget/MenuGeometry.h    rows, rowChars, wrap — the display's shape, injec
 src/widget/MenuModel.{h,cpp} items, fields, selection, window, editing. NO panel.
 src/widget/IMenuRenderer.h   the seam an adapter implements
 
-src/carminat/CarminatMenuRenderer.{h,cpp}   the adapter for THIS panel: 2 x 26, the
-                                            0x7E/0x7F row tags, showMenu + highlightItem
+src/carminat/CarminatMenuRenderer.{h,cpp}   the adapter for THIS panel: 2 x 26, showMenu
+                                            + highlightItem, the highlight-only fast path
 src/carminat/MenuController.{h,cpp}         navigation policy: the page stack, and the
                                             (Key, KeyEdge) -> intent map
 src/carminat/IPage.h                        a full-screen page pushed in front of the menu

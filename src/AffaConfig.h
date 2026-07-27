@@ -1,53 +1,28 @@
 // AffaDisplay — the single knob header.
 //
-// Every optional part of the library is gated from here, and every gate is #define'd to
-// 0 rather than left undefined so that code can use `#if AFFA_X` and never `#ifdef`.
-// A -Wundef build (which this library's own platformio.ini turns on) then catches a
-// misspelling INSIDE THE LIBRARY — `#if AFFA_ENALBE_MENU` is a diagnostic, not a silently
-// false branch.
+// Every gate is #define'd to 0 rather than left undefined, so code uses `#if AFFA_X` and
+// -Wundef catches a misspelling inside the library. It cannot catch a misspelling in a
+// CONSUMER's build_flags (-D AFFA_ENALBE_MENU=0 defines a macro nothing reads), so the
+// panel flags are covered by a second mechanism: silence is an #error, below.
 //
-// WHAT -Wundef CANNOT CATCH, and what does catch it. A misspelling in a CONSUMER's
-// build_flags (-D AFFA_ENALBE_MENU=0) defines a macro that nothing ever reads: there is no
-// undefined macro anywhere, so there is nothing to diagnose, and the intended gate quietly
-// keeps its default. For the PANEL flags that is fatal rather than cosmetic, so those are
-// covered by a second mechanism — silence is an #error, see below. For the feature gates it
-// is not solvable in the preprocessor at all; the failure is "the feature you tried to turn
-// off is still on", which is visible in the map file and in the flash number.
-//
-// WHY EACH OPTIONAL .cpp GATES ITS WHOLE BODY
-// PlatformIO's build_src_filter applies to the *project's* src/. A library pulled in
-// through lib_deps is compiled by the Library Dependency Finder, which builds EVERY .cpp
-// under the library's src/; the consumer's build_src_filter cannot reach into it and
-// library.json's srcFilter cannot see the consumer's build_flags. The preprocessor is
-// therefore the only mechanism that can remove a translation unit, so each optional .cpp
-// wraps its entire body in its gate and compiles to an empty object file when off. That,
-// plus -ffunction-sections -fdata-sections -Wl,--gc-sections, is what makes the flash
-// cost of an unused panel actually zero. See docs/API.md §5.1.
+// WHY EACH OPTIONAL .cpp GATES ITS WHOLE BODY: the Library Dependency Finder compiles
+// every .cpp under a lib_deps library; the consumer's build_src_filter cannot reach into
+// it and library.json's srcFilter cannot see the consumer's build_flags. The preprocessor
+// is the only mechanism that can remove a translation unit, so each optional .cpp wraps
+// its body in its gate and compiles to an empty object when off. That plus
+// -ffunction-sections -fdata-sections -Wl,--gc-sections is what makes an unused panel
+// cost zero flash. See docs/API.md §5.1.
 
 #pragma once
 
 // ---------------------------------------------------------------------------
 // Panel selection
 // ---------------------------------------------------------------------------
-// SILENCE IS AN ERROR, NOT A DEFAULT. You must name at least one panel in build_flags:
-//
-//     -D AFFA_PANEL_CARMINAT=1
-//
-// This is the shape that catches the failure mode nothing else can. A misspelled flag
-// (-D AFFA_PANEL_CARMINET=1) leaves every REAL macro undefined, and -Wundef cannot help:
-// the misspelled macro IS defined, merely never used, so there is no undefined macro to
-// diagnose. The only observable consequence of the typo is "no panel was selected", and
-// that is exactly what the #error below reports.
-//
-// Earlier revisions made "define nothing" mean "compile all three". That silently turned
-// the typo above into a bigger image with all three panels linked in and no diagnostic
-// whatsoever — the opposite of what the guard's own comment claimed. If you genuinely
-// want every panel, say so:
-//
-//     -D AFFA_PANEL_DEFAULT_ALL=1
-//
-// which is a convenience for first-time users and for the footprint reference builds, and
-// still not a shipping selection.
+// SILENCE IS AN ERROR, NOT A DEFAULT — you must name at least one panel in build_flags,
+// e.g. -D AFFA_PANEL_CARMINAT=1. A misspelled flag leaves every real macro undefined and
+// -Wundef cannot see it; the only observable consequence is "no panel selected", which is
+// what the #error below reports. -D AFFA_PANEL_DEFAULT_ALL=1 asks for all three (a
+// convenience for first builds and the footprint references, not a shipping selection).
 #ifndef AFFA_PANEL_DEFAULT_ALL
 #  define AFFA_PANEL_DEFAULT_ALL 0
 #endif
@@ -74,16 +49,12 @@
 #  define AFFA_PANEL_UPDATELIST_MENU 0 // UpdateList LCD variant: different setText encoding
 #endif
 
-// UpdateListMenuDisplay derives from UpdateListDisplay: selecting the LCD variant
-// necessarily compiles the 8-segment base too.
+// UpdateListMenuDisplay derives from UpdateListDisplay.
 #if AFFA_PANEL_UPDATELIST_MENU && !AFFA_PANEL_UPDATELIST
 #  undef  AFFA_PANEL_UPDATELIST
 #  define AFFA_PANEL_UPDATELIST 1
 #endif
 
-// The guard this file exists to make meaningful. It fires when every panel flag is 0 —
-// which is the state a misspelled -D AFFA_PANEL_* leaves behind, and also the state of a
-// build that simply forgot to select one.
 #if !AFFA_PANEL_CARMINAT && !AFFA_PANEL_UPDATELIST && !AFFA_PANEL_UPDATELIST_MENU
 #  error "AffaDisplay: no panel selected. Add -D AFFA_PANEL_CARMINAT=1 (and/or _UPDATELIST / _UPDATELIST_MENU), or -D AFFA_PANEL_DEFAULT_ALL=1 for all three. Check your spelling: a typo'd AFFA_PANEL_* flag lands here."
 #endif
@@ -93,57 +64,24 @@
 // ---------------------------------------------------------------------------
 
 // src/widget/ (MenuGeometry, IMenuRenderer, MenuModel), CarminatMenuRenderer,
-// MenuController, IPage routing, nav(), getMenu(). The single largest optional block.
-// 0: nav() returns NotSupported and supports(Feature::Menu) is false.
-// OFF BY DEFAULT, AND THE REASON IS A CORRECTION.
+// MenuController, IPage routing, nav(), getMenu(). The largest optional block.
+// 0: nav() returns NotSupported, supports(Feature::Menu) is false, getMenu() is not
+// compiled; the panel classes and every render call are unaffected.
 //
-// This block was originally on, on the argument that the Carminat menu is a wire-level
-// construct: a 96-byte 0x21 screen with a two-row sliding window, a separate highlight
-// frame, and a scroll byte derived from the selection. That argument conflates two things.
+// Off by default because it is a convenience widget, not protocol: the panel's whole menu
+// contract is showMenu(header,row0,row1,scroll) + highlightItem(rowTag), and both are
+// always available regardless of this flag. Everything above them is one opinion about UI
+// state. See docs/MENU-WIDGET.md and docs/API.md §7b.
 //
-// What the PANEL defines, and what therefore belongs in this library, is exactly:
-//     showMenu(header, row0, row1, scrollByte)   // the 0x21/0x01 screen
-//     highlightItem(rowTag)                      // 07 29 01 <7E|7F> 80
-// Header, two rows, which one is lit, which arrows. That is the whole contract, and those
-// two calls are ALWAYS available regardless of this switch.
-//
-// Everything above them — which items exist, which is selected, how a two-row window
-// slides over N of them, what a "field" is, when Select advances to the next field and
-// when it exits — is a UI state machine. The panel knows none of it. It is one opinion
-// about how a menu should behave, and an application with a different remote, a different
-// item model or a different idea of editing will want its own.
-//
-// That the sliding window is also the one part that behaved unexpectedly on the bench is
-// not a coincidence: it is the only place where this library decided something on the
-// application's behalf.
-//
-// So: the menu model, its Carminat adapter, MenuController, IPage, nav() and getMenu() are a
-// CONVENIENCE WIDGET, shipped because it is real, tested, byte-exact code that saves an
-// afternoon — not because it is part of the protocol. Turn it on if it fits; write your own
-// against showMenu() + highlightItem() + the decoded Key events if it does not — or keep the
-// state machine and write ~20 lines of IMenuRenderer, which is what src/widget/ is for. See
-// docs/MENU-WIDGET.md, docs/API.md §7b and the README's boundary note.
-//
-// THE MODEL IS NOT PANEL CODE, so src/widget/ is gated on THIS FLAG ALONE, with no panel
-// gate: it compiles on the host with no Arduino, no CAN and no panel header, and an
-// application can drive it onto a display this library has never heard of.
-//
-// 0: nav() returns NotSupported, supports(Feature::Menu) is false, and getMenu() is not
-// compiled. The panel classes and every render call are unaffected.
+// Gated on THIS FLAG ALONE with no panel gate: src/widget/ compiles on the host with no
+// Arduino, no CAN and no panel header.
 #ifndef AFFA_ENABLE_MENU
 #  define AFFA_ENABLE_MENU 0
 #endif
 
-// Heuristic inference of a RADIO's audio source by pattern-matching decoded text.
-// Every other AFFA_ENABLE_* gate describes something the PANEL defines and is on by
-// default. This one describes someone else's product, so it is OFF by default and the
-// application is expected to write its own policy against EventKind::RadioText. The
-// class is kept because the patterns cost real bench time to find, not because they are
-// universal. Cost when on: ~0.4 kB of flash for strings that may be wrong about your
-// radio. See docs/API.md §7b.7b.
-#ifndef AFFA_ENABLE_AUX_TRACKER
-#  define AFFA_ENABLE_AUX_TRACKER 0
-#endif
+// AFFA_ENABLE_AUX_TRACKER (removed) gated AuxModeTracker, a heuristic that inferred a
+// radio's audio source from panel text. The patterns survive as a table in
+// docs/PROTOCOL-NOTES.md §8; implement them over subscribe() on the panel's text id.
 
 // showPopupText / hidePopup (the mode 0x74 overlay). 0: both return NotSupported.
 #ifndef AFFA_ENABLE_POPUP
@@ -165,34 +103,29 @@
 #  define AFFA_ENABLE_INFOPOPUP 1
 #endif
 
-// AffaText.cpp and its mapping table (~1.2 kB). 0 IS DANGEROUS: toAscii becomes a
-// bounded copy that passes bytes through unchanged, and any UTF-8 reaching the wire
-// renders as garbage on the panel. Not a compile error — a visual one. Set to 0 only if
-// you have proved every string you pass is already 7-bit ASCII.
+// AffaText.cpp and its mapping table (~1.2 kB). 0 IS DANGEROUS: toAscii becomes a bounded
+// copy that passes bytes through unchanged, and any UTF-8 reaching the wire renders as
+// garbage on the panel — a visual failure, not a compile error.
 #ifndef AFFA_ENABLE_TRANSLITERATION
 #  define AFFA_ENABLE_TRANSLITERATION 1
 #endif
 
-// The AFFA_LOG* macros and AffaLog.cpp. 0: every macro expands to `do {} while (0)` and
-// NO FORMAT STRINGS ENTER FLASH. Consequence: never put a side effect inside a log
-// argument — it disappears with the string.
+// The AFFA_LOG* macros and AffaLog.cpp. 0: every macro expands to `do {} while (0)` and no
+// format strings enter flash — so never put a side effect inside a log argument.
 #ifndef AFFA_ENABLE_LOG
 #  define AFFA_ENABLE_LOG 1
 #endif
 
-// 0 off, 1 error, 2 warn, 3 info, 4 debug, 5 trace. Compile-time: levels above this
-// emit nothing at all. Trace on a live bus prints the ~2 frames/s of sync chatter.
+// 0 off, 1 error, 2 warn, 3 info, 4 debug, 5 trace. Compile-time: levels above this emit
+// nothing at all.
 #ifndef AFFA_LOG_LEVEL
 #  define AFFA_LOG_LEVEL 3
 #endif
 
-// Esp32CanLink.{h,cpp} and the <esp32_can.h> dependency. 0 on a project that uses a
-// different CAN driver: nothing pulls esp32_can in and you supply your own ICanLink.
-// 1 without the dependency in lib_deps: link error.
-//
-// The default follows ARDUINO because the header itself includes <driver/gpio.h> for
-// gpio_num_t, which does not exist on the host. Leaving it unconditionally 1 would make
-// `pio test -e native` fail on an include rather than on anything the test is about.
+// Esp32CanLink.{h,cpp} and the <esp32_can.h> dependency. 1 without that dependency in
+// lib_deps: link error. Defaults to ARDUINO because the header includes <driver/gpio.h>
+// for gpio_num_t, which does not exist on the host — unconditional 1 would break
+// `pio test -e native` on an include.
 #ifndef AFFA_ENABLE_ESP32CAN_LINK
 #  if defined(ARDUINO)
 #    define AFFA_ENABLE_ESP32CAN_LINK 1
@@ -201,47 +134,30 @@
 #  endif
 #endif
 
-// NOT IMPLEMENTED, AND LOUD ABOUT IT.
-//
-// An owned FreeRTOS task that calls poll() on a period was designed and documented, and
-// no code was ever written for it: there is no vTaskCreate anywhere under src/, and there
-// is not going to be one while "no vTaskDelay anywhere in src/" is the headline contract.
-// Until this revision the knob existed, defaulted to 0, and was referenced by NOTHING —
-// so a consumer who set it to 1 got a library that never polled, with no diagnostic. That
-// is the exact failure mode this project refuses to ship, so setting it is now an error
-// rather than a silent no-op. Own the loop: call poll() from one task. See docs/API.md §4.
+// NOT IMPLEMENTED. The library owns no task and there is no vTaskCreate under src/.
+// Setting this is an #error rather than a silent no-op, because a consumer who set it got
+// a library that never polled with no diagnostic. Call poll() from one task of your own.
 #ifdef AFFA_ENABLE_TASK
 #  if AFFA_ENABLE_TASK
 #    error "AffaDisplay: AFFA_ENABLE_TASK is not implemented. The library owns no task; call poll() from exactly one task of your own (docs/API.md §4)."
 #  endif
 #endif
 
-// The panel twins (vpanel/) plus, through them, AFFA_ENABLE_ISOTP_RX. They buy a
-// semantic test oracle and a development loop with no panel attached. This is the most
-// expensive optional block in the library, so it is off on target and on for the host,
-// where being testable is the point. PlatformIO defines ARDUINO for framework=arduino
-// and not for platform=native.
-#ifndef AFFA_ENABLE_VIRTUAL_PANEL
-#  if defined(ARDUINO)
-#    define AFFA_ENABLE_VIRTUAL_PANEL 0
-#  else
-#    define AFFA_ENABLE_VIRTUAL_PANEL 1
-#  endif
-#endif
-
-// The reassembler and screen decoder ALONE, without the twins — for a consumer who
-// wants to decode inbound multi-frame traffic (sniff another head unit, replay a
-// capture) and does not want a panel model. The twins cannot work without it.
+// Inbound multi-frame decode: the ISO-TP reassembler, the screen decoder, and the onText()
+// callback they feed. For sniffing another head unit or replaying a capture — nothing in
+// the radio role needs it, so it is off on target and on for the host, where the tests
+// live. PlatformIO defines ARDUINO for framework=arduino only.
+//
+// AFFA_ENABLE_VIRTUAL_PANEL (removed) gated vpanel/, a set of panel twins used as a test
+// oracle and as a dev loop with no panel attached. They were application-shaped code
+// shipped as library surface; setSelfAck() covers the no-panel loop, and a decoder built
+// on the two headers this gate buys covers the oracle. docs/API.md §2.14.
 #ifndef AFFA_ENABLE_ISOTP_RX
-#  define AFFA_ENABLE_ISOTP_RX AFFA_ENABLE_VIRTUAL_PANEL
-#endif
-
-// An #error and not a silent promotion, unlike AFFA_PANEL_UPDATELIST_MENU above.
-// Selecting the LCD panel without its base is obviously a spelling of "I want the LCD
-// panel"; asking for the twins while explicitly switching off the decoder they are
-// built on means one of the two flags is a mistake, and guessing which would hide it.
-#if AFFA_ENABLE_VIRTUAL_PANEL && !AFFA_ENABLE_ISOTP_RX
-#  error "AffaDisplay: AFFA_ENABLE_VIRTUAL_PANEL requires AFFA_ENABLE_ISOTP_RX=1."
+#  if defined(ARDUINO)
+#    define AFFA_ENABLE_ISOTP_RX 0
+#  else
+#    define AFFA_ENABLE_ISOTP_RX 1
+#  endif
 #endif
 
 // ---------------------------------------------------------------------------
@@ -249,26 +165,24 @@
 // ---------------------------------------------------------------------------
 
 // Latest-value-wins replacement of a queued, not-yet-started render of the same
-// RenderSlot. Costs one linear scan of at most AFFA_TX_QUEUE_DEPTH entries per enqueue.
-// 0: a repeated render stacks — at f Hz in front of a T-second transfer you get
-// min(ceil(f*T), depth-1) stale messages on screen after the key, and QueueFull for the
-// rest. That is the "panel keeps counting after Pause" symptom. Prefer
-// TxOptions::coalesce = false on the specific messages that must all be seen.
+// RenderSlot; one linear scan of at most AFFA_TX_QUEUE_DEPTH entries per enqueue.
+// 0: a repeated render stacks — at f Hz in front of a T-second transfer, min(ceil(f*T),
+// depth-1) stale messages land after the key and the rest return QueueFull. That is the
+// "panel keeps counting after Pause" symptom. Prefer TxOptions::coalesce = false on the
+// specific messages that must all be seen.
 #ifndef AFFA_TX_COALESCE
 #  define AFFA_TX_COALESCE 1
 #endif
 
-// Queue slots. sizeof(TxJob) ~= AFFA_MAX_PAYLOAD + 12 bytes each. Below 3 the lazy
-// registration burst (2 probes + 1 payload, either panel) cannot fit and the first send
-// after a resync returns QueueFull forever.
+// Queue slots; sizeof(TxJob) ~= AFFA_MAX_PAYLOAD + 12 B each. Below 3 the lazy
+// registration burst (2 probes + 1 payload) cannot fit and every send after a resync
+// returns QueueFull.
 //
-// 6, not 4, because of showInfoPopup. It is THREE separate messages — one per row, with
-// coalesce=false, since all three carry the same funcId and the same RenderSlot and would
-// otherwise supersede one another. The worst case is the first call after a resync:
-// 2 registration probes + 3 rows = 5 jobs outstanding, so a depth of 4 silently loses the
-// third row to QueueFull and the popup renders with a blank line. 6 leaves one slot of
-// headroom for an Urgent message arriving in the middle of that burst.
-// Cost of the extra two slots at the default AFFA_MAX_PAYLOAD: ~250 B of static RAM.
+// 6, not 4, because showInfoPopup is three messages with coalesce=false (same funcId and
+// RenderSlot, so they would otherwise supersede one another). Worst case is the first call
+// after a resync: 2 probes + 3 rows = 5 outstanding, so depth 4 loses the third row to
+// QueueFull and the popup renders with a blank line. 6 leaves a slot for an Urgent message
+// arriving mid-burst. The extra two slots cost ~250 B of static RAM at the default payload.
 #ifndef AFFA_TX_QUEUE_DEPTH
 #  define AFFA_TX_QUEUE_DEPTH 6
 #endif
@@ -278,11 +192,10 @@
 
 // Largest single ISO-TP message, in payload bytes before framing.
 //
-// 113 IS A WIRE LIMIT, NOT A BUDGET. The transport carries 8 bytes in frame 0 and 7 in
-// each continuation, and the continuation counter is 0x20|(num & 0x0F): 8 + 15*7 = 113.
-// showConfirmBox sits at exactly 113 with no headroom. Anything longer needs a counter
-// wrap that has never been validated against the panel. Below 96 the Carminat menu
-// screen returns TooLong and the menu never draws. See docs/WIRE-SPEC.md §3.3.
+// 113 IS A WIRE LIMIT, NOT A BUDGET: 8 bytes in frame 0, 7 per continuation, and the
+// continuation counter is 0x20|(num & 0x0F) — 8 + 15*7 = 113. showConfirmBox sits at
+// exactly 113. Anything longer needs a counter wrap never validated against the panel.
+// Below 96 the Carminat menu screen returns TooLong. See docs/WIRE-SPEC.md §3.3.
 #ifndef AFFA_MAX_PAYLOAD
 #  define AFFA_MAX_PAYLOAD 113
 #endif
@@ -293,50 +206,45 @@
 #  warning "AffaDisplay: AFFA_MAX_PAYLOAD < 96 — showMenu will return Result::TooLong."
 #endif
 
-// RX ring slots. Must be a power of two (static_assert in AffaRing). 32 * sizeof(Frame)
-// = 448 B of static RAM, and at 500 kbit/s it tolerates a ~7 ms gap between poll() calls
-// on a fully saturated bus. Too small: Stats::ringOverflow climbs, ACKs are lost, sends
-// time out and sync flaps.
+// RX ring slots; must be a power of two (static_assert in AffaRing). 32 * sizeof(Frame) =
+// 448 B, tolerating a ~7 ms gap between poll() calls on a saturated 500 kbit/s bus. Too
+// small: Stats::ringOverflow climbs, ACKs are lost, sends time out and sync flaps.
 #ifndef AFFA_RX_RING_DEPTH
 #  define AFFA_RX_RING_DEPTH 32
 #endif
 
-// Per-frame ACK deadline. 2000 matches the legacy blocking wait exactly, so
-// timing-sensitive panel behaviour is unchanged. Too low: a slow panel yields Timeout
-// mid-transfer and the screen is left half-drawn. Too high: a dead panel wedges the
-// QUEUE for that long per frame — it no longer wedges the loop, which was defect #2.
+// Per-frame ACK deadline. 2000 matches the legacy blocking wait, so panel timing is
+// unchanged. Too low: Timeout mid-transfer leaves the screen half-drawn. Too high: a dead
+// panel wedges the queue (not the loop) for that long per frame.
 #ifndef AFFA_ACK_TIMEOUT_MS
 #  define AFFA_ACK_TIMEOUT_MS 2000
 #endif
 
 // How long the link may go without a 0x69 ping before sync is torn down. The panel pings
-// at ~1 Hz. Below ~3000 you tear down on a single missed ping. This is the value the old
-// `SYNC_TIMEOUT = 5` CALL COUNTER was meant to express. Never lower it below the longest
-// flash write the application performs: the TWAI ISR is not in IRAM, so an OTA or NVS
-// write stops reception outright and looks exactly like a panel that went quiet.
+// at ~1 Hz; below ~3000 a single missed ping tears down a working link. Never lower it
+// below the longest flash write the application performs: the TWAI ISR is not in IRAM, so
+// an OTA or NVS write stops reception and looks exactly like a silent panel.
 //
 // THE EFFECTIVE SILENCE WINDOW IS UP TO AFFA_PEER_TIMEOUT_MS + AFFA_SYNC_INTERVAL_MS
-// (~6 s at the defaults), not exactly AFFA_PEER_TIMEOUT_MS. The watchdog is evaluated
-// only on a heartbeat tick, and a latched ping is consumed before the expiry branch is
-// reached — so at most one whole heartbeat period can pass between the deadline expiring
-// and the teardown. That is the FSM being correct rather than slow: a single missed ping
-// must not tear a working link down. It is also why a test that jumps the clock by
-// AFFA_PEER_TIMEOUT_MS + 1 once will NOT see a teardown, and why test_core and test_twin
-// starve the link by `AFFA_PEER_TIMEOUT_MS + AFFA_SYNC_INTERVAL_MS + 1`.
+// (~6 s at the defaults). The watchdog is evaluated only on a heartbeat tick and a latched
+// ping is consumed before the expiry branch, so up to one heartbeat period passes between
+// the deadline expiring and teardown. A test that jumps the clock by AFFA_PEER_TIMEOUT_MS
+// + 1 will NOT see a teardown; test_core and test_twin starve the link by
+// AFFA_PEER_TIMEOUT_MS + AFFA_SYNC_INTERVAL_MS + 1.
 #ifndef AFFA_PEER_TIMEOUT_MS
 #  define AFFA_PEER_TIMEOUT_MS 5000
 #endif
 
-// Heartbeat cadence, enforced inside poll() against IClock::millis(). Changing it
-// changes what the panel sees; 1000 is what the capture shows. Treat as fixed.
+// Heartbeat cadence, enforced inside poll() against IClock::millis(). 1000 is what the
+// capture shows; changing it changes what the panel sees. Treat as fixed.
 #ifndef AFFA_SYNC_INTERVAL_MS
 #  define AFFA_SYNC_INTERVAL_MS 1000
 #endif
 
-// Layer 1 FrameMatch table. sizeof(Sub) ~= 32 B, so 8 slots ~= 256 B of static RAM and
-// one linear scan per frame per direction. subscribe() returns kNoSub once full — an
-// application that ignores the return value silently loses a subscription. 0 removes the
-// table and the scan entirely; Layers 0 and 2 are unaffected.
+// Layer 1 FrameMatch table. sizeof(Sub) ~= 32 B, so 8 slots ~= 256 B and one linear scan
+// per frame per direction. subscribe() returns kNoSub once full — ignoring the return
+// value silently loses a subscription. 0 removes the table and the scan; Layers 0 and 2
+// are unaffected.
 #ifndef AFFA_MAX_SUBSCRIPTIONS
 #  define AFFA_MAX_SUBSCRIPTIONS 8
 #endif

@@ -27,11 +27,10 @@ inline constexpr uint16_t kIdSetText     = 0x121;  // text function
 inline constexpr uint16_t kIdDisplayCtrl = 0x1B1;  // display-control function
 inline constexpr uint16_t kIdKeyPressed  = 0x0A9;  // the panel's key channel
 
-// The ACK identifier for the key channel. COMPUTED, and spelled out here only so the
-// arithmetic is pinned by a static_assert rather than by a comment: 0x0A9 | 0x400 is
-// 0x4A9 and NOT 0x5A9, because bit 8 is already clear in 0x0A9 — the one identifier in
-// either family's table where that is true. Nothing in the library reads this constant;
-// AffaDisplayBase::sendGenericAck() ORs the flag itself. [CAP] docs/WIRE-SPEC.md §2.2
+// Spelled out only so a static_assert, not a comment, pins the arithmetic: 0x0A9 | 0x400
+// is 0x4A9 and NOT 0x5A9, because bit 8 is already clear in 0x0A9 — uniquely in either
+// family's table. Nothing reads this; sendGenericAck() ORs the flag itself.
+// [CAP] docs/WIRE-SPEC.md §2.2
 inline constexpr uint16_t kAckIdKeyPressed = kIdKeyPressed | kReplyFlag;
 static_assert(kAckIdKeyPressed == 0x4A9, "0x0A9 | 0x400 is 0x4A9, not 0x5A9");
 

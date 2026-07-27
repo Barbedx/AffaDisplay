@@ -9,52 +9,36 @@
 // HTTP. This suite covers everything on that list EXCEPT the HTTP layer and the glass: for
 // each item it makes the same library call the endpoint makes, in the same order, and then
 // asserts what a faithful panel model DECODED from the wire. It is not a substitute for
-// seeing the text on the panel â€” nothing is â€” but it is the difference between "the code
+// seeing the text on the panel — nothing is — but it is the difference between "the code
 // looks right" and "the code was run and the panel understood it".
 //
 // What it does NOT prove: that PsychicHttp routes the query string correctly, that WiFi
-// comes up, and that a real Carminat renders what the twin decodes. Those need the rig.
+// comes up, and that a real Carminat renders what this suite decodes. Those need the rig.
+//
+// THE ORACLE IS LOCAL AND IT READS THE WIRE. It used to be CarminatVirtualPanel, a panel
+// twin that shipped as library surface; the twins are gone (they were application-shaped
+// code in src/), and what replaces them is the thirty lines of decodeTx() below, built on
+// the two things the library still publishes for decoding somebody else's traffic:
+// isotp::Reassembler and affa::screen. The independence that made the twin worth having
+// survives — this decoder still disagrees with the encoder rather than sharing code with
+// it — and it now reads the frames the driver ACTUALLY transmitted, one layer closer to
+// the glass than a model of a panel that consumed them.
 
 #include <unity.h>
 #include <cstring>
 
 #include "../affa_test_support.h"
 #include "carminat/CarminatDisplay.h"
-#include "vpanel/CarminatVirtualPanel.h"
-#include "core/AffaRing.h"
+#include "proto/IsoTp.h"
+#include "proto/ScreenDecode.h"
 
 using namespace affa;
 
 namespace {
 
-// Two-ended bus, as in test_twin: each side's send() lands in the other's ring, and the
-// fromSelf stamp is cleared at the crossing because a real controller does not tell the
-// other node "this frame was mine".
-class BusLink final : public ICanLink {
- public:
-  void connect(BusLink* peer) { _peer = peer; }
-  bool send(const Frame& f) override {
-    ++_stats.txFrames;
-    if (_peer) {
-      Frame c = f;
-      c.fromSelf = false;
-      if (!_peer->_rx.push(c)) ++_peer->_stats.ringOverflow;
-      ++_peer->_stats.rxFrames;
-    }
-    return true;
-  }
-  bool  recv(Frame& out) override { return _rx.pop(out); }
-  bool  isLive() const override   { return true; }
-  Stats stats()  const override   { return _stats; }
-  bool  pendingRx() const { return !_rx.empty(); }
- private:
-  AffaRing<Frame, 128> _rx;
-  Stats    _stats{};
-  BusLink* _peer = nullptr;
-};
-
-// Layer 0 tap: what the driver actually put on the wire. Needed for the operations the
-// twin does not model (power control, the clock), where the frame IS the evidence.
+// Layer 0 tap: what the driver actually put on the wire. It is the evidence for the
+// operations with no screen to decode (power control, the clock) AND the input to the
+// semantic oracle below.
 Frame g_tx[192];
 int   g_txN = 0;
 void tap(const Frame& f, Direction d, void*) {
@@ -68,37 +52,74 @@ bool sawTx(uint16_t id, const uint8_t* head, uint8_t n) {
   return false;
 }
 
+// Replay every captured 0x151 frame through a fresh reassembler and decode each completed
+// message, last one winning — which is what the panel's glass shows. Transcribed from the
+// deleted CarminatVirtualPanel::decode(), including the two traps it recorded:
+//
+//   * the highlight is a STANDALONE single frame, and screen::frame() carries the full
+//     `07 29 01` guard because 0x151 also carries `03 52 …`, `05 56 …` and `02 54 03`.
+//   * EVERY multi-frame message goes through the reassembler, including first frames whose
+//     command we do not decode. Returning early on an unrecognised first frame leaves the
+//     previous message active, and its continuations then append to THAT buffer.
+ScreenModel decodeTx() {
+  ScreenModel s{};
+  isotp::Reassembler asmb;
+  for (int i = 0; i < g_txN; ++i) {
+    const Frame& f = g_tx[i];
+    if (f.id != carminat::kIdSetText || f.len == 0) continue;
+    if (screen::frame(f, s)) continue;
+    if (!asmb.onFrame(f)) continue;
+
+    const uint8_t* p = asmb.buffer();
+    const uint8_t  n = asmb.len();
+    if (n < 4) continue;                  // p[2] is the command, p[3] its first operand
+    switch (p[2]) {
+      // Mode 0x05 is the FULLSCREEN variant; its payload has a different layout entirely
+      // and decoding it with the menu offsets would produce a confident wrong screen.
+      case screen::kMenuCmd:
+        if (p[3] == screen::kMenuModeWin) screen::menu(p, n, s);
+        break;
+      case screen::kWinTextCmdFull:
+      case screen::kWinTextCmdWindow:
+        screen::windowText(p, n, s);
+        break;
+      case screen::kInfoCmd:
+        screen::infoRow(p, n, s);
+        break;
+      default:
+        break;                            // unmodelled: decoded as nothing, not as a guess
+    }
+  }
+  return s;
+}
+
 const char* kModeList[3] = {"Off", "Auto", "On"};
 
 struct Bench {
-  BusLink radio, panel;
+  affa::LoopbackLink<128> link;
   affatest::FakeClock clk;
   CarminatDisplay d;
-  CarminatVirtualPanel twin;
 
-  Bench() : d(radio, clk) {
-    radio.connect(&panel);
-    panel.connect(&radio);
-  }
+  Bench() : d(link, clk) {}
 
-  // Exactly what examples/90_bench_ota does in setup(): build the demo menu, install the
-  // tap, bring the twin up in the mode that models a panel, then begin().
+  // What examples/90_bench_ota does in setup(): build the demo menu, install the tap, then
+  // begin() and complete the handshake.
   void begin() {
     buildDemoMenu();
     g_txN = 0;
     d.onFrame(&tap, nullptr);
-    twin.begin(panel, clk);
-    twin.setAckMode(VirtualPanelBase::AckMode::Declared);
     d.begin();
 
-    // Two passes complete the handshake: pass 1 carries our 0xB9/0xBA to the twin, which
-    // answers 0x69 and the `61 11` that asks us to announce ourselves; pass 2 carries the
-    // three hello frames back. Then one payload drags the lazy 0x70 registration burst
-    // with it and FUNCSREG latches — the same sequence the bench firmware goes through
-    // before its first setText, and the reason a render before it returns NoSync.
+    // The panel's `61 11` is what clears FAILED; setSelfAck then supplies the per-frame
+    // ACK that would otherwise come from the panel, so the lazy 0x70 registration burst
+    // completes and FUNCSREG latches. Same sequence the bench firmware goes through before
+    // its first setText, and the reason a render before it returns NoSync.
+    link.inject(affatest::panelSyncRequest());
+    d.setSelfAck(true);
     run(2);
     (void)d.setPower(true);
     settle();
+    TEST_ASSERT_TRUE_MESSAGE(d.registered(), "FUNCSREG must latch before the bench tests");
   }
 
   void run(int passes) { for (int i = 0; i < passes; ++i) step(); }
@@ -127,14 +148,10 @@ struct Bench {
     m.addItem(tm);
   }
 
-  void step() {
-    d.poll();
-    Frame f;
-    while (panel.recv(f)) twin.onFrame(f);
-  }
+  void step() { d.poll(); }
   void settle(int maxPasses = 400) {
     for (int i = 0; i < maxPasses; ++i) {
-      if (!d.busy() && !panel.pendingRx() && !radio.pendingRx()) return;
+      if (!d.busy()) return;
       step();
     }
     TEST_FAIL_MESSAGE("the bench never went quiet");
@@ -147,29 +164,30 @@ struct Bench {
 // One test per line of the acceptance condition.
 // ---------------------------------------------------------------------------
 
-// "Ð¿Ð¾ÑÑ‚Ð°Ð²Ð¸Ñ‚Ð¸ Ñ‚ÐµÐºÑÑ‚" â€” GET /api/text?t=AFFA%20OK
+// "поставити текст" — GET /api/text?t=AFFA%20OK
 void test_endpoint_text_reaches_the_panel(void) {
   Bench b; b.begin();
   TEST_ASSERT_TRUE_MESSAGE(b.d.registered(), "the handshake must complete first");
 
+  g_txN = 0;
   TEST_ASSERT_EQUAL(Result::Ok, b.d.setText("AFFA OK", 255));
   b.apply();
-  TEST_ASSERT_EQUAL_STRING_MESSAGE("AFFA OK", b.twin.screen().header,
-                                   "the panel model decoded a different string");
+  TEST_ASSERT_EQUAL_STRING_MESSAGE("AFFA OK", decodeTx().header,
+                                   "the wire decoded to a different string");
 }
 
-// "Ð·Ð°Ð´Ð°Ñ‚Ð¸ Ñ‡Ð°Ñ" â€” GET /api/time?hhmm=1234
+// "задати час" — GET /api/time?hhmm=1234
 void test_endpoint_clock_reaches_the_wire(void) {
   Bench b; b.begin();
   g_txN = 0;
   TEST_ASSERT_EQUAL(Result::Ok, b.d.setTime("1234"));
   b.apply();
-  // 0x151: 05 'V' '1' '2' '3' '4' â€” the clock frame, verbatim from WIRE-SPEC Â§8.2.
+  // 0x151: 05 'V' '1' '2' '3' '4' — the clock frame, verbatim from WIRE-SPEC §8.2.
   const uint8_t want[6] = {0x05, 'V', '1', '2', '3', '4'};
   TEST_ASSERT_TRUE_MESSAGE(sawTx(0x151, want, 6), "no clock frame on 0x151");
 }
 
-// "Ð²Ð²Ñ–Ð¼ÐºÐ½ÑƒÑ‚Ð¸/Ð²Ð¸Ð¼ÐºÐ½ÑƒÑ‚Ð¸ ÐµÐºÑ€Ð°Ð½" â€” GET /api/state?on=0|1
+// "ввімкнути/вимкнути екран" — GET /api/state?on=0|1
 void test_endpoint_screen_off_then_on(void) {
   Bench b; b.begin();
 
@@ -186,16 +204,17 @@ void test_endpoint_screen_off_then_on(void) {
   TEST_ASSERT_TRUE_MESSAGE(sawTx(0x151, on, 3), "no display-on frame");
 }
 
-// "Ð²Ñ–Ð´Ð¾Ð±Ñ€Ð°Ð·Ð¸Ñ‚Ð¸/ÑÑ…Ð¾Ð²Ð°Ñ‚Ð¸ popup" â€” GET /api/popup?t=... and /api/popup/hide
+// "відобразити/сховати popup" — GET /api/popup?t=... and /api/popup/hide
 void test_endpoint_popup_shown_then_hidden(void) {
   Bench b; b.begin();
 
+  g_txN = 0;
   TEST_ASSERT_EQUAL(Result::Ok, b.d.showPopupText("VOL 28", 0x09, 0xFF, 0x60));
   b.apply();
   // The wire carries eight cells, space-padded — that is pinned byte for byte by
   // test_carminat_wire. Here we assert the MEANING, and the decoder trims the padding,
   // which is what a semantic oracle should do: "VOL 28" is what the panel shows.
-  TEST_ASSERT_EQUAL_STRING_MESSAGE("VOL 28", b.twin.screen().header,
+  TEST_ASSERT_EQUAL_STRING_MESSAGE("VOL 28", decodeTx().header,
                                    "the popup text did not decode");
 
   g_txN = 0;
@@ -205,7 +224,7 @@ void test_endpoint_popup_shown_then_hidden(void) {
   TEST_ASSERT_TRUE_MESSAGE(sawTx(0x151, close, 3), "no popup-close frame");
 }
 
-// "Ð·Ð°Ð´Ð°Ñ‚Ð¸ Ð¼ÐµÐ½ÑŽ Ð· 3 Ð¿Ð°Ñ€Ð°Ð¼ÐµÑ‚Ñ€Ð°Ð¼Ð¸" â€” the demo menu's third item, rendered on the panel.
+// "задати меню з 3 параметрами" — the demo menu's third item, rendered on the panel.
 void test_endpoint_menu_with_three_parameters_renders(void) {
   Bench b; b.begin();
 
@@ -216,17 +235,18 @@ void test_endpoint_menu_with_three_parameters_renders(void) {
 
   // Walk to the three-field item and prove all three values are on the glass at once.
   (void)b.d.nav(NavCommand::Next); b.apply();
+  g_txN = 0;
   (void)b.d.nav(NavCommand::Next); b.apply();
   TEST_ASSERT_EQUAL_UINT8(2, b.d.getMenu().selectedIndex());
 
-  const ScreenModel& s = b.twin.screen();
+  const ScreenModel s = decodeTx();
   const bool onRow0 = strstr(s.row0, "12") && strstr(s.row0, "30");
   const bool onRow1 = strstr(s.row1, "12") && strstr(s.row1, "30");
   TEST_ASSERT_TRUE_MESSAGE(onRow0 || onRow1,
                            "the three-field item did not render both editable values");
 }
 
-// "Ð½Ð°Ð²Ñ–Ð³Ð°Ñ†Ñ–Ñ Ð¿Ð¾ Ð¼ÐµÐ½ÑŽ Ñ‡ÐµÑ€ÐµÐ· ÐºÐ¾Ð¼Ð°Ð½Ð´Ð¸ (Ð½Ð°ÑÑ‚ÑƒÐ¿Ð½Ð¸Ð¹, Ð¿Ð¾Ð¿ÐµÑ€ÐµÐ´Ð½Ñ–Ð¹, Ð²Ð»Ñ–Ð²Ð¾, Ð²Ð¿Ñ€Ð°Ð²Ð¾, Ð²Ð¸Ð±Ñ€Ð°Ñ‚Ð¸)"
+// "навігація по меню через команди (наступний, попередній, вліво, вправо, вибрати)"
 void test_endpoint_navigation_commands(void) {
   Bench b; b.begin();
   Menu& m = b.d.getMenu();
@@ -234,17 +254,17 @@ void test_endpoint_navigation_commands(void) {
   TEST_ASSERT_EQUAL(Result::Ok, b.d.nav(NavCommand::Open)); b.apply();
   TEST_ASSERT_EQUAL_UINT8(0, m.selectedIndex());
 
-  // Ð½Ð°ÑÑ‚ÑƒÐ¿Ð½Ð¸Ð¹ / Ð¿Ð¾Ð¿ÐµÑ€ÐµÐ´Ð½Ñ–Ð¹
+  // наступний / попередній
   TEST_ASSERT_EQUAL(Result::Ok, b.d.nav(NavCommand::Next)); b.apply();
   TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, m.selectedIndex(), "Next did not advance");
   TEST_ASSERT_EQUAL(Result::Ok, b.d.nav(NavCommand::Prev)); b.apply();
   TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, m.selectedIndex(), "Prev did not go back");
 
-  // Ð²Ð¸Ð±Ñ€Ð°Ñ‚Ð¸ â€” enters edit on the integer item
+  // вибрати — enters edit on the integer item
   TEST_ASSERT_EQUAL(Result::Ok, b.d.nav(NavCommand::Select)); b.apply();
   TEST_ASSERT_TRUE_MESSAGE(m.isEditing(), "Select did not enter edit mode");
 
-  // Ð²Ð¿Ñ€Ð°Ð²Ð¾ / Ð²Ð»Ñ–Ð²Ð¾ â€” the value moves by the field's step and comes back
+  // вправо / вліво — the value moves by the field's step and comes back
   const int before = m.item(0)->fields[0].value;
   TEST_ASSERT_EQUAL(Result::Ok, b.d.nav(NavCommand::Increase)); b.apply();
   const int up = m.item(0)->fields[0].value;
@@ -253,7 +273,7 @@ void test_endpoint_navigation_commands(void) {
   TEST_ASSERT_EQUAL_INT_MESSAGE(before, m.item(0)->fields[0].value,
                                 "Decrease did not undo Increase");
 
-  // Ð½Ð°Ð·Ð°Ð´ â€” leaves edit, then closes
+  // назад — leaves edit, then closes
   TEST_ASSERT_EQUAL(Result::Ok, b.d.nav(NavCommand::Back)); b.apply();
   TEST_ASSERT_FALSE_MESSAGE(m.isEditing(), "Back did not leave edit mode");
 }

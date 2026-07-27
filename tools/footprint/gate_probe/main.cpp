@@ -1,4 +1,7 @@
-// TEMPORARY gate-measurement probe (review artefact, not shipped).
+// The gate-measurement probe. NOT an example and never flashed to a panel — it is the
+// instrument behind the README's "what each gate is actually worth" table, driven by
+// platformio_footprint.ini (see tools/footprint/README.md). It lives outside src/, so the
+// Library Dependency Finder never pulls it into a consumer's build.
 //
 // Instantiates every panel the build selected and calls every optional render, so that
 // --gc-sections cannot remove a feature the gate was supposed to remove. Flipping one
@@ -26,7 +29,6 @@ void exercise(affa::AffaDisplayBase& d) {
   bite(d.setText("HELLO", 0));
   bite(d.setTime("1234"));
   bite(d.setPower(true));
-  bite(d.setAuxMode(true));
   bite(d.showMenu("HDR", "row0", "row1"));
   bite(d.highlightItem(1));
   bite(d.showPopupText("VOL 28"));
@@ -64,10 +66,6 @@ affa::UpdateListDisplay g_seg(g_link, g_clock);
 #endif
 #if AFFA_PANEL_UPDATELIST_MENU
 affa::UpdateListMenuDisplay g_lcd(g_link, g_clock);
-#endif
-
-#if AFFA_ENABLE_AUX_TRACKER
-affa::AuxModeTracker g_aux(g_clock);
 #endif
 
 }  // namespace
@@ -118,26 +116,24 @@ void setup() {
 #if AFFA_PANEL_UPDATELIST_MENU
   exercise(g_lcd);
 #endif
-#if AFFA_ENABLE_AUX_TRACKER
-  affa::Frame af{};
-  af.id  = affa::kAuxWatchId;
-  af.len = 8;
-  g_aux.onFrame(af);
-  bite(g_aux.inAux());
-#endif
 #if AFFA_ENABLE_ESP32CAN_LINK
   static affa::Esp32CanLink real;
   bite(real.begin(affa::CanPins{.rx = GPIO_NUM_4, .tx = GPIO_NUM_3}, 500000));
   bite(real.isLive());
 #endif
-#if AFFA_ENABLE_VIRTUAL_PANEL && AFFA_PANEL_CARMINAT
-  static affa::CarminatVirtualPanel twin;
-  twin.begin(g_link, g_clock);
+  // The vpanel twin probe was here. src/vpanel/ is gone; what AFFA_ENABLE_ISOTP_RX buys
+  // now is the reassembler, the screen decoder and the onText() path, and touching
+  // onText() is what keeps that whole chain out of --gc-sections' reach.
+#if AFFA_ENABLE_ISOTP_RX && AFFA_PANEL_CARMINAT
+  g_carminat.onText([](const char* t, void*) { g_sink += static_cast<uint32_t>(t[0]); },
+                    nullptr);
   affa::Frame tf{};
   tf.id  = 0x151;
   tf.len = 8;
-  twin.onFrame(tf);
-  g_sink += static_cast<uint32_t>(twin.screen().header[0]);
+  tf.data[0] = 0x10;
+  tf.data[1] = 0x0E;
+  tf.data[2] = 0x77;
+  g_sink += static_cast<uint32_t>(affa::isotp::frameCount(tf.data[1]));
 #endif
   char buf[16];
   g_sink += static_cast<uint32_t>(affa::toAscii("\xC3\x84\xC3\x96", buf, sizeof(buf)));

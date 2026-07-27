@@ -9,9 +9,10 @@ can be re-checked when the dependency is bumped.
 
 | Item | Value |
 |---|---|
-| Driver | `collin80/esp32_can`, `library.properties` version `0.3.1`, commit `c329e6be6931e86f82e38e0f982c9ed951c45cca`, committed 2026-07-09, cloned 2026-07-25 (`.pio/libdeps/c3/ESP32_CAN/.git/{packed-refs,logs/HEAD,.piopm}`) |
-| Base class | `collin80/can_common` `0.4.0` |
-| Vendored at | `MegaOpen/.pio/libdeps/c3/ESP32_CAN/src/`, `.../can_common/src/` |
+| Driver | `collin80/esp32_can`, `library.properties` version `0.3.1`, commit **`c329e6be6931e86f82e38e0f982c9ed951c45cca`**, committed 2026-07-09, first cloned 2026-07-25. PlatformIO spells it `ESP32_CAN@0.3.1+sha.c329e6b`. |
+| Base class | `collin80/can_common` **`0.4.0`** (registry package, `.piopm` `{"version": "0.4.0"}`) |
+| Commit re-verified | 2026-07-27, `git rev-parse HEAD` in `AffaDisplay/.pio/libdeps/*/ESP32_CAN` and in `MegaOpen/.pio/libdeps/c3/ESP32_CAN` — both `c329e6be…`, and a fresh clone of `master` that day resolved to the same commit |
+| Vendored at | `AffaDisplay/.pio/libdeps/<env>/ESP32_CAN/src/` and `.../can_common/src/`; the original reading was taken in `MegaOpen/.pio/libdeps/c3/` |
 | Framework | `framework-arduinoespressif32` 3.20017.241212 (Arduino core 2.0.17) |
 | ESP-IDF | 4.4.7 — `tools/sdk/esp32c3/include/esp_common/include/esp_idf_version.h:22-26` |
 | Target | ESP32-C3, `CONFIG_FREERTOS_UNICORE=y`, `CONFIG_FREERTOS_HZ=1000`, `CONFIG_FREERTOS_ISR_STACKSIZE=2096` — `tools/sdk/esp32c3/sdkconfig:1199,1206,1218` |
@@ -34,11 +35,23 @@ rule. There is exactly one global bus object, `CAN0`, and it is declared weak
 (`esp32_can.cpp:9`), so a project may replace it wholesale rather than call
 `setCANPins()`.
 
-**The dependency is not pinned.** MegaOpen declares it as a bare
-`https://github.com/collin80/esp32_can.git` (`MegaOpen/platformio.ini:24`), so a clean
-build takes whatever `master` is that day, and `0.3.1` in `library.properties` has not
-moved in years — it identifies nothing. AffaDisplay's `library.json` pins the commit
-above, and rule 20 makes re-reading this document part of any bump.
+**The dependency is pinned, and this document is why.** `0.3.1` in the driver's
+`library.properties` has not moved in years — it identifies nothing — so the only usable
+handle is the commit. Every declaration in this repository names it:
+
+| Where | Spec |
+|---|---|
+| `library.json` | `https://github.com/collin80/esp32_can.git#c329e6be6931e86f82e38e0f982c9ed951c45cca`, `can_common` `0.4.0` |
+| `platformio.ini` (`[esp32c3]`, `[env:ex90_bench_ota]`) | the same two |
+| `platformio_footprint.ini` (`[c3]`, `[env:b_can]`) | the same two |
+| README installation snippet, EN and UK | the same two |
+
+Every `file:line` below is an offset into **that** commit's source. A bare
+`https://github.com/collin80/esp32_can.git` — which is what MegaOpen still declares,
+`MegaOpen/platformio.ini:24` — takes whatever `master` is on the day of a clean build, and
+under that arrangement every line citation here rots silently: the numbers still look
+authoritative and no build fails. Rule 21 makes re-reading this document part
+of any bump, and the pins are what make that rule enforceable rather than a hope.
 
 ---
 
@@ -807,7 +820,11 @@ umbrella header and make rule 1 unenforceable.
     `Esp32CanLink.cpp` — `affa::Frame` is a separate type and the conversion is that file's
     job in both directions, which is what keeps rule 1 enforceable. (Finding 10.)
 21. **Re-verify this document on any dependency bump.** Every finding is tied to
-    `esp32_can` commit `c329e6b` and ESP-IDF 4.4.7; in particular the IDF ≥ 5.2 branches
+    `esp32_can` commit `c329e6b`, `can_common` `0.4.0` and ESP-IDF 4.4.7. That pair is
+    pinned in `library.json`, `platformio.ini`, `platformio_footprint.ini` and the
+    README's installation snippet; changing any one of those four without re-reading this
+    document invalidates it silently, which is the whole reason the pins exist. In
+    particular the IDF ≥ 5.2 branches
     (handle-based `_v2` API, per-controller task names built from a dangling
     `std::ostringstream::str().c_str()` at `:337,491-492`, second controller) are dead
     code today and would all become live at once.
