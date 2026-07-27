@@ -348,7 +348,7 @@ void test_coalescing_keeps_one_slot_and_aborts_the_rest(void) {
 
   // Latch FUNCSREG first, so the queue is not carrying registration probes.
   uint8_t seed = 0xAA;
-  d.enqueue(0x151, &seed, 1);
+  (void)d.enqueue(0x151, &seed, 1);
   for (int i = 0; i < 8; ++i) d.poll();
   TEST_ASSERT_TRUE(d.registered());
   drainSent(link);
@@ -387,7 +387,7 @@ void test_abort_pending_leaves_the_in_flight_job_alone(void) {
   d.setSelfAck(true);
 
   uint8_t seed = 0xAA;
-  d.enqueue(0x151, &seed, 1);
+  (void)d.enqueue(0x151, &seed, 1);
   for (int i = 0; i < 8; ++i) d.poll();
   drainSent(link);
 
@@ -529,7 +529,7 @@ void test_key_delivery_does_not_wait_for_the_transmit_queue(void) {
 
   d.setSelfAck(true);
   uint8_t seed = 0xAA;
-  d.enqueue(0x151, &seed, 1);
+  (void)d.enqueue(0x151, &seed, 1);
   for (int i = 0; i < 8; ++i) d.poll();
   TEST_ASSERT_TRUE(d.registered());
   d.setSelfAck(false);                   // now nothing will ACK: the job sits in WaitAck
@@ -537,7 +537,7 @@ void test_key_delivery_does_not_wait_for_the_transmit_queue(void) {
 
   uint8_t big[AFFA_MAX_PAYLOAD];
   std::memset(big, 0x77, sizeof(big));
-  d.enqueue(0x151, big, sizeof(big));
+  (void)d.enqueue(0x151, big, sizeof(big));
   d.poll();                              // frame 0 out, WaitAck with a 2000 ms deadline
   TEST_ASSERT_TRUE(d.busy());
 

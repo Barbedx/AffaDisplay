@@ -214,7 +214,7 @@ void test_segment_setText_channel_byte_follows_the_digit(void) {
   const uint8_t kDigits[] = {0, 9, 10, 255};
   const uint8_t kChan[]   = {0x70, 0x79, 0x7A, 0x7A};
   for (uint8_t i = 0; i < 4; ++i) {
-    r.d.setText("X", kDigits[i]);
+    (void)r.d.setText("X", kDigits[i]);
     pumpUntilIdle(r.d);
     Frame f;
     TEST_ASSERT_TRUE(r.link.takeSent(f));
@@ -228,7 +228,7 @@ void test_segment_setText_pads_both_fields_with_NUL(void) {
   // "emit the OEM space form" is specific to Carminat's showInfoMenu.
   SegRig r;
   r.up();
-  r.d.setText("AUX", 255);
+  (void)r.d.setText("AUX", 255);
   pumpUntilIdle(r.d);
   Frame f0, f1;
   TEST_ASSERT_TRUE(r.link.takeSent(f0));

@@ -34,7 +34,7 @@ class UpdateListBase : public AffaDisplayBase {
 
   // 0x1B1: `04 52 <state> FF FF` padded with 0x81. Enqueued on RenderSlot::Control, so it
   // never coalesces against a text render. Asynchronous, like every render call.
-  Result setPower(bool on) override;
+  [[nodiscard]] Result setPower(bool on) override;
 
   // ---- AMS key forwarding -------------------------------------------------
   // "Hold Load toggles whether wheel keys reach the application, and the panel says so"
@@ -96,7 +96,8 @@ class UpdateListBase : public AffaDisplayBase {
   static bool familySupports(Feature f);
 
   // enqueue() + the Result mapping every render call in this family repeats.
-  Result enqueueRender(uint16_t funcId, const uint8_t* data, uint8_t len, RenderSlot slot);
+  [[nodiscard]] Result enqueueRender(uint16_t funcId, const uint8_t* data, uint8_t len,
+                                     RenderSlot slot);
 
  private:
   void scheduleAmsBanner();

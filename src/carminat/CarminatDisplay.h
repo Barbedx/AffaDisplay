@@ -53,36 +53,39 @@ class CarminatDisplay final : public AffaDisplayBase {
   // verdict — "was it queued?" — never a delivery verdict; that arrives through
   // onComplete(). `digit` is ignored on this panel; it exists for the UpdateList
   // signature.
-  Result setText(const char* text, uint8_t digit = 255) override;
-  Result setTime(const char* hhmm) override;
-  Result setPower(bool on) override;
+  [[nodiscard]] Result setText(const char* text, uint8_t digit = 255) override;
+  [[nodiscard]] Result setTime(const char* hhmm) override;
+  [[nodiscard]] Result setPower(bool on) override;
 
-  Result showMenu(const char* header, const char* row0, const char* row1,
-                  uint8_t scrollIndicator = carminat::kScrollDown) override;
-  Result highlightItem(uint8_t row) override;
+  [[nodiscard]] Result showMenu(const char* header, const char* row0, const char* row1,
+                                uint8_t scrollIndicator = carminat::kScrollDown) override;
+  [[nodiscard]] Result highlightItem(uint8_t row) override;
 
-  Result showPopupText(const char* text, uint8_t icon = carminat::kPopupIcon,
-                       uint8_t srcIcon = carminat::kSrcIconNone,
-                       uint8_t fmt = carminat::kFormatPlain) override;
-  Result hidePopup() override;
+  [[nodiscard]] Result showPopupText(const char* text, uint8_t icon = carminat::kPopupIcon,
+                                     uint8_t srcIcon = carminat::kSrcIconNone,
+                                     uint8_t fmt = carminat::kFormatPlain) override;
+  [[nodiscard]] Result hidePopup() override;
 
-  Result showFullscreenText(const char* l1, const char* l2, const char* l3) override;
-  Result hideFullscreenText() override;
+  [[nodiscard]] Result showFullscreenText(const char* l1, const char* l2,
+                                          const char* l3) override;
+  [[nodiscard]] Result hideFullscreenText() override;
 
-  Result showConfirmBox(const char* caption, const char* row0, const char* row1) override;
+  [[nodiscard]] Result showConfirmBox(const char* caption, const char* row0,
+                                      const char* row1) override;
 
-  Result showInfoPopup(const char* l1, const char* l2, const char* l3) override;
-  Result hideInfoPopup() override;
+  [[nodiscard]] Result showInfoPopup(const char* l1, const char* l2,
+                                     const char* l3) override;
+  [[nodiscard]] Result hideInfoPopup() override;
 
   // The offset-taking form of showInfoPopup, exposed because the three row slots and the
   // format prefix are the only part of this screen still being reverse-engineered. The
   // defaults reproduce the OEM settings list byte for byte. Sends ONE MESSAGE PER ROW —
   // three queue slots, and they deliberately do not coalesce against each other.
-  Result showInfoMenu(const char* row0, const char* row1, const char* row2,
-                      uint8_t offset0 = carminat::kInfoOffset0,
-                      uint8_t offset1 = carminat::kInfoOffset1,
-                      uint8_t offset2 = carminat::kInfoOffset2,
-                      uint8_t infoPrefix = carminat::kInfoPrefix);
+  [[nodiscard]] Result showInfoMenu(const char* row0, const char* row1, const char* row2,
+                                    uint8_t offset0 = carminat::kInfoOffset0,
+                                    uint8_t offset1 = carminat::kInfoOffset1,
+                                    uint8_t offset2 = carminat::kInfoOffset2,
+                                    uint8_t infoPrefix = carminat::kInfoPrefix);
 
 #if AFFA_ENABLE_MENU
   // The library hands out an EMPTY menu with a header; the application fills it. See
@@ -112,8 +115,8 @@ class CarminatDisplay final : public AffaDisplayBase {
 
  private:
   // enqueue() + "translate kNoTicket into the reason". Every builder ends in this.
-  Result submit(uint16_t funcId, const uint8_t* data, uint8_t len, RenderSlot slot,
-                bool coalesce = (AFFA_TX_COALESCE != 0));
+  [[nodiscard]] Result submit(uint16_t funcId, const uint8_t* data, uint8_t len,
+                              RenderSlot slot, bool coalesce = (AFFA_TX_COALESCE != 0));
 
 #if AFFA_ENABLE_MENU
   void initializeMenu();                    // creates an EMPTY menu; the app fills it

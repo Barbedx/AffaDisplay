@@ -39,9 +39,22 @@ uint8_t fragment(uint16_t id, const uint8_t* payload, uint8_t len, uint8_t fille
 bool Reassembler::onFrame(const Frame& f) {
   if (f.len == 0) return false;
 
-  // First frame: eight bytes INCLUDING the 0x10, because the 0x10 is payload byte 0 and
-  // every offset in affa::screen is measured from it.
-  if (f.data[0] == 0x10) {
+  // First frame: eight bytes INCLUDING the PCI byte, because that byte is payload byte 0
+  // and every offset in affa::screen is measured from it.
+  //
+  // The nibble, not the whole byte. ISO 15765-2 puts a 12-bit length in a first frame:
+  // the high nibble is 1 and the low nibble is the top four bits of FF_DL, so a message
+  // longer than 255 bytes arrives as 0x11..0x1F. Everything OUR two drivers build is
+  // short enough to use 0x10, which is why matching the whole byte survived this long —
+  // but AFFA_ENABLE_ISOTP_RX exists to sniff somebody else's head unit, and the OEM's
+  // 302-byte 0x1F1 screen opens with `11 2E 21 0B 00 25 41 42`. Under the old test that
+  // first frame was refused, _active stayed false, and all 43 continuation frames were
+  // refused with it — the message decoded to nothing at all.
+  //
+  // Safe because no single-frame PCI in either family's repertoire can be mistaken for
+  // one: a single frame's PCI is its length, and every single-frame payload here is
+  // <= 7 bytes, so payload byte 0 is never in 0x11..0x1F.
+  if ((f.data[0] & 0xF0) == 0x10) {
     _len    = 0;
     _active = true;
     for (uint8_t i = 0; i < kFrame0Bytes && i < f.len && _len < AFFA_MAX_PAYLOAD; ++i)

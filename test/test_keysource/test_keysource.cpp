@@ -52,7 +52,7 @@ struct Rig {
 
   void registerFuncs() {
     d.setSelfAck(true);
-    d.setPower(true);
+    (void)d.setPower(true);
     pumpUntilIdle(d);
     TEST_ASSERT_TRUE(d.registered());
     d.setSelfAck(false);

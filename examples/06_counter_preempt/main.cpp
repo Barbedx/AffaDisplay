@@ -75,7 +75,7 @@ void render(const char* what) {
   char buf[16];
   if (what) snprintf(buf, sizeof(buf), "%s", what);
   else      snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(g_counter));
-  g_display.setText(buf);
+  (void)g_display.setText(buf);
 }
 
 void onKey(affa::Key k, affa::KeyEdge e, void*) {
@@ -127,7 +127,7 @@ void setup() {
   g_display.onFrame(&onFrameTap, nullptr);
   g_display.onKey(&onKey, nullptr);
   g_display.begin();
-  g_display.setText("COUNTER");
+  (void)g_display.setText("COUNTER");
   Serial.printf("coalescing=%d queue depth=%d\n", AFFA_TX_COALESCE, AFFA_TX_QUEUE_DEPTH);
 }
 

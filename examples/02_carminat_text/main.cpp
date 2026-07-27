@@ -94,8 +94,8 @@ void setup() {
   g_display.onComplete(&onComplete, nullptr);
   g_display.begin();
 
-  g_display.setPower(true);         // 03 52 09 FF FF — enqueued like everything else
-  g_display.setText("RENAULT");
+  (void)g_display.setPower(true);         // 03 52 09 FF FF — enqueued like everything else
+  (void)g_display.setText("RENAULT");
 }
 
 void loop() {

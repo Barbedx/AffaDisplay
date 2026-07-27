@@ -274,7 +274,7 @@ void armed(CarRig& r) {
   r.link.inject(affatest::panelSyncRequest());
   r.d.poll();
   r.d.setSelfAck(true);
-  r.d.setPower(true);
+  (void)r.d.setPower(true);
   affatest::pumpUntilIdle(r.d);
   TEST_ASSERT_TRUE(r.d.registered());
   drain(r.link);

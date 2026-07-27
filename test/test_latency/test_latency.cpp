@@ -56,7 +56,7 @@ struct Rig {
   void up() {
     sync();
     d.setSelfAck(true);
-    d.setPower(true);
+    (void)d.setPower(true);
     pumpUntilIdle(d);
     TEST_ASSERT_TRUE(d.registered());
     drain(link);
@@ -182,7 +182,7 @@ void test_different_slots_never_coalesce_against_each_other(void) {
   // a pending highlight — they are ~14x apart in bus time and mean different things.
   Rig r;
   r.up();
-  r.d.showMenu("Main Menu", "a", "b", 0x0B);
+  (void)r.d.showMenu("Main Menu", "a", "b", 0x0B);
   r.d.poll();                                   // in flight
 
   ASSERT_RESULT(Ok, r.d.showMenu("Main Menu", "c", "d", 0x0B));   // Menu
@@ -210,7 +210,7 @@ void test_abortPending_reports_Aborted_once_per_dropped_ticket(void) {
   g_ab = Aborts{};
   g_d  = &r.d;
 
-  r.d.showMenu("Main Menu", "a", "b", 0x0B);
+  (void)r.d.showMenu("Main Menu", "a", "b", 0x0B);
   r.d.poll();                                   // started: not preemptable
 
   r.d.onComplete(&recordAbort, nullptr);
@@ -322,7 +322,7 @@ void test_abortAll_with_nothing_started_returns_false(void) {
   Rig r;
   r.up();
   TEST_ASSERT_FALSE(r.d.abortAll());
-  r.d.enqueue(0x151, g_payload, 4);
+  (void)r.d.enqueue(0x151, g_payload, 4);
   TEST_ASSERT_FALSE_MESSAGE(r.d.abortAll(),
                             "a queued-but-unstarted job is dropped, not abandoned");
   TEST_ASSERT_FALSE(r.d.busy());

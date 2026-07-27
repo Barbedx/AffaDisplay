@@ -103,24 +103,24 @@ void onKey(affa::Key k, affa::KeyEdge e, void*) {
       // menu's screen would leave the Menu's idea of the glass and the glass disagreeing.
       if (g_display.getMenu().isOpen()) break;
       g_manualRow ^= 1;
-      g_display.showMenu("DIRECT", "row zero", "row one", affa::carminat::kScrollBoth);
-      g_display.highlightItem(g_manualRow);   // a DIFFERENT single frame, not a redraw
+      (void)g_display.showMenu("DIRECT", "row zero", "row one", affa::carminat::kScrollBoth);
+      (void)g_display.highlightItem(g_manualRow);   // a DIFFERENT single frame, not a redraw
       break;
     }
     case affa::Key::Pause:
-      if (g_display.supports(affa::Feature::Popup)) g_display.showPopupText("VOL 28");
+      if (g_display.supports(affa::Feature::Popup)) (void)g_display.showPopupText("VOL 28");
       else Serial.println("[app ] popup not compiled in");
       break;
     case affa::Key::VolDown:
-      if (g_display.supports(affa::Feature::Popup)) g_display.hidePopup();
+      if (g_display.supports(affa::Feature::Popup)) (void)g_display.hidePopup();
       break;
     case affa::Key::SrcNext:
       if (g_display.supports(affa::Feature::Fullscreen))
-        g_display.showFullscreenText("AffaDisplay", "fullscreen", "demo");
+        (void)g_display.showFullscreenText("AffaDisplay", "fullscreen", "demo");
       else Serial.println("[app ] fullscreen not compiled in");
       break;
     case affa::Key::SrcPrev:
-      if (g_display.supports(affa::Feature::Fullscreen)) g_display.hideFullscreenText();
+      if (g_display.supports(affa::Feature::Fullscreen)) (void)g_display.hideFullscreenText();
       break;
     default: break;
   }
@@ -136,7 +136,7 @@ void setup() {
   g_display.onKey(&onKey, nullptr);
   g_display.begin();
   buildMenu();                       // AFTER begin(); the menu renders when it opens
-  g_display.setText("RENAULT");
+  (void)g_display.setText("RENAULT");
 }
 
 void loop() {

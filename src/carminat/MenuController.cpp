@@ -16,7 +16,10 @@ void MenuController::popPage() {
   _currentPage = nullptr;
   // The menu was underneath the page and the page overwrote the glass, so it has to be
   // redrawn — the panel keeps no stack of its own.
-  if (_menu.isOpen()) _menu.render();
+  // The redraw's Result is deliberately dropped: popPage() has no caller to report it to,
+  // and a redraw that could not be queued (no sync, queue full) is cosmetic — the next key
+  // renders again.
+  if (_menu.isOpen()) (void)_menu.render();
 }
 
 bool MenuController::routeKey(Key k, KeyEdge e) {

@@ -54,7 +54,13 @@ constexpr const char* kTag = "LINK";
 // instance has to be reachable from a file-scope pointer. Esp32CanLink is therefore
 // effectively a singleton: a second begin() on a second instance is refused rather than
 // silently stealing the callback from the first.
-Esp32CanLink* s_self = nullptr;
+//
+// ATOMIC because it is written by the task that calls begin() and read by task_CAN, which
+// is already running by the time begin()'s failure path clears it: the callback is
+// registered and watchFor() has opened the filter before twai_get_status_info() is
+// consulted. Relaxed — publication of *this is ordered by the setGeneralCallback() call
+// that follows the store, not by this variable.
+std::atomic<Esp32CanLink*> s_self{nullptr};
 
 } // namespace
 
@@ -72,7 +78,7 @@ struct Esp32CanTrampoline {
   // it). No clock read. No user callback. Budget: 128 bytes of stack, because the task is
   // not ours and its size is hard-coded by enable().
   static void onFrame(CAN_FRAME* f) {
-    Esp32CanLink* const self = s_self;
+    Esp32CanLink* const self = s_self.load(std::memory_order_relaxed);
     if (!self || !f) return;
     if (f->rtr || f->extended) return;          // AFFA is 11-bit data frames only
     Frame out;
@@ -86,25 +92,38 @@ struct Esp32CanTrampoline {
   }
 };
 
-bool Esp32CanLink::begin(CanPins pins, uint32_t bitrate) {
+bool Esp32CanLink::begin(CanPins pins, uint32_t bitrate, uint32_t forceRecoveryMs) {
   if (_began) {
     AFFA_LOGE(kTag, "begin() called twice: a second call reinstalls the driver on a live "
                     "bus, leaks both queues and wipes all 32 filter slots. Refused.");
     return false;
   }
-  if (s_self && s_self != this) {
+  Esp32CanLink* const owner = s_self.load(std::memory_order_relaxed);
+  if (owner && owner != this) {
     AFFA_LOGE(kTag, "another Esp32CanLink already owns the general callback. Refused.");
     return false;
   }
 
   _rx.reset();
   _stats = Stats{};
+  _rxFrames.store(0, std::memory_order_relaxed);
+
+  // BEFORE begin(), which is the one window in which touching the driver is sanctioned:
+  // setForceRecovery only writes two members (esp32_can_builtin.cpp:88-92) and the
+  // watchdog task reads them later. Calling it after begin() would be no more dangerous,
+  // but keeping every driver call on this side of begin() is what makes the prohibition
+  // in the header a line you can grep for rather than a judgement call.
+  if (forceRecoveryMs) {
+    CAN0.setForceRecovery(true, forceRecoveryMs);
+    AFFA_LOGI(kTag, "bus-off auto-recovery armed: full driver restart after %lums",
+              static_cast<unsigned long>(forceRecoveryMs));
+  }
 
   // Order is load-bearing; see the header. watchFor() is LAST.
   CAN0.setCANPins(pins.rx, pins.tx);
   CAN0.begin(bitrate);                      // return value is the requested rate, not a
                                             // health check — verify below instead
-  s_self = this;
+  s_self.store(this, std::memory_order_relaxed);
   CAN0.setGeneralCallback(&Esp32CanTrampoline::onFrame);
   CAN0.watchFor();
 
@@ -112,7 +131,7 @@ bool Esp32CanLink::begin(CanPins pins, uint32_t bitrate) {
   if (twai_get_status_info(&st) != ESP_OK || st.state != TWAI_STATE_RUNNING) {
     AFFA_LOGE(kTag, "driver not RUNNING after begin(%lu) — is that bitrate in "
                     "valid_timings[]?", static_cast<unsigned long>(bitrate));
-    s_self = nullptr;
+    s_self.store(nullptr, std::memory_order_relaxed);
     return false;
   }
 
@@ -124,7 +143,9 @@ bool Esp32CanLink::begin(CanPins pins, uint32_t bitrate) {
 }
 
 void Esp32CanLink::ingest(const Frame& f) {
-  if (_rx.push(f)) ++_stats.rxFrames;
+  // Relaxed atomic, not `++_stats.rxFrames`: this runs in task_CAN while stats() copies
+  // the Stats struct on the poll() task.
+  if (_rx.push(f)) _rxFrames.fetch_add(1, std::memory_order_relaxed);
   // A failed push already bumped the ring's own overflow counter. Nothing else happens
   // here: reporting it is poll()'s job, on the consumer's task.
 }
@@ -166,6 +187,7 @@ bool Esp32CanLink::isLive() const {
 
 Stats Esp32CanLink::stats() const {
   Stats s = _stats;
+  s.rxFrames     = _rxFrames.load(std::memory_order_relaxed);
   s.ringOverflow = _rx.overflow();
   twai_status_info_t st;
   if (twai_get_status_info(&st) == ESP_OK) {

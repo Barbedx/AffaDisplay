@@ -130,7 +130,9 @@ void CarminatDisplay::initializeMenu() {
 // ships as a default because it is the convention, and it is replaceable because it is
 // policy — Menu::onClose() overwrites it.
 void CarminatDisplay::onMenuClosed(void* ctx) {
-  static_cast<CarminatDisplay*>(ctx)->setText("RENAULT", 0);
+  // Deliberately dropped: this is a CloseCb with nowhere to report to, and the banner is
+  // cosmetic. An application that needs the verdict installs its own Menu::onClose().
+  (void)static_cast<CarminatDisplay*>(ctx)->setText("RENAULT", 0);
 }
 
 bool CarminatDisplay::menuOpen() const { return _menu.isOpen(); }

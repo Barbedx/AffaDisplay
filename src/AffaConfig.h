@@ -2,8 +2,17 @@
 //
 // Every optional part of the library is gated from here, and every gate is #define'd to
 // 0 rather than left undefined so that code can use `#if AFFA_X` and never `#ifdef`.
-// A -Wundef build (which this library's own platformio.ini turns on) then turns a
-// misspelled flag into a diagnostic instead of a silently missing feature.
+// A -Wundef build (which this library's own platformio.ini turns on) then catches a
+// misspelling INSIDE THE LIBRARY — `#if AFFA_ENALBE_MENU` is a diagnostic, not a silently
+// false branch.
+//
+// WHAT -Wundef CANNOT CATCH, and what does catch it. A misspelling in a CONSUMER's
+// build_flags (-D AFFA_ENALBE_MENU=0) defines a macro that nothing ever reads: there is no
+// undefined macro anywhere, so there is nothing to diagnose, and the intended gate quietly
+// keeps its default. For the PANEL flags that is fatal rather than cosmetic, so those are
+// covered by a second mechanism — silence is an #error, see below. For the feature gates it
+// is not solvable in the preprocessor at all; the failure is "the feature you tried to turn
+// off is still on", which is visible in the map file and in the flash number.
 //
 // WHY EACH OPTIONAL .cpp GATES ITS WHOLE BODY
 // PlatformIO's build_src_filter applies to the *project's* src/. A library pulled in
@@ -20,13 +29,39 @@
 // ---------------------------------------------------------------------------
 // Panel selection
 // ---------------------------------------------------------------------------
-// Define what you need in build_flags; if you define NOTHING, every panel is compiled —
-// a convenience default for first-time users, not a shipping one.
-#if !defined(AFFA_PANEL_CARMINAT) && !defined(AFFA_PANEL_UPDATELIST) && \
-    !defined(AFFA_PANEL_UPDATELIST_MENU)
-#  define AFFA_PANEL_CARMINAT        1
-#  define AFFA_PANEL_UPDATELIST      1
-#  define AFFA_PANEL_UPDATELIST_MENU 1
+// SILENCE IS AN ERROR, NOT A DEFAULT. You must name at least one panel in build_flags:
+//
+//     -D AFFA_PANEL_CARMINAT=1
+//
+// This is the shape that catches the failure mode nothing else can. A misspelled flag
+// (-D AFFA_PANEL_CARMINET=1) leaves every REAL macro undefined, and -Wundef cannot help:
+// the misspelled macro IS defined, merely never used, so there is no undefined macro to
+// diagnose. The only observable consequence of the typo is "no panel was selected", and
+// that is exactly what the #error below reports.
+//
+// Earlier revisions made "define nothing" mean "compile all three". That silently turned
+// the typo above into a bigger image with all three panels linked in and no diagnostic
+// whatsoever — the opposite of what the guard's own comment claimed. If you genuinely
+// want every panel, say so:
+//
+//     -D AFFA_PANEL_DEFAULT_ALL=1
+//
+// which is a convenience for first-time users and for the footprint reference builds, and
+// still not a shipping selection.
+#ifndef AFFA_PANEL_DEFAULT_ALL
+#  define AFFA_PANEL_DEFAULT_ALL 0
+#endif
+
+#if AFFA_PANEL_DEFAULT_ALL
+#  ifndef AFFA_PANEL_CARMINAT
+#    define AFFA_PANEL_CARMINAT 1
+#  endif
+#  ifndef AFFA_PANEL_UPDATELIST
+#    define AFFA_PANEL_UPDATELIST 1
+#  endif
+#  ifndef AFFA_PANEL_UPDATELIST_MENU
+#    define AFFA_PANEL_UPDATELIST_MENU 1
+#  endif
 #endif
 
 #ifndef AFFA_PANEL_CARMINAT
@@ -46,10 +81,11 @@
 #  define AFFA_PANEL_UPDATELIST 1
 #endif
 
-// Unknown-flag guard: a typo in build_flags (AFFA_PANEL_CARMINET) would otherwise
-// silently drop a panel and produce an image that builds and does nothing.
+// The guard this file exists to make meaningful. It fires when every panel flag is 0 —
+// which is the state a misspelled -D AFFA_PANEL_* leaves behind, and also the state of a
+// build that simply forgot to select one.
 #if !AFFA_PANEL_CARMINAT && !AFFA_PANEL_UPDATELIST && !AFFA_PANEL_UPDATELIST_MENU
-#  error "AffaDisplay: no panel selected. Check your -D AFFA_PANEL_* spelling."
+#  error "AffaDisplay: no panel selected. Add -D AFFA_PANEL_CARMINAT=1 (and/or _UPDATELIST / _UPDATELIST_MENU), or -D AFFA_PANEL_DEFAULT_ALL=1 for all three. Check your spelling: a typo'd AFFA_PANEL_* flag lands here."
 #endif
 
 // ---------------------------------------------------------------------------
@@ -129,19 +165,19 @@
 #  endif
 #endif
 
-// An optional owned FreeRTOS task that calls poll() on a period. 1 AND calling poll()
-// yourself is two drivers on one unlocked library — undefined. Pick one.
-#ifndef AFFA_ENABLE_TASK
-#  define AFFA_ENABLE_TASK 0
-#endif
-#ifndef AFFA_TASK_PERIOD_MS
-#  define AFFA_TASK_PERIOD_MS 5     // larger increases key latency and RX-ring pressure
-#endif
-#ifndef AFFA_TASK_STACK
-#  define AFFA_TASK_STACK 3072      // peak is a render call: 96-byte payload + scratch
-#endif
-#ifndef AFFA_TASK_PRIO
-#  define AFFA_TASK_PRIO 5          // MUST stay below task_CAN's 15 or the ring starves
+// NOT IMPLEMENTED, AND LOUD ABOUT IT.
+//
+// An owned FreeRTOS task that calls poll() on a period was designed and documented, and
+// no code was ever written for it: there is no vTaskCreate anywhere under src/, and there
+// is not going to be one while "no vTaskDelay anywhere in src/" is the headline contract.
+// Until this revision the knob existed, defaulted to 0, and was referenced by NOTHING —
+// so a consumer who set it to 1 got a library that never polled, with no diagnostic. That
+// is the exact failure mode this project refuses to ship, so setting it is now an error
+// rather than a silent no-op. Own the loop: call poll() from one task. See docs/API.md §4.
+#ifdef AFFA_ENABLE_TASK
+#  if AFFA_ENABLE_TASK
+#    error "AffaDisplay: AFFA_ENABLE_TASK is not implemented. The library owns no task; call poll() from exactly one task of your own (docs/API.md §4)."
+#  endif
 #endif
 
 // The panel twins (vpanel/) plus, through them, AFFA_ENABLE_ISOTP_RX. They buy a

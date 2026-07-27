@@ -24,7 +24,7 @@ class UpdateListDisplay : public UpdateListBase {
   // 0x121, segment encoding. `digit` selects the channel: 0..9 -> 0x70 + digit,
   // anything else (255, the default) -> 0x7A, "no channel". Enqueued on RenderSlot::Text,
   // so a repeated render supersedes a queued one instead of stacking behind it.
-  Result setText(const char* text, uint8_t digit = 255) override;
+  [[nodiscard]] Result setText(const char* text, uint8_t digit = 255) override;
 
   // ---- marquee ------------------------------------------------------------
   // The text to scroll through the eight-cell window. Transliterated and cleaned with

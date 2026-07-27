@@ -24,7 +24,7 @@ class UpdateListMenuDisplay final : public UpdateListDisplay {
   // than the segment panel's 0x70 + digit. The parameter stays in the signature because
   // it is IDisplay's and IPanel's, and dropping it here would break the one-override-
   // satisfies-both-bases arrangement AffaDisplayBase depends on.
-  Result setText(const char* text, uint8_t digit = 255) override;
+  [[nodiscard]] Result setText(const char* text, uint8_t digit = 255) override;
 };
 
 }  // namespace affa

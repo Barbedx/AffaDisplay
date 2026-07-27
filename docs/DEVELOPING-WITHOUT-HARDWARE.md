@@ -28,7 +28,7 @@ repository root. On Windows the launcher is
 pio test -e native
 ```
 
-Expect **138 test cases across 11 suites in about ten seconds**. The suites are worth
+Expect **140 test cases across 11 suites in about ten seconds**. The suites are worth
 knowing by name, because when you break something one of them tells you *what*:
 
 | Suite | What it pins |

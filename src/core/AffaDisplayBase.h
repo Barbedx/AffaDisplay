@@ -80,7 +80,7 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // index order, and registration order is preserved only until a slot is freed and
   // reused — so do not depend on the order two subscriptions fire in. If two of your
   // callbacks must be ordered relative to each other, that is one callback.
-  SubHandle subscribe(const FrameMatch& m, FrameCb cb, void* ctx);
+  [[nodiscard]] SubHandle subscribe(const FrameMatch& m, FrameCb cb, void* ctx);
   bool      unsubscribe(SubHandle h);       // false if the handle is stale
   uint8_t   subscriptions() const;          // slots in use, for diagnostics
 
@@ -132,8 +132,11 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // the coalescing slot, the priority and the per-message coalescing opt-out. The default
   // is a plain FIFO append — slot None never coalesces — which is what a raw protocol
   // send wants.
-  TxTicket enqueue(uint16_t funcId, const uint8_t* data, uint8_t len,
-                   TxOptions opt = TxOptions{});
+  // [[nodiscard]]: kNoTicket is the ONLY signal that the message was rejected, and the
+  // reason is in lastResult(). Dropping it turns a QueueFull into a screen that never
+  // appears. `(void)enqueue(...)` if you genuinely do not care.
+  [[nodiscard]] TxTicket enqueue(uint16_t funcId, const uint8_t* data, uint8_t len,
+                                 TxOptions opt = TxOptions{});
 
   // ---- preemption ----------------------------------------------------------
   // Drop every job that is QUEUED AND NOT YET STARTED — i.e. every job of which not one
@@ -168,7 +171,7 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // Result::Timeout if the caller's deadline expired first — in which case THE TICKET IS
   // STILL QUEUED and will complete later through onComplete. Returns Result::Busy if
   // called from inside a library callback.
-  Result sendBlocking(TxTicket t, uint32_t timeoutMs);
+  [[nodiscard]] Result sendBlocking(TxTicket t, uint32_t timeoutMs);
 
   // ---- input seam ----------------------------------------------------------
   // Emulate a key press. The Local half takes the IDENTICAL path to a key decoded off the
@@ -181,8 +184,8 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // node. KeySource::Wire exists for impersonating the panel at a REAL radio, and it puts
   // phantom button presses on the bus: harmless on a bench, input other modules may act
   // on in a vehicle.
-  Result pressKey(Key k, KeyEdge e, KeySource src = KeySource::Local);
-  Result nav(NavCommand c,          KeySource src = KeySource::Local);
+  [[nodiscard]] Result pressKey(Key k, KeyEdge e, KeySource src = KeySource::Local);
+  [[nodiscard]] Result nav(NavCommand c,          KeySource src = KeySource::Local);
 
 #if AFFA_ENABLE_MENU
   // The gesture that OPENS the menu. "Hold Load opens the menu" is the OEM convention for
@@ -197,19 +200,21 @@ class AffaDisplayBase : public IDisplay, public IPanel {
 #endif
 
   // ---- rendering: default bodies return NotSupported ------------------------
-  Result setText(const char*, uint8_t digit = 255) override;
-  Result setTime(const char*) override;
-  Result setPower(bool) override;
-  Result setAuxMode(bool) override;
-  Result showMenu(const char*, const char*, const char*, uint8_t = 0x0B) override;
-  Result highlightItem(uint8_t) override;
-  Result showPopupText(const char*, uint8_t = 0x09, uint8_t = 0xFF, uint8_t = 0x60) override;
-  Result hidePopup() override;
-  Result showFullscreenText(const char*, const char*, const char*) override;
-  Result hideFullscreenText() override;
-  Result showConfirmBox(const char*, const char*, const char*) override;
-  Result showInfoPopup(const char*, const char*, const char*) override;
-  Result hideInfoPopup() override;
+  [[nodiscard]] Result setText(const char*, uint8_t digit = 255) override;
+  [[nodiscard]] Result setTime(const char*) override;
+  [[nodiscard]] Result setPower(bool) override;
+  [[nodiscard]] Result setAuxMode(bool) override;
+  [[nodiscard]] Result showMenu(const char*, const char*, const char*,
+                                uint8_t = 0x0B) override;
+  [[nodiscard]] Result highlightItem(uint8_t) override;
+  [[nodiscard]] Result showPopupText(const char*, uint8_t = 0x09, uint8_t = 0xFF,
+                                     uint8_t = 0x60) override;
+  [[nodiscard]] Result hidePopup() override;
+  [[nodiscard]] Result showFullscreenText(const char*, const char*, const char*) override;
+  [[nodiscard]] Result hideFullscreenText() override;
+  [[nodiscard]] Result showConfirmBox(const char*, const char*, const char*) override;
+  [[nodiscard]] Result showInfoPopup(const char*, const char*, const char*) override;
+  [[nodiscard]] Result hideInfoPopup() override;
 
  protected:
   // ---- panel hooks ---------------------------------------------------------
@@ -266,7 +271,7 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // registration, so putting it behind the ISO-TP queue would give it exactly the latency
   // the preemption design exists to remove. Tagged fromSelf, reported to the tap as
   // Direction::Tx.
-  Result transmitKey(Key k, KeyEdge e);
+  [[nodiscard]] Result transmitKey(Key k, KeyEdge e);
 
   // Called from poll() once per pass, after the sync and TX FSMs. Panels put their own
   // time-driven work here (the UpdateList title scroll). MUST be deadline-driven against

@@ -91,7 +91,7 @@ struct Rig {
   void up() {
     sync();
     d.setSelfAck(true);
-    d.setPower(true);
+    (void)d.setPower(true);
     pumpUntilIdle(d);
     TEST_ASSERT_TRUE(d.registered());
     drain(link);
@@ -348,6 +348,92 @@ void test_unsubscribing_from_inside_a_callback_is_well_defined(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Layer 1 — re-entrancy from a Direction::Tx callback
+//
+// docs/API.md §4.2 permits rendering from a FrameCb and §4.3 permits enqueue(),
+// abortPending() and abortAll() from ANY callback. A Direction::Tx FrameCb fires from
+// inside observe(), which txFrame() calls from inside pumpTx() — i.e. while the job that
+// produced the frame is sitting at _queue[0] and the transmit pump still holds a
+// reference to it. Everything that decides whether a job is preemptable keys off
+// TxJob::started, so `started` MUST already be true by the time that callback can run.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct TxReentry {
+  CarminatDisplay* d       = nullptr;
+  int              hits    = 0;
+  uint8_t          aborted = 0xFF;
+  Result           second  = Result::NotSupported;
+};
+TxReentry g_re;
+
+void abortFromTxCallback(const Frame&, void*) {
+  if (++g_re.hits != 1) return;              // only on the very first transmitted frame
+  g_re.aborted = g_re.d->abortPending();
+}
+
+void renderFromTxCallback(const Frame&, void*) {
+  if (++g_re.hits != 1) return;
+  g_re.second = g_re.d->showMenu("XXX", "YYY", "ZZZ");
+}
+
+}  // namespace
+
+void test_abortPending_from_a_tx_callback_spares_the_frame_it_is_watching(void) {
+  Rig r;
+  r.up();
+  g_re = TxReentry{};
+  g_re.d = &r.d;
+
+  ASSERT_RESULT(Ok, r.d.showMenu("ONE", "TWO", "SIX"));   // multi-frame, RenderSlot::Menu
+  const TxTicket menu = r.d.lastEnqueued();
+  ASSERT_RESULT(Ok, r.d.setTime("1234"));                 // queued behind it
+  TEST_ASSERT_EQUAL_UINT8(1, r.d.queued());
+
+  TEST_ASSERT_TRUE(
+      r.d.subscribe(exactId(0x151, Direction::Tx), &abortFromTxCallback, nullptr).valid());
+
+  r.d.poll();   // pumpTx sends the menu's frame 0; the Tx callback fires inside that send
+
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_re.hits, "the Tx callback must have fired");
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(
+      1, g_re.aborted,
+      "only the queued clock render is preemptable — the menu already has a frame on the "
+      "wire and abortPending() must not touch it");
+  TEST_ASSERT_TRUE_MESSAGE(r.d.busy(), "the in-flight menu survives its own Tx callback");
+
+  pumpUntilIdle(r.d);
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(menu, r.d.lastTicket(),
+                                   "and completes, rather than being reported Aborted");
+  ASSERT_RESULT(Ok, r.d.lastResult());
+}
+
+void test_a_render_from_a_tx_callback_cannot_coalesce_into_the_frame_on_the_wire(void) {
+  // Same slot, same funcId, coalescing on. findCoalescable() must skip the started job:
+  // overwriting its payload mid-ISO-TP would send the tail of a DIFFERENT screen at the
+  // offsets the first one already declared.
+  Rig r;
+  r.up();
+  g_re = TxReentry{};
+  g_re.d = &r.d;
+
+  ASSERT_RESULT(Ok, r.d.showMenu("ONE", "TWO", "SIX"));
+  TEST_ASSERT_EQUAL_UINT8(0, r.d.queued());
+
+  TEST_ASSERT_TRUE(
+      r.d.subscribe(exactId(0x151, Direction::Tx), &renderFromTxCallback, nullptr).valid());
+
+  r.d.poll();
+
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_re.hits, "the Tx callback must have fired");
+  ASSERT_RESULT(Ok, g_re.second);
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(
+      1, r.d.queued(),
+      "the second render must QUEUE behind the message on the wire, not replace it");
+}
+
+// ---------------------------------------------------------------------------
 // Layer 0 — the tap
 // ---------------------------------------------------------------------------
 
@@ -548,6 +634,8 @@ int main(int, char**) {
   RUN_TEST(test_a_stale_handle_cannot_unsubscribe_the_slots_next_owner);
   RUN_TEST(test_a_full_table_returns_kNoSub_without_disturbing_the_others);
   RUN_TEST(test_unsubscribing_from_inside_a_callback_is_well_defined);
+  RUN_TEST(test_abortPending_from_a_tx_callback_spares_the_frame_it_is_watching);
+  RUN_TEST(test_a_render_from_a_tx_callback_cannot_coalesce_into_the_frame_on_the_wire);
   RUN_TEST(test_the_tap_sees_both_directions_and_only_one_tap_exists);
   RUN_TEST(test_a_refused_transmission_is_never_observed);
   RUN_TEST(test_sync_registered_and_txcomplete_fire_at_the_right_moment);

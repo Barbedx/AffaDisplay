@@ -487,6 +487,11 @@ ISO 15765-2 first frame. **[CAP]**, corroborated by
 > `(data[0] & 0xF0) == 0x10` and decode the 12-bit length. Transmit side may keep emitting
 > `0x10 <len>` — nothing we build exceeds 255 content bytes — but it must not *parse* that
 > way.
+>
+> **Status: NOT DONE.** `proto/IsoTp.cpp` still matches `f.data[0] == 0x10` exactly, and
+> `docs/API.md`'s `Reassembler` doc-block describes that behaviour — so by the arbiter rule
+> the code is not in breach and this remains an open item, tracked as Appendix B #9. It is
+> RX-side only: no byte this library transmits depends on it.
 
 ---
 
@@ -1904,7 +1909,7 @@ static const affa::Frame kAckError_151 =                       // anything else 
 
 ## Appendix B — deliberate behaviour changes in the library
 
-Everything else in this document is reproduced byte-for-byte. These seven are not:
+Everything else in this document is reproduced byte-for-byte. These nine are not:
 
 1. **Transliteration on every string.** Legacy `setText` (both families) and the
    UpdateList LCD `setText` pass raw bytes through; the library transliterates on all of
@@ -1918,12 +1923,25 @@ Everything else in this document is reproduced byte-for-byte. These seven are no
 5. **The ISO-TP sequence counter wraps.** `0x20 | (num & 0x0F)` instead of `0x20 + num`.
    Byte-identical for every message in the repertoire (all are ≤ 16 frames); correct rather
    than corrupt beyond that, and matching the OEM head unit (§3.3).
-6. **The reassembler accepts 12-bit first-frame lengths** (`(data[0] & 0xF0) == 0x10`), so
-   it no longer silently drops the OEM's `0x1F1` traffic (§3.7). RX-side only; nothing we
-   transmit changes.
-7. **Self-sent frames are dropped before auto-ACK, ACK matching and key decode** (§6.1).
+6. **Self-sent frames are dropped before auto-ACK, ACK matching and key decode** (§6.1).
    On a real controller this changes nothing, because a real controller does not echo. On
    `LoopbackLink` it is the difference between a working test and a lie.
+7. **`showInfoMenu` text is SPACE-padded to 8, not NUL-padded** (§8.10). The extracted
+   builder's `char padded[8] = {' '}` initialises element 0 only and `strncpy` then
+   NUL-pads the rest; the library emits the OEM space form. Only `t6`/`t7` of each row's
+   continuation frame differ, and no capture witnesses a continuation frame either way.
+   Pinned by `test_carminat_wire/test_showInfoPopup_is_three_messages_space_padded`.
+8. **`showInfoMenu`'s default `infoPrefix` is `0x60`, not the legacy `0x70`** (§8.10). The
+   legacy default was never exercised — its only caller, `showInfoPopup`, passed `0x60`
+   explicitly, which is also the OEM capture — so no call path in the extracted code
+   changes. A library caller who relies on the default now gets the OEM byte.
+9. **Not yet done: the reassembler still matches `data[0] == 0x10` exactly.** §3.7 asks for
+   `(data[0] & 0xF0) == 0x10` plus the 12-bit length so the OEM's 302-byte `0x1F1` message
+   (`11 2E ..`) is not silently dropped; `proto/IsoTp.cpp` carries the ported behaviour
+   unchanged, and `docs/API.md`'s `Reassembler` doc-block ("a frame whose `data[0]` is
+   `0x10` starts a fresh message") describes what is implemented. **API.md is the arbiter,
+   so the code is not in breach — this line is the open item.** RX-side only; nothing we
+   transmit is affected either way.
 
 Two further changes are structural rather than behavioural and are called out where they
 occur: the four raw senders now go through the TX state machine (§8.4), which can prepend

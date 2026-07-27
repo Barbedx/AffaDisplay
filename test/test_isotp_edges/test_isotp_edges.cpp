@@ -30,7 +30,7 @@ struct Rig {
     link.inject(affatest::panelSyncRequest());
     d.poll();
     d.setSelfAck(true);
-    d.setPower(true);
+    (void)d.setPower(true);
     pumpUntilIdle(d);
     TEST_ASSERT_TRUE(d.registered());
     drain(link);
@@ -271,6 +271,49 @@ void test_the_reassembler_stops_at_the_ceiling_rather_than_wrapping(void) {
   TEST_ASSERT_EQUAL_UINT8(0, ra.len());
 }
 
+// A 12-bit first frame must open a message. ISO 15765-2 puts the top four bits of FF_DL
+// in the PCI's low nibble, so anything longer than 255 bytes arrives as 0x11..0x1F rather
+// than 0x10. Both of OUR builders are short enough to always emit 0x10, which is why an
+// exact `data[0] == 0x10` test survived — but AFFA_ENABLE_ISOTP_RX exists to decode
+// SOMEBODY ELSE'S traffic, and the OEM head unit's 302-byte 0x1F1 screen opens with
+// `11 2E 21 0B 00 25 41 42`. Against the exact test that first frame was refused, _active
+// stayed false, and all 43 continuations were refused behind it: the message decoded to
+// nothing while the documentation claimed the case was handled.
+void test_a_12_bit_first_frame_opens_a_message(void) {
+  isotp::Reassembler ra;
+  Frame f;
+  f.id  = 0x1F1;
+  f.len = 8;
+
+  // The real OEM first frame, verbatim.
+  const uint8_t ff[8] = {0x11, 0x2E, 0x21, 0x0B, 0x00, 0x25, 0x41, 0x42};
+  for (uint8_t i = 0; i < 8; ++i) f.data[i] = ff[i];
+
+  TEST_ASSERT_TRUE_MESSAGE(ra.onFrame(f), "0x11 must be accepted as a first frame");
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(8, ra.len(), "the PCI byte is payload byte 0");
+  TEST_ASSERT_EQUAL_UINT8(0x11, ra.buffer()[0]);
+
+  // And the continuation behind it is now accepted, which is the half that actually
+  // mattered: refusing the first frame silently discarded the whole 43-frame message.
+  f.data[0] = isoTpCf(1);
+  TEST_ASSERT_TRUE_MESSAGE(ra.onFrame(f), "continuations follow a 12-bit first frame");
+  TEST_ASSERT_EQUAL_UINT8(15, ra.len());
+
+  // The whole 0x11..0x1F range opens a message, not just 0x11.
+  for (uint8_t lo = 0x1; lo <= 0xF; ++lo) {
+    isotp::Reassembler r2;
+    Frame g = f;
+    g.data[0] = static_cast<uint8_t>(0x10 | lo);
+    TEST_ASSERT_TRUE(r2.onFrame(g));
+  }
+
+  // Why widening the test is safe, for the record: a single frame's PCI IS its length,
+  // and every single-frame payload in either family's repertoire is at most 7 bytes, so
+  // payload byte 0 can never land in 0x11..0x1F and be mistaken for a first frame. There
+  // is nothing here to assert — the guarantee is a property of the repertoire, and the
+  // golden vectors in test_carminat_wire and test_updatelist_wire are what pin it.
+}
+
 // ---------------------------------------------------------------------------
 
 void setUp(void) {}
@@ -278,6 +321,7 @@ void tearDown(void) {}
 
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_a_12_bit_first_frame_opens_a_message);
   RUN_TEST(test_113_bytes_is_16_frames_ending_at_PCI_2F);
   RUN_TEST(test_114_bytes_is_refused_with_nothing_on_the_wire);
   RUN_TEST(test_showConfirmBox_at_exactly_113_still_succeeds);

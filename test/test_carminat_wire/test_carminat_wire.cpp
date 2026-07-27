@@ -231,7 +231,7 @@ void test_setText_declares_0x0E_for_20_transmitted_bytes(void) {
   // rendering correctly for months and a length byte is glass, not style.
   Rig r;
   r.up();
-  r.d.setText("HELLO");
+  (void)r.d.setText("HELLO");
   pumpUntilIdle(r.d);
 
   Frame f;
@@ -248,7 +248,7 @@ void test_setText_transliterates_before_the_wire(void) {
   // goes through affa::toAscii at the builder.
   Rig r;
   r.up();
-  r.d.setText("\xC5\x81\xC3\xB3" "d" "\xC5\xBA");   // "Lodz" in Polish
+  (void)r.d.setText("\xC5\x81\xC3\xB3" "d" "\xC5\xBA");   // "Lodz" in Polish
   pumpUntilIdle(r.d);
 
   Frame f0, f1, f2;
@@ -352,7 +352,7 @@ void test_showMenu_matches_the_capture_verbatim_vector(void) {
 void test_showMenu_declares_0x5A_while_building_96_bytes(void) {
   Rig r;
   r.up();
-  r.d.showMenu("Main Menu", "Voltage:0V", "Boost:0mbar", 0x0B);
+  (void)r.d.showMenu("Main Menu", "Voltage:0V", "Boost:0mbar", 0x0B);
   pumpUntilIdle(r.d);
   Frame f;
   TEST_ASSERT_TRUE(r.link.takeSent(f));

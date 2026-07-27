@@ -3,6 +3,7 @@
 #if AFFA_ENABLE_ESP32CAN_LINK
 
 #include <driver/gpio.h>          // gpio_num_t ONLY. Not <esp32_can.h>.
+#include <atomic>
 #include "../core/ICanLink.h"
 #include "../core/AffaRing.h"
 
@@ -67,7 +68,22 @@ class Esp32CanLink final : public ICanLink {
   // Calling this twice is a live driver reinstall plus a queue leak plus a wipe of all
   // 32 filter slots, so a second call on an already-begun instance returns false and
   // logs, and a second instance cannot steal the callback.
-  bool begin(CanPins pins, uint32_t bitrate = 500000);
+  // forceRecoveryMs: 0 (the default) leaves the driver's bus-off policy exactly as it
+  // ships — its watchdog calls twai_initiate_recovery(), which ends in TWAI_STATE_STOPPED
+  // with nothing to restart it, and isLive() then reports the link as down. That is the
+  // honest default: whether to bring a shared bus back up by itself is the APPLICATION's
+  // decision, not a library's.
+  //
+  // Non-zero arms the driver's own supported path — CAN0.setForceRecovery(true, ms),
+  // called BEFORE CAN0.begin(), which the prohibition above explicitly permits — so that
+  // on bus-off its watchdog performs a full uninstall/delay/reinstall and ends with a
+  // RUNNING controller. Unlike twai_initiate_recovery() this needs no bus traffic, which
+  // matters on a two-node bus: once our node stops ACKing, the panel's own transmissions
+  // start failing and it goes quiet too, and then nothing generates the recessive bits
+  // that standard recovery waits for. Both nodes sit there. Ask for 2000 on a bench.
+  //
+  // Cost: the bus is dead for that long, and forceDriverRestart() printf()s twice.
+  bool begin(CanPins pins, uint32_t bitrate = 500000, uint32_t forceRecoveryMs = 0);
 
   bool  send(const Frame& f) override;   // never blocks longer than the driver's ~4 ms
                                          // worst case; false if the TX gate is shut
@@ -92,7 +108,16 @@ class Esp32CanLink final : public ICanLink {
   void ingest(const Frame& f);
 
   AffaRing<Frame, AFFA_RX_RING_DEPTH> _rx;
-  Stats _stats{};
+
+  // The ONLY counter task_CAN touches, and therefore the only one that may not live in
+  // the plain Stats struct: stats() copies that struct field by field from the poll()
+  // task, which is a data race against a `++` on another core. Relaxed is enough — it is
+  // a diagnostic, nothing orders anything against it, and on both Xtensa and RISC-V it
+  // compiles to the same aligned word load/store a plain uint32_t would. It is folded
+  // into Stats::rxFrames by stats(), so the public shape is unchanged.
+  std::atomic<uint32_t> _rxFrames{0};
+
+  Stats _stats{};                 // poll()-task only
   bool  _began = false;
   bool  _txEnabled = true;
 };

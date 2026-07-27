@@ -147,7 +147,12 @@ UpdateList panel used to return `NoError` while putting nothing on the wire; the
 
 - [ ] no `delay()`, `vTaskDelay()` or busy-wait anywhere in code reachable from `loop()`
 - [ ] exactly one task calls `poll()`; every other context posts to a mailbox
-- [ ] every render call's `Result` is inspected, or deliberately discarded with a comment
+- [ ] every render call's `Result` is inspected, or deliberately discarded with a comment.
+      The compiler now checks this half for you: every `Result`-returning call is
+      `[[nodiscard]]`, so an ignored one is a `-Wunused-result` warning. Write
+      `(void)display.setText(...)` when you mean it.
+- [ ] at least one `-D AFFA_PANEL_*=1` is in `build_flags`. Naming none is an `#error`, and
+      that `#error` is also what a mis-typed panel flag looks like
 - [ ] `onComplete()` is registered if delivery matters
 - [ ] `supports()` is consulted before any optional render
 - [ ] no capture-lambdas passed as callbacks; state lives behind `ctx`
@@ -248,4 +253,4 @@ Not a sales pitch — a list of things that are easy to not notice you were gett
 * a wall-clock sync watchdog rather than a call counter (the original defect);
 * self-frame suppression at all three points that need it — auto-ACK, ACK matching, key
   decode — which is what makes a loopback test behave like hardware;
-* 138 host tests that run in ten seconds with no hardware, including the two panel twins.
+* 140 host tests that run in ten seconds with no hardware, including the two panel twins.

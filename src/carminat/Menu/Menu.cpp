@@ -186,7 +186,7 @@ void Menu::open() {
   }
   _open = true;
   AFFA_LOGI(kTag, "menu opened at item %u", static_cast<unsigned>(_selectedIndex));
-  render();
+  (void)render();
 }
 
 // Clearing `editing` here is a DELIBERATE behaviour change. The extracted code closed on
@@ -211,9 +211,9 @@ void Menu::selectNext() {
   if (_selectedRow == 0) {
     // The selection moved INSIDE the visible window: one frame, not a screen.
     _selectedRow = 1;
-    highlight();
+    (void)highlight();
   } else {
-    render();                                                       // the window scrolls
+    (void)render();                                                 // the window scrolls
   }
 }
 
@@ -222,9 +222,9 @@ void Menu::selectPrev() {
   --_selectedIndex;
   if (_selectedRow == 1) {
     _selectedRow = 0;
-    highlight();
+    (void)highlight();
   } else {
-    render();
+    (void)render();
   }
 }
 
@@ -234,7 +234,7 @@ void Menu::enterEdit() {
   if (_items[_selectedIndex].fieldCount == 0) return;
   _editingField = 0;
   _editing      = true;
-  render();
+  (void)render();
 }
 
 // field 0 -> 1 -> 2 -> leave. The last field exits edit mode; it does not wrap.
@@ -242,12 +242,12 @@ void Menu::nextFieldOrExit() {
   const MenuItem& it = _items[_selectedIndex];
   if (static_cast<uint8_t>(_editingField + 1) < it.fieldCount) {
     ++_editingField;
-    render();
+    (void)render();
     return;
   }
   _editing      = false;
   _editingField = 0;
-  render();
+  (void)render();
 }
 
 void Menu::editField(int32_t delta, bool hold) {
@@ -280,7 +280,7 @@ void Menu::editField(int32_t delta, bool hold) {
   f.value = nv;
 
   if (it.onChange) it.onChange(it, _editingField, it.ctx);
-  render();
+  (void)render();
 }
 
 bool Menu::setFieldValue(uint8_t itemIndex, uint8_t fieldIndex, int32_t value) {
@@ -294,7 +294,7 @@ bool Menu::setFieldValue(uint8_t itemIndex, uint8_t fieldIndex, int32_t value) {
   if (_open) {
     const uint8_t top = (_selectedRow == 0) ? _selectedIndex
                                             : static_cast<uint8_t>(_selectedIndex - 1);
-    if (itemIndex == top || itemIndex == static_cast<uint8_t>(top + 1)) render();
+    if (itemIndex == top || itemIndex == static_cast<uint8_t>(top + 1)) (void)render();
   }
   return true;
 }

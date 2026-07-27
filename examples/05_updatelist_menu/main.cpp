@@ -64,7 +64,7 @@ void draw() {
 
   if (std::strlen(line) <= affa::updatelist::kScrollWidth) {
     g_display.setScrollText(nullptr);   // marquee off: transmits NOTHING, so the static
-    g_display.setText(line);            // render below owns the screen
+    (void)g_display.setText(line);            // render below owns the screen
   } else {
     g_display.setScrollText(line);      // new content -> redraws from position 0
     g_display.setScrollActive(true);
@@ -130,7 +130,7 @@ void setup() {
 
   g_display.onKey(&onKey, nullptr);
   g_display.begin();
-  g_display.setPower(true);
+  (void)g_display.setPower(true);
   draw();
 }
 

@@ -79,7 +79,7 @@ struct Rig {
     link.inject(affatest::panelSyncRequest());
     d.poll();
     d.setSelfAck(true);
-    d.setPower(true);                       // latch FUNCSREG out of the way
+    (void)d.setPower(true);                       // latch FUNCSREG out of the way
     pumpUntilIdle(d);
     TEST_ASSERT_TRUE(d.registered());
     drain(link);

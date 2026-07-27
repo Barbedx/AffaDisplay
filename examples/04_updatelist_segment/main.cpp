@@ -50,7 +50,7 @@ void drawClock() {
            static_cast<unsigned long>(s / 3600),
            static_cast<unsigned long>((s / 60) % 60),
            static_cast<unsigned long>(s % 60));
-  g_display.setText(buf);        // RenderSlot::Text — a re-render supersedes a queued one
+  (void)g_display.setText(buf);        // RenderSlot::Text — a re-render supersedes a queued one
 }
 
 void onSync(affa::SyncState s, void*) {
@@ -81,7 +81,7 @@ void setup() {
   g_display.onSync(&onSync, nullptr);
   g_display.onKey(&onKey, nullptr);
   g_display.begin();
-  g_display.setPower(true);            // 04 52 02 FF FF on 0x1B1, padded with 0x81
+  (void)g_display.setPower(true);            // 04 52 02 FF FF on 0x1B1, padded with 0x81
 
   // Hold-Load toggles AMS key forwarding and draws its own banner — the OEM gesture,
   // shipped ON as a replaceable default. Left alone here so the banner is visible; 05

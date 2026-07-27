@@ -75,12 +75,12 @@ class PinEntry {
     _nextMs = _c.millis() + kSpacingMs;
 
     if (_detent < kCode[_digit]) {                              // one wheel detent
-      _d.pressKey(affa::Key::RollUp, affa::KeyEdge::Click, affa::KeySource::Wire);
+      (void)_d.pressKey(affa::Key::RollUp, affa::KeyEdge::Click, affa::KeySource::Wire);
       ++_detent;
       return;
     }
     const bool last = (_digit + 1u == sizeof kCode);             // the final Load is a HOLD
-    _d.pressKey(affa::Key::Load, last ? affa::KeyEdge::Hold : affa::KeyEdge::Click,
+    (void)_d.pressKey(affa::Key::Load, last ? affa::KeyEdge::Hold : affa::KeyEdge::Click,
                 affa::KeySource::Wire);
     _detent = 0;
     if (last) { _done = true; Serial.println("[mitm] sequence complete"); return; }
@@ -127,7 +127,7 @@ void onKey(affa::Key k, affa::KeyEdge e, void*) {
     const uint32_t now = ::millis();
     if (now - g_lastLoadMs < 400) {
       Serial.println("[app ] double-click -> nav(Open)");
-      g_display.nav(affa::NavCommand::Open);     // from the task that owns poll()
+      (void)g_display.nav(affa::NavCommand::Open);     // from the task that owns poll()
     }
     g_lastLoadMs = now;
     return;

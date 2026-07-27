@@ -573,9 +573,20 @@ void AffaDisplayBase::pumpTx() {
   const uint8_t filler = packetFiller();
   while (i < kPacketLength) f.data[i++] = filler;
 
+  // MARK IT STARTED BEFORE THE SEND, NOT AFTER. txFrame() calls observe(), which runs the
+  // frame tap and every Direction::Tx subscription — application code, which docs/API.md
+  // §4.2/§4.3 explicitly permit to call enqueue(), any render, abortPending() and
+  // abortAll(). Every one of those decisions keys off TxJob::started, so with the flag set
+  // afterwards a Tx callback saw this job as preemptable while its first frame was already
+  // on the wire: abortPending() dropped it and `job` then pointed at the job that shifted
+  // into its place, a coalescing render overwrote its payload mid-ISO-TP with j.sent
+  // already past zero, and an Urgent enqueue spliced itself in at index 0 and inherited
+  // the WaitAck. Set first, and the send failure path below clears it again via
+  // finishJob().
+  job.started = true;         // from here this job is no longer preemptable
+
   if (!txFrame(f)) { finishJob(Result::SendFailed); return; }
 
-  job.started    = true;      // from here this job is no longer preemptable
   _ackDeadlineMs = now + AFFA_ACK_TIMEOUT_MS;
   _tx            = TxState::WaitAck;
 

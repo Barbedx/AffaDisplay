@@ -6,7 +6,7 @@
 **[English](#english) · [Українська](#українська)**
 
 MIT · ESP32 / ESP32-C3 · Arduino + PlatformIO · no heap after `begin()` · no `delay()` anywhere ·
-138 host tests, no hardware required
+140 host tests, no hardware required
 
 ---
 
@@ -212,6 +212,7 @@ defaults.
 | `AFFA_PANEL_CARMINAT` | `0`¹ | Carminat / AFFA3 panel |
 | `AFFA_PANEL_UPDATELIST` | `0`¹ | UpdateList 8-segment panel |
 | `AFFA_PANEL_UPDATELIST_MENU` | `0`¹ | UpdateList mono-LCD variant (implies the line above) |
+| `AFFA_PANEL_DEFAULT_ALL` | `0`¹ | opt in to "compile all three panels". Only for a first look and for the footprint reference builds. |
 | `AFFA_ENABLE_MENU` | `1` | `Menu`, `MenuController`, `IPage`, `nav()`, `getMenu()`. The largest optional block. |
 | `AFFA_ENABLE_POPUP` | `1` | `showPopupText` / `hidePopup` |
 | `AFFA_ENABLE_FULLSCREEN` | `1` | `showFullscreenText` / `hideFullscreenText` |
@@ -224,10 +225,6 @@ defaults.
 | `AFFA_ENABLE_ESP32CAN_LINK` | `1` on Arduino, `0` on host | `Esp32CanLink` and the `<esp32_can.h>` dependency |
 | `AFFA_ENABLE_VIRTUAL_PANEL` | `0` on target, `1` on host | the panel twins (`vpanel/`). The most expensive optional block. |
 | `AFFA_ENABLE_ISOTP_RX` | follows `VIRTUAL_PANEL` | the reassembler + screen decoder alone, without the twins |
-| `AFFA_ENABLE_TASK` | `0` | an owned FreeRTOS task that calls `poll()`. **Never combine with calling `poll()` yourself.** |
-| `AFFA_TASK_PERIOD_MS` | `5` | that task's period; larger increases key latency and RX-ring pressure |
-| `AFFA_TASK_STACK` | `3072` | peak is a render call: 96-byte payload plus scratch |
-| `AFFA_TASK_PRIO` | `5` | **must stay below `task_CAN`'s 15** or the RX ring starves |
 | `AFFA_TX_COALESCE` | `1` | latest-value-wins per `RenderSlot`. 0 reproduces the "panel keeps counting after Pause" defect. |
 | `AFFA_TX_QUEUE_DEPTH` | `6` | queue slots, `~AFFA_MAX_PAYLOAD + 12` B each. 6 and not 4 because `showInfoPopup` is three messages and the first call after a resync also carries two registration probes. |
 | `AFFA_MAX_PAYLOAD` | `113` | **a wire limit, not a budget**: `8 + 15×7 = 113`, the point at which the ISO-TP counter would wrap. Below 96 the Carminat menu returns `TooLong`. |
@@ -241,8 +238,17 @@ defaults.
 | `AFFA_MENU_ROW_MAX` | `32` | rendered row buffer |
 | `AFFA_TEXT_MAX` | `64` | text/marquee buffer |
 
-¹ All three panel flags default to `0` on target — you select what you build. On the host
-test build all three are `1`.
+¹ **Naming no panel is a compile error, not a default.** All three panel flags default to
+`0`, and `AffaConfig.h` `#error`s when every one of them is `0` — which is also the state a
+misspelled `-D AFFA_PANEL_CARMINET=1` leaves behind, and the only way that typo can be
+caught (`-Wundef` cannot see it: the misspelled macro *is* defined, merely never read). If
+you really want all three, say `-D AFFA_PANEL_DEFAULT_ALL=1`; `size_all` is the one
+environment in this repository that does. The host test build names all three explicitly.
+
+**Every `Result`-returning call is `[[nodiscard]]`.** A render whose `Result` you drop is a
+screen that silently never appears — `NoSync`, `QueueFull`, `TooLong` and `NotSupported` all
+look identical to success from the call site. Ignore one deliberately and say so:
+`(void)display.setText("RENAULT", 0);`.
 
 ### Footprint
 
@@ -252,18 +258,18 @@ is **218 912 B** flash / **13 476 B** RAM.
 
 | Build | Flash | Δ vs empty sketch | RAM | Δ vs empty sketch |
 | --- | ---: | ---: | ---: | ---: |
-| `size_all` — every panel gate on | 265 706 B | +46 794 B | 16 372 B | +2 896 B |
-| `size_carminat` — Carminat only | 265 706 B | +46 794 B | 16 372 B | +2 896 B |
-| `size_min` — Carminat, no menu/popup/fullscreen/confirm/info, no transliteration, no log, no subscriptions | 264 176 B | +45 264 B | 16 044 B | +2 568 B |
+| `size_all` — every panel gate on (`AFFA_PANEL_DEFAULT_ALL=1`) | 265 720 B | +46 808 B | 16 380 B | +2 904 B |
+| `size_carminat` — Carminat only | 265 720 B | +46 808 B | 16 380 B | +2 904 B |
+| `size_min` — Carminat, no menu/popup/fullscreen/confirm/info, no transliteration, no log, no subscriptions | 264 186 B | +45 274 B | 16 052 B | +2 576 B |
 | `ex07_virtual_panel_c3` — Carminat **plus the twin** (`proto/` + `vpanel/`) | 284 140 B | +65 228 B | 25 980 B | +12 504 B |
 
 Read those numbers with three corrections, or they will mislead you:
 
 1. **Most of the delta is the CAN driver, not this library.** A bare sketch that only links
    `esp32_can` + `can_common`, opens `Serial` and calls `CAN0.begin(500000)` — no
-   AffaDisplay at all — is **258 806 B / 14 564 B** on the same toolchain. Against *that*
-   floor the library costs **+6 900 B flash / +1 808 B RAM** fully enabled, **+5 370 B /
-   +1 480 B** minimal, and **+25 334 B / +11 416 B** with the twin compiled in and used.
+   AffaDisplay at all — is **257 724 B / 14 564 B** on the same toolchain. Against *that*
+   floor the library costs **+7 996 B flash / +1 816 B RAM** fully enabled, **+6 462 B /
+   +1 488 B** minimal, and **+26 416 B / +11 416 B** with the twin compiled in and used.
    That is the number to quote.
 2. **`size_all` and `size_carminat` are byte-identical, and that is the result, not a
    defect.** Both build `examples/01_link_check`, which instantiates its own minimal
@@ -284,20 +290,58 @@ Per-example, same board and core, all from real `pio run` output:
 
 | Env | What it exercises | Flash | RAM |
 | --- | --- | ---: | ---: |
-| `ex01_link_check` | core only, log level 4 | 265 714 B | 16 372 B |
-| `ex02_carminat_text` | Carminat, no menu | 271 194 B | 16 324 B |
-| `ex03_carminat_menu` | Carminat + `Menu` + pages | 274 160 B | 17 892 B |
-| `ex04_updatelist_segment` | UpdateList 8-segment + marquee | 270 446 B | 16 444 B |
-| `ex05_updatelist_menu` | UpdateList LCD variant | 270 464 B | 16 484 B |
-| `ex06_counter_preempt` | Carminat, tap + preemption | 271 038 B | 16 348 B |
+| `ex01_link_check` | core only, log level 4 | 265 728 B | 16 380 B |
+| `ex02_carminat_text` | Carminat, no menu | 271 208 B | 16 332 B |
+| `ex03_carminat_menu` | Carminat + `Menu` + pages | 274 174 B | 17 900 B |
+| `ex04_updatelist_segment` | UpdateList 8-segment + marquee | 270 460 B | 16 452 B |
+| `ex05_updatelist_menu` | UpdateList LCD variant | 270 474 B | 16 492 B |
+| `ex06_counter_preempt` | Carminat, tap + preemption | 271 040 B | 16 348 B |
 | `ex07_virtual_panel_c3` | Carminat + `proto/` + `vpanel/` | 284 140 B | 25 980 B |
-| `ex08_radio_mitm` | Carminat + menu + subscriptions | 274 188 B | 17 748 B |
-| `ex90_bench_ota` | web console + WiFi + ElegantOTA + twin | 898 242 B | 71 124 B |
+| `ex08_radio_mitm` | Carminat + menu + subscriptions | 274 202 B | 17 756 B |
+| `ex90_bench_ota` | web console + WiFi + ElegantOTA + twin | 898 244 B | 71 124 B |
 
 A panel plus its rendering is ~5.5 kB over the bare core; `Menu` adds ~3 kB flash and
 ~1.6 kB RAM (turn `AFFA_MENU_MAX_ITEMS` / `AFFA_MENU_MAX_FIELDS` down if that matters); the
 twins are ~13 kB flash and ~9.6 kB RAM and are the reason they are off on target.
 `ex90_bench_ota` is dominated by WiFi and the HTTP server and uses a 1.4 MB OTA partition.
+
+#### What each gate is actually worth
+
+The tables above measure *examples*, so a gate whose code the example never names is worth
+zero there by construction. To measure the gates themselves, one probe build instantiates
+**all three panels and calls every optional render**, so `--gc-sections` cannot remove a
+feature the gate was supposed to remove. Reference build: **278 936 B flash / 21 588 B RAM**.
+Every row below is one flag flipped against that build, on the same board and core. The
+harness is `platformio_footprint.ini` + `tools/footprint/gate_probe` — run
+`pio run -c platformio_footprint.ini` to reproduce every number here, including the two
+baselines above and the two `#error` guards, which are environments expected to *fail*.
+
+| Flag | Flash | RAM | Symbol evidence in `firmware.elf` |
+| --- | ---: | ---: | --- |
+| `AFFA_ENABLE_ESP32CAN_LINK=0` | **−12 218 B** | −1 400 B | `Esp32CanLink::begin` and all 28 `CAN0`/driver symbols gone; the env drops `lib_deps` entirely and still links |
+| `AFFA_PANEL_CARMINAT=0` | −5 536 B | −2 752 B | every `CarminatDisplay::*` and `affa::Menu::*` symbol gone |
+| `AFFA_ENABLE_MENU=0` | −3 266 B | −1 584 B | `Menu::handleKey`, `MenuController::*` gone |
+| `AFFA_PANEL_UPDATELIST=0` (with `_MENU=0`) | −2 550 B | −2 592 B | every `UpdateList*` symbol gone |
+| `AFFA_ENABLE_TRANSLITERATION=0` | −2 130 B | 0 | `affa::toAscii` gone (inlined bounded copy replaces it) |
+| `AFFA_ENABLE_LOG=0` | −1 696 B | −8 B | `affa::detail::emit` gone, and with it every format string |
+| `AFFA_MAX_SUBSCRIPTIONS=0` | −454 B | −960 B | `subscribe()` collapses from 0x9E to 4 bytes; the `Sub` table is gone |
+| `AFFA_PANEL_UPDATELIST_MENU=0` | −386 B | −1 296 B | `UpdateListMenuDisplay::setText` gone |
+| `AFFA_ENABLE_FULLSCREEN=0` | −310 B | 0 | `showFullscreenText` collapses from 0xCE to **4 bytes** |
+| `AFFA_ENABLE_CONFIRMBOX=0` | −276 B | 0 | `showConfirmBox` 0xEC → 4 bytes |
+| `AFFA_ENABLE_INFOPOPUP=0` | −276 B | 0 | `showInfoMenu` 0x52 + 0xAE lambda → 4 bytes |
+| `AFFA_ENABLE_POPUP=0` | −232 B | 0 | `showPopupText` 0xC8 → 4 bytes |
+| `AFFA_ENABLE_AUX_TRACKER=1` (default is 0) | **+852 B** | +32 B | `AuxModeTracker::*` appears |
+| `AFFA_ENABLE_VIRTUAL_PANEL=1` (default is 0 on target) | **+2 774 B** | +312 B | `VirtualPanelBase::*`, `isotp::Reassembler::onFrame`, `screen::menu/infoRow/windowText` appear |
+
+Two honest readings of that table:
+
+* **The four screen gates are worth 232–310 B each, not kilobytes.** The gate replaces the
+  builder with a four-byte `return NotSupported`, which is exactly what it promises and not
+  much money. Turn them off for correctness (a panel that cannot do it should say so), not
+  for space.
+* **`AFFA_ENABLE_ISOTP_RX=1` on its own measures +10 B**, i.e. nothing, because no shipped
+  code path calls the reassembler yet — see the `Feature::RadioText` caveat above. It only
+  costs anything once something references it, which today means the twins.
 
 ### Threading and the non blocking contract
 
@@ -324,9 +368,15 @@ twins are ~13 kB flash and ~9.6 kB RAM and are the reason they are off on target
 * `poll()` is **frequency-independent**: calling it once per second and a million times per
   second produce the same frames in the same order with the same timing. There is no minimum
   rate for correctness — only for latency and for keeping `Stats::ringOverflow` at zero.
-* If you would rather not own the loop, `AFFA_ENABLE_TASK=1` gives the library its own
-  FreeRTOS task. Doing that *and* calling `poll()` yourself is two drivers on one unlocked
-  object; pick one.
+* **The library owns no task, and there is no flag that gives it one.** There is no
+  `vTaskCreate` anywhere in `src/`, and there will not be one while "no `vTaskDelay` in
+  `src/`" is the contract above. Own the loop yourself. (An `AFFA_ENABLE_TASK` knob was
+  documented in earlier revisions and implemented by nothing; setting it now `#error`s
+  rather than silently producing a library that never polls.)
+* The one exception to "nothing here waits" is opt-in and visible in its name:
+  `sendBlocking(ticket, timeoutMs)` spins on `poll()` until that ticket completes. It cannot
+  deadlock — it is itself pumping the thing it waits for — but it is a busy loop, and it is
+  for examples and setup code, not for `loop()`.
 
 ### Latency and preemption
 
@@ -407,7 +457,7 @@ commands is **[`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HA
 
 1. **Laptop only — no board at all.**
    ```
-   pio test -e native            # 138 cases, ~10 s
+   pio test -e native            # 140 cases, ~10 s
    pio run -e ex07_virtual_panel -t exec
    ```
    The whole library runs on the host against a **twin**: a model of the panel that
@@ -458,8 +508,8 @@ peripheral happens.
 ### Documents and tests
 
 ```
-pio test -e native      # 138 host test cases across 11 suites, no hardware
-pio run                 # every environment: the host build plus 12 ESP32-C3 targets
+pio test -e native      # 140 host test cases across 11 suites, no hardware
+pio run                 # all 14: two host environments plus 12 ESP32-C3 targets
 ```
 
 | Document | What it is |
@@ -473,8 +523,10 @@ pio run                 # every environment: the host build plus 12 ESP32-C3 tar
 
 `core/`, `util/`, `link/LoopbackLink.h`, `proto/` and `vpanel/` must all compile for
 `platform = native` with nothing but the C++17 standard library. If a change breaks that
-build, the change is wrong, not the test. `<esp32_can.h>` appears exactly once in the whole
-repository, in `src/link/Esp32CanLink.cpp`.
+build, the change is wrong, not the test. **`<esp32_can.h>` appears exactly once in the
+library**, in `src/link/Esp32CanLink.cpp` — the only other occurrence in the repository is
+`tools/footprint/baseline_can`, a two-line sketch that links the driver *without*
+AffaDisplay to establish the footprint floor.
 
 Licence: **MIT**, see [`LICENSE`](LICENSE).
 
@@ -681,6 +733,7 @@ ACK id завжди **обчислюється** як `funcId | 0x400`, і ні�
 | `AFFA_PANEL_CARMINAT` | `0`¹ | панель Carminat / AFFA3 |
 | `AFFA_PANEL_UPDATELIST` | `0`¹ | восьмисегментна UpdateList |
 | `AFFA_PANEL_UPDATELIST_MENU` | `0`¹ | моно-LCD різновид UpdateList (вмикає рядок вище) |
+| `AFFA_PANEL_DEFAULT_ALL` | `0`¹ | явна згода «зібрати всі три панелі». Лише для першого знайомства і для довідкових збірок обсягу. |
 | `AFFA_ENABLE_MENU` | `1` | `Menu`, `MenuController`, `IPage`, `nav()`, `getMenu()`. Найбільший опціональний блок. |
 | `AFFA_ENABLE_POPUP` | `1` | `showPopupText` / `hidePopup` |
 | `AFFA_ENABLE_FULLSCREEN` | `1` | `showFullscreenText` / `hideFullscreenText` |
@@ -693,10 +746,6 @@ ACK id завжди **обчислюється** як `funcId | 0x400`, і ні�
 | `AFFA_ENABLE_ESP32CAN_LINK` | `1` на Arduino, `0` на хості | `Esp32CanLink` і залежність `<esp32_can.h>` |
 | `AFFA_ENABLE_VIRTUAL_PANEL` | `0` на платі, `1` на хості | twin-и панелей (`vpanel/`). Найдорожчий опціональний блок. |
 | `AFFA_ENABLE_ISOTP_RX` | як `VIRTUAL_PANEL` | лише збирач ISO-TP і декодер екрана, без twin-ів |
-| `AFFA_ENABLE_TASK` | `0` | власна задача FreeRTOS, яка викликає `poll()`. **Ніколи не поєднуйте з власним викликом `poll()`.** |
-| `AFFA_TASK_PERIOD_MS` | `5` | період тієї задачі; більший збільшує затримку кнопки і тиск на RX-кільце |
-| `AFFA_TASK_STACK` | `3072` | пік — це виклик рендера: 96 байтів payload плюс робочі дані |
-| `AFFA_TASK_PRIO` | `5` | **має лишатися нижчим за 15 у `task_CAN`**, інакше RX-кільце голодує |
 | `AFFA_TX_COALESCE` | `1` | «перемагає найновіше» в межах `RenderSlot`. 0 відтворює дефект «панель рахує далі після Pause». |
 | `AFFA_TX_QUEUE_DEPTH` | `6` | слоти черги, приблизно `AFFA_MAX_PAYLOAD + 12` Б кожен. 6, а не 4, бо `showInfoPopup` — це три повідомлення, а перший виклик після ресинку тягне ще два зонди реєстрації. |
 | `AFFA_MAX_PAYLOAD` | `113` | **межа протоколу, а не бюджет**: `8 + 15×7 = 113`, далі лічильник ISO-TP переповнюється. Нижче 96 меню Carminat повертає `TooLong`. |
@@ -710,8 +759,18 @@ ACK id завжди **обчислюється** як `funcId | 0x400`, і ні�
 | `AFFA_MENU_ROW_MAX` | `32` | буфер відрендереного рядка |
 | `AFFA_TEXT_MAX` | `64` | буфер тексту і біжучого рядка |
 
-¹ Усі три прапорці панелей типово `0` на цільовій платі — ви самі обираєте, що збирати. У
-хостовому тестовому білді всі три дорівнюють `1`.
+¹ **Не назвати жодної панелі — це помилка компіляції, а не значення за замовчуванням.** Усі
+три прапорці типово `0`, і `AffaConfig.h` видає `#error`, коли всі три дорівнюють `0` — а це
+рівно той стан, який лишає по собі помилка в написанні `-D AFFA_PANEL_CARMINET=1`, і єдиний
+спосіб її упіймати (`-Wundef` тут безсилий: помилково названий макрос *визначено*, просто
+його ніхто не читає). Якщо вам справді потрібні всі три — пишіть
+`-D AFFA_PANEL_DEFAULT_ALL=1`; у цьому репозиторії так робить лише `size_all`. Хостовий
+тестовий білд називає всі три явно.
+
+**Кожен виклик, що повертає `Result`, позначено `[[nodiscard]]`.** Рендер, чий `Result` ви
+відкинули, — це екран, який тихо не з'явився: `NoSync`, `QueueFull`, `TooLong` і
+`NotSupported` з місця виклику виглядають так само, як успіх. Якщо ігноруєте свідомо —
+скажіть це: `(void)display.setText("RENAULT", 0);`.
 
 ### Обсяг прошивки
 
@@ -721,18 +780,18 @@ ESP32-C3 (`board = esp32-c3-devkitm-1`, ядро Arduino 2.0.17), release, пр�
 
 | Збірка | Флеш | Δ до порожнього скетча | RAM | Δ до порожнього скетча |
 | --- | ---: | ---: | ---: | ---: |
-| `size_all` — усі панелі увімкнені | 265 706 Б | +46 794 Б | 16 372 Б | +2 896 Б |
-| `size_carminat` — лише Carminat | 265 706 Б | +46 794 Б | 16 372 Б | +2 896 Б |
-| `size_min` — Carminat без меню/popup/fullscreen/confirm/info, без транслітерації, без логу і підписок | 264 176 Б | +45 264 Б | 16 044 Б | +2 568 Б |
+| `size_all` — усі панелі увімкнені (`AFFA_PANEL_DEFAULT_ALL=1`) | 265 720 Б | +46 808 Б | 16 380 Б | +2 904 Б |
+| `size_carminat` — лише Carminat | 265 720 Б | +46 808 Б | 16 380 Б | +2 904 Б |
+| `size_min` — Carminat без меню/popup/fullscreen/confirm/info, без транслітерації, без логу і підписок | 264 186 Б | +45 274 Б | 16 052 Б | +2 576 Б |
 | `ex07_virtual_panel_c3` — Carminat **плюс twin** (`proto/` + `vpanel/`) | 284 140 Б | +65 228 Б | 25 980 Б | +12 504 Б |
 
 Ці числа треба читати з трьома поправками, інакше вони введуть в оману:
 
 1. **Більшість дельти — це драйвер CAN, а не ця бібліотека.** Голий скетч, який лише лінкує
    `esp32_can` + `can_common`, відкриває `Serial` і викликає `CAN0.begin(500000)` — узагалі
-   без AffaDisplay — важить **258 806 Б / 14 564 Б** на тому самому тулчейні. Відносно
-   *цієї* підлоги бібліотека коштує **+6 900 Б флеш / +1 808 Б RAM** у повній комплектації,
-   **+5 370 Б / +1 480 Б** у мінімальній і **+25 334 Б / +11 416 Б** із twin-ом, який
+   без AffaDisplay — важить **257 724 Б / 14 564 Б** на тому самому тулчейні. Відносно
+   *цієї* підлоги бібліотека коштує **+7 996 Б флеш / +1 816 Б RAM** у повній комплектації,
+   **+6 462 Б / +1 488 Б** у мінімальній і **+26 416 Б / +11 416 Б** із twin-ом, який
    реально використовується. Саме ці числа варто цитувати.
 2. **`size_all` і `size_carminat` байт у байт однакові — і це результат, а не дефект.** Обидві
    збирають `examples/01_link_check`, який створює власний мінімальний нащадок
@@ -752,20 +811,58 @@ ESP32-C3 (`board = esp32-c3-devkitm-1`, ядро Arduino 2.0.17), release, пр�
 
 | Env | Що задіює | Флеш | RAM |
 | --- | --- | ---: | ---: |
-| `ex01_link_check` | лише ядро, рівень логу 4 | 265 714 Б | 16 372 Б |
-| `ex02_carminat_text` | Carminat без меню | 271 194 Б | 16 324 Б |
-| `ex03_carminat_menu` | Carminat + `Menu` + сторінки | 274 160 Б | 17 892 Б |
-| `ex04_updatelist_segment` | UpdateList 8 сегментів + біжучий рядок | 270 446 Б | 16 444 Б |
-| `ex05_updatelist_menu` | різновид UpdateList LCD | 270 464 Б | 16 484 Б |
-| `ex06_counter_preempt` | Carminat, tap і витіснення | 271 038 Б | 16 348 Б |
+| `ex01_link_check` | лише ядро, рівень логу 4 | 265 728 Б | 16 380 Б |
+| `ex02_carminat_text` | Carminat без меню | 271 208 Б | 16 332 Б |
+| `ex03_carminat_menu` | Carminat + `Menu` + сторінки | 274 174 Б | 17 900 Б |
+| `ex04_updatelist_segment` | UpdateList 8 сегментів + біжучий рядок | 270 460 Б | 16 452 Б |
+| `ex05_updatelist_menu` | різновид UpdateList LCD | 270 474 Б | 16 492 Б |
+| `ex06_counter_preempt` | Carminat, tap і витіснення | 271 040 Б | 16 348 Б |
 | `ex07_virtual_panel_c3` | Carminat + `proto/` + `vpanel/` | 284 140 Б | 25 980 Б |
-| `ex08_radio_mitm` | Carminat + меню + підписки | 274 188 Б | 17 748 Б |
-| `ex90_bench_ota` | вебконсоль + WiFi + ElegantOTA + twin | 898 242 Б | 71 124 Б |
+| `ex08_radio_mitm` | Carminat + меню + підписки | 274 202 Б | 17 756 Б |
+| `ex90_bench_ota` | вебконсоль + WiFi + ElegantOTA + twin | 898 244 Б | 71 124 Б |
 
 Панель разом із рендером — це ~5.5 кБ понад голе ядро; `Menu` додає ~3 кБ флеш і ~1.6 кБ RAM
 (зменшіть `AFFA_MENU_MAX_ITEMS` / `AFFA_MENU_MAX_FIELDS`, якщо це критично); twin-и — ~13 кБ
 флеш і ~9.6 кБ RAM, і саме тому їх вимкнено на цільовій платі. `ex90_bench_ota` визначається
 переважно WiFi і HTTP-сервером і використовує розділ OTA на 1.4 МБ.
+
+#### Скільки насправді коштує кожен перемикач
+
+Таблиці вище міряють *приклади*, тому перемикач, чий код приклад ніколи не називає, там
+коштує нуль за побудовою. Щоб виміряти самі перемикачі, окрема пробна збірка створює **усі
+три панелі й викликає кожен опціональний рендер**, аби `--gc-sections` не могла викинути те,
+що мав викинути перемикач. Опорна збірка: **278 936 Б флеш / 21 588 Б RAM**. Кожен рядок —
+це один прапорець, перемкнутий відносно неї, на тій самій платі і тому самому ядрі. Стенд —
+це `platformio_footprint.ini` плюс `tools/footprint/gate_probe`; `pio run -c
+platformio_footprint.ini` відтворює всі числа звідси, включно з обома базами вище і двома
+охоронними `#error`, чиї середовища мають *не* збиратися.
+
+| Прапорець | Флеш | RAM | Підтвердження в символах `firmware.elf` |
+| --- | ---: | ---: | --- |
+| `AFFA_ENABLE_ESP32CAN_LINK=0` | **−12 218 Б** | −1 400 Б | зникають `Esp32CanLink::begin` і всі 28 символів `CAN0`/драйвера; env узагалі без `lib_deps` і все одно лінкується |
+| `AFFA_PANEL_CARMINAT=0` | −5 536 Б | −2 752 Б | зникають усі `CarminatDisplay::*` і `affa::Menu::*` |
+| `AFFA_ENABLE_MENU=0` | −3 266 Б | −1 584 Б | зникають `Menu::handleKey`, `MenuController::*` |
+| `AFFA_PANEL_UPDATELIST=0` (разом із `_MENU=0`) | −2 550 Б | −2 592 Б | зникають усі `UpdateList*` |
+| `AFFA_ENABLE_TRANSLITERATION=0` | −2 130 Б | 0 | зникає `affa::toAscii` (його заміняє вбудована обмежена копія) |
+| `AFFA_ENABLE_LOG=0` | −1 696 Б | −8 Б | зникає `affa::detail::emit`, а з ним усі формат-рядки |
+| `AFFA_MAX_SUBSCRIPTIONS=0` | −454 Б | −960 Б | `subscribe()` стискається з 0x9E до 4 байтів; таблиці `Sub` немає |
+| `AFFA_PANEL_UPDATELIST_MENU=0` | −386 Б | −1 296 Б | зникає `UpdateListMenuDisplay::setText` |
+| `AFFA_ENABLE_FULLSCREEN=0` | −310 Б | 0 | `showFullscreenText` з 0xCE до **4 байтів** |
+| `AFFA_ENABLE_CONFIRMBOX=0` | −276 Б | 0 | `showConfirmBox` 0xEC → 4 байти |
+| `AFFA_ENABLE_INFOPOPUP=0` | −276 Б | 0 | `showInfoMenu` 0x52 + лямбда 0xAE → 4 байти |
+| `AFFA_ENABLE_POPUP=0` | −232 Б | 0 | `showPopupText` 0xC8 → 4 байти |
+| `AFFA_ENABLE_AUX_TRACKER=1` (типово 0) | **+852 Б** | +32 Б | з'являються `AuxModeTracker::*` |
+| `AFFA_ENABLE_VIRTUAL_PANEL=1` (на платі типово 0) | **+2 774 Б** | +312 Б | з'являються `VirtualPanelBase::*`, `isotp::Reassembler::onFrame`, `screen::menu/infoRow/windowText` |
+
+Два чесні висновки з цієї таблиці:
+
+* **Чотири «екранні» перемикачі коштують 232–310 байтів кожен, а не кілобайти.** Перемикач
+  заміняє білдер чотирибайтним `return NotSupported` — рівно те, що обіцяно, і небагато.
+  Вимикайте їх заради коректності (панель, яка чогось не вміє, має так і казати), а не заради
+  місця.
+* **`AFFA_ENABLE_ISOTP_RX=1` сам по собі дає +10 Б**, тобто нічого, бо жоден робочий шлях ще
+  не викликає збирач — див. застереження про `Feature::RadioText` вище. Він починає коштувати
+  щось лише тоді, коли на нього хтось посилається, а сьогодні це twin-и.
 
 ### Багатозадачність і неблокуючий контракт
 
@@ -792,9 +889,15 @@ ESP32-C3 (`board = esp32-c3-devkitm-1`, ядро Arduino 2.0.17), release, пр�
 * `poll()` **не залежить від частоти виклику**: раз на секунду і мільйон разів на секунду
   дають ті самі кадри в тому самому порядку з тим самим таймінгом. Мінімальної частоти для
   коректності не існує — лише для затримки і для того, щоб `Stats::ringOverflow` лишався нулем.
-* Якщо ви не хочете володіти циклом, `AFFA_ENABLE_TASK=1` дає бібліотеці власну задачу
-  FreeRTOS. Робити так *і* викликати `poll()` самому — це два водії на одному об'єкті без
-  локів; оберіть щось одне.
+* **Бібліотека не володіє жодною задачею, і немає прапорця, який би її створив.** У `src/`
+  немає жодного `vTaskCreate`, і не буде, доки діє контракт «жодного `vTaskDelay` у `src/`».
+  Циклом володієте ви. (Перемикач `AFFA_ENABLE_TASK` описувався в ранніх редакціях і не був
+  реалізований нічим; тепер його ввімкнення дає `#error`, а не бібліотеку, яка мовчки не
+  опитується.)
+* Єдиний виняток із «тут ніщо не чекає» вмикається явно і названий чесно:
+  `sendBlocking(ticket, timeoutMs)` крутить `poll()`, доки квиток не завершиться. Заблокувати
+  себе він не може — він сам качає те, чого чекає, — але це активне очікування, і воно для
+  прикладів та коду ініціалізації, а не для `loop()`.
 
 ### Затримка і витіснення
 
@@ -877,7 +980,7 @@ ESP32-C3 (`board = esp32-c3-devkitm-1`, ядро Arduino 2.0.17), release, пр�
 
 1. **Лише ноутбук — узагалі без плати.**
    ```
-   pio test -e native            # 138 випадків, ~10 с
+   pio test -e native            # 140 випадків, ~10 с
    pio run -e ex07_virtual_panel -t exec
    ```
    Уся бібліотека працює на хості проти **twin-а**: моделі панелі, яка збирає передане,
@@ -929,8 +1032,8 @@ ESP32-C3 (`board = esp32-c3-devkitm-1`, ядро Arduino 2.0.17), release, пр�
 ### Документи і тести
 
 ```
-pio test -e native      # 138 хостових тестів в 11 наборах, без заліза
-pio run                 # усі середовища: хостова збірка плюс 12 цілей ESP32-C3
+pio test -e native      # 140 хостових тестів в 11 наборах, без заліза
+pio run                 # усі 14: два хостові середовища плюс 12 цілей ESP32-C3
 ```
 
 | Документ | Що це |
@@ -944,8 +1047,10 @@ pio run                 # усі середовища: хостова збірк
 
 `core/`, `util/`, `link/LoopbackLink.h`, `proto/` і `vpanel/` мають збиратися для
 `platform = native` з нічим, окрім стандартної бібліотеки C++17. Якщо зміна ламає цю збірку —
-неправа зміна, а не тест. `<esp32_can.h>` зустрічається в усьому репозиторії рівно один раз,
-у `src/link/Esp32CanLink.cpp`.
+неправа зміна, а не тест. **`<esp32_can.h>` зустрічається в бібліотеці рівно один раз** —
+у `src/link/Esp32CanLink.cpp`; єдине інше входження в репозиторії — це
+`tools/footprint/baseline_can`, дворядковий скетч, який лінкує драйвер *без* AffaDisplay,
+щоб задати підлогу для таблиці обсягу.
 
 Ліцензія: **MIT**, див. [`LICENSE`](LICENSE).
 

@@ -516,6 +516,13 @@ namespace affa {
 //
 // Every render call ENQUEUES and returns immediately (§3). The Result is an
 // ACCEPTANCE verdict, never a delivery verdict.
+//
+// EVERY ONE OF THEM IS [[nodiscard]], and so is every override in AffaDisplayBase and in
+// the panels, plus enqueue(), pressKey(), nav(), sendBlocking() and subscribe(). The
+// Result is the only thing separating "queued" from NoSync / QueueFull / TooLong /
+// NotSupported, and a dropped Result is a screen that silently never appears — the exact
+// legacy failure §6 exists to stop repeating. Ignore one on purpose and say so:
+//     (void)display.setText("RENAULT", 0);
 struct IDisplay {
   virtual ~IDisplay() = default;
 
@@ -524,23 +531,28 @@ struct IDisplay {
   virtual bool     supports(Feature f) const = 0;
   virtual SyncState syncState() const = 0;
 
-  virtual Result setText(const char* text, uint8_t digit = 255) = 0;
-  virtual Result setTime(const char* hhmm)                      = 0;
-  virtual Result setPower(bool on)                              = 0;
-  virtual Result setAuxMode(bool on)                            = 0;
+  [[nodiscard]] virtual Result setText(const char* text, uint8_t digit = 255) = 0;
+  [[nodiscard]] virtual Result setTime(const char* hhmm)                      = 0;
+  [[nodiscard]] virtual Result setPower(bool on)                              = 0;
+  [[nodiscard]] virtual Result setAuxMode(bool on)                            = 0;
 
-  virtual Result showMenu(const char* header, const char* row0, const char* row1,
-                          uint8_t scrollIndicator = 0x0B)       = 0;
-  virtual Result highlightItem(uint8_t row)                     = 0;
+  [[nodiscard]] virtual Result showMenu(const char* header, const char* row0,
+                                        const char* row1,
+                                        uint8_t scrollIndicator = 0x0B)       = 0;
+  [[nodiscard]] virtual Result highlightItem(uint8_t row)                     = 0;
 
-  virtual Result showPopupText(const char* text, uint8_t icon = 0x09,
-                               uint8_t srcIcon = 0xFF, uint8_t fmt = 0x60) = 0;
-  virtual Result hidePopup()                                    = 0;
-  virtual Result showFullscreenText(const char* l1, const char* l2, const char* l3) = 0;
-  virtual Result hideFullscreenText()                           = 0;
-  virtual Result showConfirmBox(const char* caption, const char* row0, const char* row1) = 0;
-  virtual Result showInfoPopup(const char* l1, const char* l2, const char* l3) = 0;
-  virtual Result hideInfoPopup()                                = 0;
+  [[nodiscard]] virtual Result showPopupText(const char* text, uint8_t icon = 0x09,
+                                             uint8_t srcIcon = 0xFF,
+                                             uint8_t fmt = 0x60)              = 0;
+  [[nodiscard]] virtual Result hidePopup()                                    = 0;
+  [[nodiscard]] virtual Result showFullscreenText(const char* l1, const char* l2,
+                                                  const char* l3)             = 0;
+  [[nodiscard]] virtual Result hideFullscreenText()                           = 0;
+  [[nodiscard]] virtual Result showConfirmBox(const char* caption, const char* row0,
+                                              const char* row1)               = 0;
+  [[nodiscard]] virtual Result showInfoPopup(const char* l1, const char* l2,
+                                             const char* l3)                  = 0;
+  [[nodiscard]] virtual Result hideInfoPopup()                                = 0;
 };
 
 } // namespace affa
@@ -2297,8 +2309,10 @@ callback. Deferring them by one task wakeup would put the reaction behind whatev
 counter enqueued in the meantime and reintroduce exactly the backlog §3b exists to
 prevent. Defer the slow work, never the preemption.
 
-`examples/03_carminat_menu` ships this shape. If `AFFA_ENABLE_TASK` is 1, the library
-can own that loop for you — see §5.
+`examples/03_carminat_menu` ships this shape. **The library will not own that loop for
+you**: it creates no task, and there is no flag that makes it — see the `AFFA_ENABLE_TASK`
+row in §5.3, which documents a knob that was specified, never implemented, and now
+`#error`s rather than silently doing nothing.
 
 ---
 
@@ -2342,13 +2356,21 @@ the measured table.
 ### 5.2 The panel gates
 
 ```cpp
-// Panel selection. Define what you need in build_flags; if you define NOTHING, every
-// panel is compiled — a convenience default for first-time users, not a shipping one.
-#if !defined(AFFA_PANEL_CARMINAT) && !defined(AFFA_PANEL_UPDATELIST) && \
-    !defined(AFFA_PANEL_UPDATELIST_MENU)
-#  define AFFA_PANEL_CARMINAT        1
-#  define AFFA_PANEL_UPDATELIST      1
-#  define AFFA_PANEL_UPDATELIST_MENU 1
+// Panel selection. SILENCE IS AN ERROR, NOT A DEFAULT: name at least one panel in
+// build_flags. "Compile all three" is available but has to be asked for.
+#ifndef AFFA_PANEL_DEFAULT_ALL
+#  define AFFA_PANEL_DEFAULT_ALL 0
+#endif
+#if AFFA_PANEL_DEFAULT_ALL
+#  ifndef AFFA_PANEL_CARMINAT
+#    define AFFA_PANEL_CARMINAT 1
+#  endif
+#  ifndef AFFA_PANEL_UPDATELIST
+#    define AFFA_PANEL_UPDATELIST 1
+#  endif
+#  ifndef AFFA_PANEL_UPDATELIST_MENU
+#    define AFFA_PANEL_UPDATELIST_MENU 1
+#  endif
 #endif
 
 #ifndef AFFA_PANEL_CARMINAT
@@ -2368,10 +2390,12 @@ the measured table.
 #  define AFFA_PANEL_UPDATELIST 1
 #endif
 
-// Unknown-flag guard: a typo in build_flags (AFFA_PANEL_CARMINET) would otherwise
-// silently drop a panel and produce an image that builds and does nothing.
+// The guard, and the ONE thing that catches a mis-typed panel flag. With
+// -D AFFA_PANEL_CARMINET=1 every real macro stays undefined, so all three end up 0 and
+// this fires. An earlier revision made "define nothing" mean "compile all three", which
+// turned exactly that typo into a bigger image and no diagnostic whatsoever.
 #if !AFFA_PANEL_CARMINAT && !AFFA_PANEL_UPDATELIST && !AFFA_PANEL_UPDATELIST_MENU
-#  error "AffaDisplay: no panel selected. Check your -D AFFA_PANEL_* spelling."
+#  error "AffaDisplay: no panel selected. Add -D AFFA_PANEL_CARMINAT=1 (and/or _UPDATELIST / _UPDATELIST_MENU), or -D AFFA_PANEL_DEFAULT_ALL=1 for all three."
 #endif
 ```
 
@@ -2426,15 +2450,23 @@ the twins while explicitly switching off the decoder they are built on means one
 two flags is a mistake, and guessing which would hide it.
 
 Every gate is `#define`d to 0 rather than left undefined, and every use is `#if`, never
-`#ifdef`. `#ifdef` on a misspelled macro is silently false; `#if` on a misspelled macro
-is also silently false, but because *every* real macro is always defined, a
-`-Wundef` build (which the library's own `platformio.ini` turns on) flags the typo.
+`#ifdef`. A `-Wundef` build (which the library's own `platformio.ini` turns on) then
+catches a misspelling *inside the library*: `#if AFFA_ENALBE_MENU` is a diagnostic rather
+than a silently false branch.
+
+**`-Wundef` does not catch a misspelling in a consumer's `build_flags`, and cannot.**
+`-D AFFA_PANEL_CARMINET=1` defines a macro that nothing ever reads, so there is no
+undefined macro anywhere and nothing to diagnose. That is why the panel flags carry a
+second mechanism: naming none of them is an `#error`, and a mis-typed flag lands in exactly
+that state. For the feature gates the same class of typo is not solvable in the
+preprocessor at all; the observable symptom is "the block I tried to switch off is still in
+the image", which the map file and the flash number report.
 
 ### 5.3 Every macro
 
 | Macro | Default | What it costs / buys | Failure mode if set wrong |
 | --- | --- | --- | --- |
-| `AFFA_PANEL_CARMINAT` | 1 if nothing selected | Carminat frame builders, key decode, `0x151`/`0x1F1` tables. | 0 while using a Carminat: `CarminatDisplay` is not declared — compile error at your call site. |
+| `AFFA_PANEL_CARMINAT` | **0** — naming no panel is an `#error` | Carminat frame builders, key decode, `0x151`/`0x1F1` tables. | 0 while using a Carminat: `CarminatDisplay` is not declared — compile error at your call site. |
 | `AFFA_PANEL_UPDATELIST` | as above | AFFA2 base + 8-segment display + title scroll. | as above |
 | `AFFA_PANEL_UPDATELIST_MENU` | as above | LCD `setText` channel/location encoding. Forces `AFFA_PANEL_UPDATELIST` on. | as above |
 | `AFFA_ENABLE_MENU` | 1 | `Menu`, `MenuController`, `IPage` routing, `nav()`, `getMenu()`. The single largest optional block. | 0: `nav()` returns `NotSupported`, `getMenu()` is not declared, `supports(Feature::Menu)` is false. A menu-driven application stops compiling — which is the point. |
@@ -2449,13 +2481,12 @@ is also silently false, but because *every* real macro is always defined, a
 | `AFFA_ENABLE_ESP32CAN_LINK` | 1 | `Esp32CanLink.{h,cpp}` and the `<esp32_can.h>` dependency. | 0 on a project that uses a different CAN driver: nothing pulls `esp32_can` in, and you supply your own `ICanLink`. 1 without the dependency in `lib_deps`: link error. |
 | `AFFA_ENABLE_VIRTUAL_PANEL` | 0 on target, 1 on host | The panel twins (`vpanel/`) and, through them, `AFFA_ENABLE_ISOTP_RX`. Buys a semantic test oracle and a development loop with no panel attached. **This is the most expensive optional block in the library** — a twin carries a `ScreenModel` (~100 B RAM each) plus the decoder; the README's measured table quotes the flash. | 1 on a shipping target: you pay for a panel model you are not using. 0 on the host: every oracle-based test in `test_isotp` stops compiling — which is the point, since a host build without them tests bytes instead of meaning. |
 | `AFFA_ENABLE_ISOTP_RX` | follows `AFFA_ENABLE_VIRTUAL_PANEL` | `isotp::Reassembler` + `screen::*` **without** the twins, for decoding inbound multi-frame traffic (sniffing another head unit, replaying a capture). | 0 with `AFFA_ENABLE_VIRTUAL_PANEL=1`: `#error` at compile time, deliberately (§5.2). 1 alone: a few hundred bytes for a decoder nothing calls — harmless, and `--gc-sections` removes most of it. |
-| `AFFA_ENABLE_TASK` | 0 | An optional owned FreeRTOS task that calls `poll()` on a period, so the application never has to. Pulls in FreeRTOS headers. | 1 **and** calling `poll()` yourself: two drivers, one unlocked library — undefined. Pick one. |
-| `AFFA_TASK_PERIOD_MS` | 5 | Only with `AFFA_ENABLE_TASK`. Poll period of the owned task. | Larger increases key latency and RX-ring pressure. |
-| `AFFA_TASK_STACK` | 3072 | Owned-task stack in bytes. | Too small: stack overflow inside a render call (the 96-byte menu payload plus transliteration scratch is the peak). |
-| `AFFA_TASK_PRIO` | 5 | Owned-task priority. Must stay **below** `task_CAN`'s 15. | At or above 15 you starve the driver's own delivery task and the ring stops filling. |
+| `AFFA_ENABLE_TASK` | — | **NOT IMPLEMENTED.** An owned FreeRTOS task that calls `poll()` was specified here and written nowhere: there is no `vTaskCreate` under `src/`, and there will not be one while "no `vTaskDelay` in `src/`" (§4) is the contract. Until the review that found this, the knob existed, defaulted to 0 and was referenced by nothing — so a consumer who set it to 1 got a library that never polled, with no diagnostic. | Setting it to 1 is now an `#error`. Own the loop: call `poll()` from exactly one task. `AFFA_TASK_PERIOD_MS`, `AFFA_TASK_STACK` and `AFFA_TASK_PRIO` were removed with it. |
 | `AFFA_TX_COALESCE` | 1 | Latest-value-wins replacement of a queued, not-yet-started render of the same `RenderSlot` (§3b.4). Costs one linear scan of at most `AFFA_TX_QUEUE_DEPTH` entries per enqueue, and 4 bytes per `TxJob`. Buys a bounded queue under any render rate. | 0: a repeated render stacks. At `f` Hz in front of a `T`-second transfer you get `min(⌈f·T⌉, depth−1)` stale messages on screen after the key and `QueueFull` for the rest (§3b.7) — the panel keeps counting after Pause. Set it to 0 only when consecutive same-slot messages are a sequence that must all be seen, and prefer `TxOptions::coalesce = false` on those specific messages instead. |
-| `AFFA_TX_QUEUE_DEPTH` | 4 | `sizeof(TxJob)` ≈ `AFFA_MAX_PAYLOAD + 8` bytes each ≈ 512 B of static RAM at the defaults. | Below 3 the lazy registration burst (2 probes + 1 payload for either panel) cannot fit and the first send after a resync returns `QueueFull` forever. Below what your app bursts: renders start returning `QueueFull`. |
-| `AFFA_MAX_PAYLOAD` | 120 | Largest single ISO-TP message. The Carminat menu screen is 96 bytes; the setText payload is 22. | Below 96: `showMenu` returns `TooLong` and the menu never draws. |
+| `AFFA_TX_QUEUE_DEPTH` | 6 | `sizeof(TxJob)` ≈ `AFFA_MAX_PAYLOAD + 12` bytes each ≈ 750 B of static RAM at the defaults. 6 and not 4 because `showInfoPopup` is three non-coalescing messages and the first call after a resync also carries two registration probes: 2 + 3 = 5 outstanding, plus one slot of headroom for an `Urgent`. | Below 3 the lazy registration burst (2 probes + 1 payload for either panel) cannot fit and the first send after a resync returns `QueueFull` forever. Below what your app bursts: renders start returning `QueueFull`. |
+| `AFFA_MAX_PAYLOAD` | 113 | Largest single ISO-TP message. **113 is a wire limit, not a budget**: 8 bytes in frame 0 plus 15 continuations of 7 is `8 + 15×7 = 113`, the point at which the continuation counter would wrap. `showConfirmBox` sits at exactly 113. The Carminat menu screen is 96 bytes; the `setText` payload is 22. | Below 96: `showMenu` returns `TooLong` and the menu never draws. Above 113: `#error`, unless you define `AFFA_UNSAFE_LONG_PAYLOAD` after bench-validating a longer transmit. |
+| `AFFA_PANEL_DEFAULT_ALL` | 0 | Opt in to "compile all three panels" instead of naming them. For a first look and for the footprint reference builds; `size_all` is the one environment here that uses it. | 1 in a shipping build: you compile panels you do not use. `--gc-sections` removes the unused ones from the image, so the cost is build time, not flash (README, Footprint). |
+| `AFFA_UNSAFE_LONG_PAYLOAD` | undefined | Escape hatch for `AFFA_MAX_PAYLOAD > 113`. | Defining it disables the ceiling `#error`. The ISO-TP counter wrap past 15 continuations has never been validated against a panel. |
 | `AFFA_RX_RING_DEPTH` | 32 | `32 × sizeof(Frame)` = 448 B static RAM. Must be a power of two. | Too small: `Stats::ringOverflow` climbs, ACKs are lost, sends time out, sync flaps. Non-power-of-two: `static_assert` fires. |
 | `AFFA_ACK_TIMEOUT_MS` | 2000 | Per-frame ACK deadline. 2000 matches the legacy blocking wait exactly, so timing-sensitive panel behaviour is unchanged. | Too low: a slow panel yields `Timeout` mid-transfer and the screen is left half-drawn. Too high: a dead panel wedges the queue for that long per frame (it no longer wedges the *loop* — that was defect #2). |
 | `AFFA_PEER_TIMEOUT_MS` | 5000 | How long the link may go without a `69` ping before sync is torn down. The panel pings ~1 Hz. | Below ~3000 you tear down on a single missed ping. This is the value the old `SYNC_TIMEOUT = 5` counter was *meant* to express. |

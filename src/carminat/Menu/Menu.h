@@ -101,7 +101,7 @@ class Menu {
 
   // ---- driven by AffaDisplayBase, not by the application -------------------
   bool   handleKey(Key k, KeyEdge e);   // true = consumed; false falls through to KeyCb
-  Result render();                      // re-emit the current window + its highlight
+  [[nodiscard]] Result render();        // re-emit the current window + its highlight
   void   open();                        // no-op on an EMPTY menu: an open menu that
                                         // renders nothing would eat every key
   void   close();                       // clears editing state, then fires CloseCb
@@ -109,7 +109,7 @@ class Menu {
  private:
   uint8_t scrollIndicator() const;      // 0x00 / 0x07 / 0x0B / 0x0C — docs/API.md §8.6
   void    rowText(uint8_t index, char* out, size_t outSize) const;
-  Result  highlight();                  // the single-frame form
+  [[nodiscard]] Result highlight();     // the single-frame form
   void    selectNext();
   void    selectPrev();
   void    enterEdit();
