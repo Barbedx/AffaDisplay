@@ -15,13 +15,31 @@ drives our own `ICanLink` over the IDF TWAI driver
 
 ## 2026-07-27
 
-### 1. BLOCKING — the panel never sends the `0x74` DONE ack, so every render ends in `Timeout`
+### 1. OBSERVATION, NOT A BUG — a sustained window where the panel flow-controlled but never completed a transfer
 
-**What happens.** Registration completes perfectly (`FUNCSREG` latches,
-`registered() == true`, `synced() == true`). Every render then puts its complete
-byte sequence on the wire, the panel evidently consumes it — and the call
-completes with `Result::Timeout` after `AFFA_ACK_TIMEOUT_MS`. Every time,
-regardless of which render it is.
+> **RETRACTED AND REWRITTEN THE SAME DAY.** The first version of this entry
+> claimed, as a blocking bug, that this panel *never* sends the `0x74` DONE ack
+> and that the library's expectation was therefore wrong. **That conclusion was
+> wrong.** The panel does send `0x74`, and once it started doing so every render
+> has completed `Result::Ok`. The library behaved correctly throughout: no DONE
+> arrived, so it reported `Timeout`, which is exactly what it should do. What
+> follows is what was actually observed, kept because the window was real and
+> lasted about fifteen minutes — but it is an open question about the panel, not
+> a defect in this library, and nothing here should be implemented against.
+
+**What happened.** For roughly fifteen minutes after the panel was first
+connected — with registration fully established (`FUNCSREG` latched,
+`registered() == true`) — every render put its complete byte sequence on the
+wire, the panel flow-controlled each frame, and no terminal ack ever arrived.
+Every call completed `Result::Timeout`. It was reproducible on demand across
+`setText`, `setTime` and `showFullscreenText`.
+
+It then stopped, and has not recurred. Renders now complete `Ok`, including
+`setTime`, which is a single frame. We do not know what changed. Candidates we
+could not separate: the panel needing `setPower(true)` to have taken effect
+first; a settling period after registration; or the first transfers racing the
+two registration probes the transport prepends before `FUNCSREG`. We did send
+power-on during the window, so power alone does not explain it.
 
 **What the wire shows.** Captured with a 24-frame ring that records both
 directions. `setText("claude top")`, read newest-last:
@@ -54,75 +72,52 @@ block to permit, so it sends nothing — and a single-frame message needs no flo
 control at all, so it gets nothing either. Both silences are exactly what the
 transport specifies.
 
+**And what it looks like now**, same panel, same firmware, a `setTime` and a
+`showPopupText` a few minutes later:
+
+```
+T 151  05 56 31 38 30 31 00 00      single frame
+R 551  74 A3 A3 A3 A3 A3 A3 A3      <- DONE. It does send it.
+```
+
 `handleAckFrame()` (`core/AffaDisplayBase.cpp:280`) accepts `0x74` as DONE and
-`30 01 00` as PARTIAL. The PARTIAL half matches the wire. The DONE half has no
-counterpart on this panel.
+`30 01 00` as PARTIAL. Both halves match the wire. Nothing to change.
 
-**The twin disagrees with the hardware, which is why no host test catches this.**
-`VirtualPanelBase::sendAck()` in `AckMode::Declared` — the mode the docs call
-"the only mode that models hardware" — sends `30 01 00` while `declaredDone()`
-is false and **`0x74` as soon as the declared length is satisfied**. The real
-Carminat sends `30 01 00` on exactly the same frames and then **nothing** on the
-one where the twin sends DONE. So the library's oracle and the panel differ at
-precisely one frame, the last, and the whole native suite passes while every
-render on real hardware times out. Reproducing this in `test_twin` should be a
-one-line ack mode — something like `AckMode::FlowControlOnly`, which is also
-what a conforming ISO-TP receiver does.
+**The one actionable thing left in this entry.** During the window there was no
+way to tell *"the panel is not answering at all"* from *"the panel acknowledged
+every frame and then stopped one short"*. Both are `Result::Timeout`. The second
+is a far more specific symptom and would have pointed straight at the tail of the
+transfer instead of sending us to look at the transceiver and the termination. A
+distinct `Result`, or simply the frame index reached reported in the
+`TxComplete` event, would have saved most of an afternoon.
 
-**This does not contradict the bench console working.** `examples/90_bench_ota`
-does not call `setSelfAck()`, so against a real panel it hits the same 2 s
-timeout — but its screens still appear, because the bytes do arrive. Judged by
-looking at the panel, it works; judged by `onComplete`, every render failed. That
-is the whole shape of this bug: the transfer is fine and the verdict is wrong.
+**Two notes for the record, since both were part of the wrong conclusion:**
 
-Worth noting: `0x74` **does** appear on this bus — in the other direction.
-`sendGenericAck()` is *us* answering the panel with `0x74` on `id | 0x400`, and
-that is visible in our captures as `T 5C1 74 ...`. That suggests the DONE
-expectation may have been generalised from the radio→panel direction, where it is
-real, to the panel→radio direction, where (on this panel) it is not.
-
-**What it costs us.** The data renders, so this is not a correctness failure of
-the screen — it is a throughput and reporting failure:
-
-* every render occupies the transmit queue for the full 2 s ack deadline, so
-  renders serialise at 0.5 Hz;
-* a repainting screen is impossible. Our now-playing screen wants a ~2.5 Hz
-  marquee step and cannot have one;
-* `onComplete` reports `Timeout` for work that visibly succeeded, so the one
-  signal that would tell a real failure from a healthy render is unusable;
-* `lastResult()` is permanently `timeout`, which makes the web UI's health panel
-  lie.
-
-**Possible shapes of a fix** (your call which, if any):
-
-* treat a job as complete when its **last** frame has been handed to the link and
-  the preceding FC was received — i.e. stop requiring a terminal ack;
-* make the terminal ack a **panel policy** — a field on `SyncProfile`, or a
-  virtual `bool expectsFinalAck() const`, since this may genuinely differ between
-  Carminat and UpdateList;
-* a knob, e.g. `AFFA_REQUIRE_FINAL_ACK` (default 1 to preserve today's behaviour);
-* at minimum, distinguish "no ack at all" from "acked every frame but the last"
-  in the `Result`, so a consumer can tell this apart from a dead panel.
-
-We have a live rig and can test any of these the same day.
+* `VirtualPanelBase::sendAck()` in `AckMode::Declared` sends `30 01 00` while
+  `declaredDone()` is false and `0x74` once the declared length is satisfied.
+  That is a faithful model of what the panel does now. It did not model the
+  window above — but that window may not be a panel state worth modelling.
+* `examples/90_bench_ota` does not call `setSelfAck()`, so it drives a real panel
+  by exactly the path we do. Its working flawlessly is consistent with all of
+  the above, and was the observation that prompted the re-check.
 
 ---
 
-### 2. `CarminatDisplay::setText` declares 14 bytes but transmits 22, and the trailing frame is not acked
+### 2. `CarminatDisplay::setText` caps visible text at 8 characters, and the API gives no sign of it
 
 `setText` writes `d[1] = 0x0E` (declared content length 14 = 6 header bytes + 8
 text bytes) and then always emits `kTextCells` = 14 text cells, so the payload is
-always 22 bytes and always three frames.
+always 22 bytes and always three frames. The source comment
+(`carminat/CarminatDisplay.cpp:159`) explains this and says the surplus bytes go
+on the wire, are acked and are ignored — which matches what we see now.
 
-The source comment (`carminat/CarminatDisplay.cpp:159`) says the surplus bytes
-"go on the wire, **are ACKed**, and are ignored". On this panel the surplus frame
-is **not** acked — it is precisely the unacked last frame in finding 1. So the
-two facts are related: the transfer runs one frame past what the panel was told
-to expect.
+Confirmed on the panel: `setText("ONTEST")` renders. We have not yet put a
+string longer than eight characters up and read the glass, so the 8-character
+figure is the library's own arithmetic rather than our measurement.
 
 Two consequences for a consumer:
 
-* **visible text is capped at 8 characters.** `"claude top"` renders as
+* **visible text is capped at 8 characters.** `"claude top"` would render as
   `"claude t"`. That is not obvious from the API — `setText` takes an arbitrary
   `const char*` and returns `Ok`;
 * a caller cannot choose the trade-off, because both the declared length and the
