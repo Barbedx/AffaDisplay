@@ -454,6 +454,116 @@ void counterTick(uint32_t now) {
 }
 
 // ---------------------------------------------------------------------------
+// Popup cycle — show, wait, hide, wait, forever
+// ---------------------------------------------------------------------------
+// Drives showPopupText/hidePopup on a period so the overlay can be watched on the glass
+// without anybody holding a browser open. Same shape as counterTick: a deadline against
+// the clock, never a call counter and never a delay(), so the period is what it says at
+// any loop rate.
+//
+// The popup is a NON-DESTRUCTIVE overlay on RenderSlot::Popup, so it does not coalesce
+// against a Text render — run this and the counter together and you see exactly that: the
+// number keeps counting underneath and the popup covers it for its half of the cycle.
+struct PopupCycle {
+  bool     run     = false;
+  uint16_t periodS = 10;      // seconds per half-cycle
+  bool     shown   = false;   // what we last asked for
+  uint32_t nextMs  = 0;
+  uint32_t shows   = 0;
+  uint32_t hides   = 0;
+  uint32_t rejected = 0;
+} g_pop;
+
+void popupTick(uint32_t now) {
+  if (!g_pop.run) return;
+  if (!affa::expired(now, g_pop.nextMs)) return;
+  const uint16_t p = g_pop.periodS ? g_pop.periodS : 1;
+  g_pop.nextMs = now + static_cast<uint32_t>(p) * 1000u;
+
+  affa::Result r;
+  if (g_pop.shown) {
+    r = g_display.hidePopup();
+    ++g_pop.hides;
+  } else {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "POPUP %lu", static_cast<unsigned long>(g_pop.shows + 1));
+    r = g_display.showPopupText(buf);
+    ++g_pop.shows;
+  }
+  g_pop.shown = !g_pop.shown;
+  if (r != affa::Result::Ok) ++g_pop.rejected;
+}
+
+// ---------------------------------------------------------------------------
+// Now playing — three rows, each moving on its own clock
+// ---------------------------------------------------------------------------
+//     SPOTIFY [####----] 0:12      header: source, progress, elapsed. Live, not scrolled.
+//     My favourite song - Fidel..  title,  300 ms/cell
+//     Michael Jackson              artist, 450 ms/cell
+//
+// The two rows own SEPARATE widget::Marquee instances at different rates, so they slide
+// past each other instead of marching in lockstep. This is examples/11_now_playing living
+// inside the console, so it can be driven from the browser without giving up WiFi and OTA.
+constexpr uint8_t  kNpCols     = 24;   // the Carminat row is 26 usable; leave margin
+constexpr uint8_t  kNpGap      = 4;
+constexpr uint32_t kNpTitleMs  = 300;
+constexpr uint32_t kNpArtistMs = 450;  // deliberately not a multiple of the title rate
+constexpr uint16_t kNpTrackSec = 217;  // 3:37
+
+affa::widget::Marquee g_npTitle { affa::widget::MarqueeGeometry{kNpCols, kNpGap, kNpTitleMs}  };
+affa::widget::Marquee g_npArtist{ affa::widget::MarqueeGeometry{kNpCols, kNpGap, kNpArtistMs} };
+
+struct NowPlaying {
+  bool     run      = false;
+  uint32_t startMs  = 0;
+  uint32_t nextMs   = 0;
+  uint32_t renders  = 0;
+  uint32_t rejected = 0;
+  char     lastHdr[40] = {0};
+  char     lastR0 [40] = {0};
+  char     lastR1 [40] = {0};
+} g_np;
+
+void npHeader(char* out, size_t n, uint16_t elapsed) {
+  constexpr uint8_t kBar = 8;
+  char bar[kBar + 1];
+  const uint8_t filled = static_cast<uint8_t>(
+      (static_cast<uint32_t>(elapsed) * kBar) / kNpTrackSec);
+  for (uint8_t i = 0; i < kBar; ++i) bar[i] = (i < filled) ? '#' : '-';
+  bar[kBar] = '\0';
+  snprintf(out, n, "SPOTIFY [%s] %u:%02u", bar,
+           static_cast<unsigned>(elapsed / 60), static_cast<unsigned>(elapsed % 60));
+}
+
+// Deadline-driven AND change-driven. The deadline caps how often we may build a screen;
+// the comparison decides whether we send one. showMenu is 96 bytes — 13 frames — so
+// re-sending an identical screen is the difference between a busy bus and an idle one, and
+// RenderSlot::Menu coalescing would hide that waste rather than remove it.
+void nowPlayingTick(uint32_t now) {
+  if (!g_np.run) return;
+  if (!affa::expired(now, g_np.nextMs)) return;
+  g_np.nextMs = now + 100;                    // 10 Hz ceiling; the marquees are slower
+
+  const uint16_t elapsed =
+      static_cast<uint16_t>(((now - g_np.startMs) / 1000u) % (kNpTrackSec + 1u));
+
+  char hdr[40], r0[40], r1[40];
+  npHeader(hdr, sizeof(hdr), elapsed);
+  g_npTitle .window(g_npTitle .windowAt(now), r0, sizeof(r0));
+  g_npArtist.window(g_npArtist.windowAt(now), r1, sizeof(r1));
+
+  if (strcmp(hdr, g_np.lastHdr) == 0 && strcmp(r0, g_np.lastR0) == 0 &&
+      strcmp(r1, g_np.lastR1) == 0)
+    return;                                   // nothing moved; say nothing
+  strcpy(g_np.lastHdr, hdr); strcpy(g_np.lastR0, r0); strcpy(g_np.lastR1, r1);
+
+  // kScrollNone: the arrows mean "more list items this way", and this is not a list.
+  const affa::Result r = g_display.showMenu(hdr, r0, r1, affa::carminat::kScrollNone);
+  ++g_np.renders;
+  if (r != affa::Result::Ok) ++g_np.rejected;
+}
+
+// ---------------------------------------------------------------------------
 // The self test — the goal, end to end, as a state machine
 // ---------------------------------------------------------------------------
 // It is a state machine and not a blocking routine for the same reason the library is:
@@ -618,7 +728,7 @@ enum class Op : uint8_t {
   Text, Time, Power, ShowMenu, Highlight,
   Popup, PopupHide, Fullscreen, FullscreenHide, Confirm, Info, InfoHide,
   Nav, KeyPress, MenuShow, MenuState,
-  Counter, Abort, TxGate, SelfTest, Mode, Reboot,
+  Counter, PopupCycleOp, NowPlaying, Abort, TxGate, SelfTest, Mode, Reboot,
 };
 
 struct Cmd {
@@ -751,6 +861,19 @@ void jStatus() {
      g_counter.run ? "true" : "false", static_cast<unsigned>(g_counter.hz),
      static_cast<unsigned long>(g_counter.n),
      static_cast<unsigned long>(g_counter.rejected));
+
+  jf("\"popupCycle\":{\"run\":%s,\"periodS\":%u,\"shown\":%s,\"shows\":%lu,\"hides\":%lu,"
+     "\"rejected\":%lu},",
+     g_pop.run ? "true" : "false", static_cast<unsigned>(g_pop.periodS),
+     g_pop.shown ? "true" : "false",
+     static_cast<unsigned long>(g_pop.shows),
+     static_cast<unsigned long>(g_pop.hides),
+     static_cast<unsigned long>(g_pop.rejected));
+
+  jf("\"nowPlaying\":{\"run\":%s,\"renders\":%lu,\"rejected\":%lu},",
+     g_np.run ? "true" : "false",
+     static_cast<unsigned long>(g_np.renders),
+     static_cast<unsigned long>(g_np.rejected));
 
   jf("\"lat\":{\"keyToCbUs\":%lu,\"keyToWireUs\":%lu,\"pollMaxUs\":%lu,"
      "\"staleDropped\":%lu,\"ackN\":%lu,\"ackMinUs\":%lu,\"ackMeanUs\":%lu,"
@@ -1052,6 +1175,53 @@ void execCmd(const Cmd& c) {
       break;
     }
 
+    case Op::PopupCycleOp: {
+      g_pop.run = (c.a != 0);
+      if (c.b > 0) g_pop.periodS = static_cast<uint16_t>(c.b > 3600 ? 3600 : c.b);
+      if (g_pop.run) {
+        g_pop.shows = g_pop.hides = g_pop.rejected = 0;
+        g_pop.shown  = false;      // next tick SHOWS
+        g_pop.nextMs = millis();   // and it does so immediately
+        logmsg(3, "bench", "popup cycle start, %u s per half",
+             static_cast<unsigned>(g_pop.periodS));
+      } else {
+        // Leave the glass clean rather than frozen on whichever half we stopped in.
+        if (g_pop.shown) { (void)g_display.hidePopup(); g_pop.shown = false; }
+        logmsg(3, "bench", "popup cycle stop after %lu shows",
+             static_cast<unsigned long>(g_pop.shows));
+      }
+      jclear();
+      jf("{\"run\":%s,\"periodS\":%u,\"shows\":%lu,\"hides\":%lu}",
+         g_pop.run ? "true" : "false", static_cast<unsigned>(g_pop.periodS),
+         static_cast<unsigned long>(g_pop.shows),
+         static_cast<unsigned long>(g_pop.hides));
+      break;
+    }
+
+    case Op::NowPlaying: {
+      g_np.run = (c.a != 0);
+      if (g_np.run) {
+        const uint32_t now = millis();
+        g_np.startMs  = now;
+        g_np.nextMs   = now;
+        g_np.renders  = g_np.rejected = 0;
+        g_np.lastHdr[0] = g_np.lastR0[0] = g_np.lastR1[0] = '\0';
+        // Empty strings fall back to the demo track, so /api/nowplaying?run=1 alone works.
+        g_npTitle .setText(c.s1[0] ? c.s1 : "My favourite song - Fidel Castro", now);
+        g_npArtist.setText(c.s2[0] ? c.s2 : "Michael Jackson", now);
+        g_npTitle .setActive(true, now);
+        g_npArtist.setActive(true, now);
+        logmsg(3, "bench", "now playing start");
+      } else {
+        logmsg(3, "bench", "now playing stop after %lu renders",
+             static_cast<unsigned long>(g_np.renders));
+      }
+      jclear();
+      jf("{\"run\":%s,\"renders\":%lu}", g_np.run ? "true" : "false",
+         static_cast<unsigned long>(g_np.renders));
+      break;
+    }
+
     case Op::Abort: {
       const uint8_t dropped = g_display.abortPending();
       logmsg(3, "bench", "abortPending() dropped %u", static_cast<unsigned>(dropped));
@@ -1246,6 +1416,21 @@ void routes() {
     c.c = pnum(r, "to",  0);
     return run(r, c);
   });
+  // /api/popupcycle?run=1&sec=10 — show for `sec`, hide for `sec`, forever.
+  g_server.on("/api/popupcycle", HTTP_GET, [](PsychicRequest* r) {
+    Cmd c; c.op = Op::PopupCycleOp;
+    c.a = pnum(r, "run", 1);
+    c.b = pnum(r, "sec", 10);
+    return run(r, c);
+  });
+  // /api/nowplaying?run=1[&title=..&artist=..] — three rows, three clocks.
+  g_server.on("/api/nowplaying", HTTP_GET, [](PsychicRequest* r) {
+    Cmd c; c.op = Op::NowPlaying;
+    c.a = pnum(r, "run", 1);
+    pstr(r, "title",  c.s1, sizeof(c.s1));
+    pstr(r, "artist", c.s2, sizeof(c.s2));
+    return run(r, c);
+  });
   g_server.on("/api/txgate", HTTP_GET, [](PsychicRequest* r) {
     Cmd c; c.op = Op::TxGate; c.a = pnum(r, "on", 1);
     return run(r, c);
@@ -1428,6 +1613,8 @@ void loop() {
 
   // 3. Deadline-driven application work. No counters, no delays.
   counterTick(now);
+  popupTick(now);
+  nowPlayingTick(now);
   if (g_st.ran && g_st.phase != SelfTest::Phase::Done) selfTestTick(now);
 
   // Once, on the first sync: prove the goal without anybody asking.
