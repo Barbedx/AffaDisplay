@@ -58,7 +58,20 @@ namespace {
 // ESP32-C3 SuperMini: rx = GPIO4, tx = GPIO3. MeganeCAN's board is MIRRORED (rx = 3,
 // tx = 4) — the same module, soldered the other way. The named struct is what stops the
 // swap from becoming a silent bus with no error anywhere.
-constexpr affa::CanPins kPins{ .rx = GPIO_NUM_4, .tx = GPIO_NUM_3 };
+// BENCH EXPERIMENT, 2026-07-27: MegaOpen's BoardProfile.h asserts this board is mirrored
+// relative to MeganeCAN (rx=4, tx=3) and MegaOpen did receive on GPIO4 — but MeganeCAN,
+// which the owner confirms worked on this hardware, used rx=3, tx=4. Under rx=4/tx=3 this
+// firmware transmits frames the panel ACKs (txErr stayed 0 over 26 frames, which only
+// happens if something acknowledged them) and receives NOTHING. Both cannot be true, so
+// try the MeganeCAN orientation and let the wire decide.
+#ifndef BENCH_PINS_MIRRORED
+#  define BENCH_PINS_MIRRORED 0
+#endif
+#if BENCH_PINS_MIRRORED
+constexpr affa::CanPins kPins{ .rx = GPIO_NUM_3, .tx = GPIO_NUM_4 };   // MeganeCAN
+#else
+constexpr affa::CanPins kPins{ .rx = GPIO_NUM_4, .tx = GPIO_NUM_3 };   // MegaOpen
+#endif
 constexpr uint32_t      kBitrate = 500000;
 
 // Read-only, from the namespace MegaOpen already writes (verified against
@@ -670,6 +683,22 @@ void jStatus() {
      static_cast<unsigned long>(s.txErr), static_cast<unsigned long>(s.rxErr),
      static_cast<unsigned long>(s.txFailed));
 
+  // Raw controller state. Stats::rxFrames counts what reached the LIBRARY; msgsToRx counts
+  // what reached the DRIVER. Both zero means nothing is arriving at the peripheral at all;
+  // msgsToRx climbing while rxFrames stays flat means esp32_can is not delivering what the
+  // controller already has. That one number separates a bus problem from a library bug,
+  // which is the question this rig exists to answer.
+  {
+    const auto d = g_hw.driverState();
+    jf("\"drv\":{\"valid\":%s,\"state\":%u,\"msgsToRx\":%lu,\"msgsToTx\":%lu,"
+       "\"txErr\":%lu,\"rxErr\":%lu,\"busErr\":%lu,\"arbLost\":%lu,\"rxMissed\":%lu},",
+       d.valid ? "true" : "false", static_cast<unsigned>(d.state),
+       static_cast<unsigned long>(d.msgsToRx), static_cast<unsigned long>(d.msgsToTx),
+       static_cast<unsigned long>(d.txErr),   static_cast<unsigned long>(d.rxErr),
+       static_cast<unsigned long>(d.busErr),  static_cast<unsigned long>(d.arbLost),
+       static_cast<unsigned long>(d.rxMissed));
+  }
+
   jf("\"menu\":{\"open\":%s,\"editing\":%s,\"count\":%u,\"selected\":%u,\"row\":%u},",
      m.isOpen() ? "true" : "false", m.isEditing() ? "true" : "false",
      static_cast<unsigned>(m.count()), static_cast<unsigned>(m.selectedIndex()),
@@ -1265,7 +1294,20 @@ void setup() {
 
   // 2. CAN. A failure here is reported, never fatal — the console then runs in virtual
   //    mode against the twin, which is the whole point of having one.
-  g_canUp = g_hw.begin(kPins, kBitrate);
+  // Ask for bus-off auto-recovery. Measured on this rig without it: the controller took
+  // 17 bus errors, went bus-off, the driver's watchdog called twai_initiate_recovery(),
+  // and that left it in TWAI_STATE_STOPPED — where it neither transmits NOR RECEIVES, for
+  // ever. `rxFrames` stuck at 0 with no errors climbing looks exactly like a dead bus or a
+  // broken transceiver, and it is neither: it is a stopped peripheral nobody restarted.
+  // A bench must dig itself out; 2 s is the driver's own default outage.
+  // BENCH_LISTEN_ONLY=1 answers "can we read this bus at all?" and nothing else — no ACK,
+  // so no handshake and no text, by design.
+#ifndef BENCH_LISTEN_ONLY
+#  define BENCH_LISTEN_ONLY 0
+#endif
+  g_canUp = g_hw.begin(kPins, kBitrate, /*forceRecoveryMs=*/2000,
+                       BENCH_LISTEN_ONLY ? affa::Esp32CanLink::LinkMode::ListenOnly
+                                         : affa::Esp32CanLink::LinkMode::Normal);
   if (!g_canUp)
     Serial.println("[can] controller did not come up — check pins, transceiver, "
                    "termination. Falling back to the virtual panel.");

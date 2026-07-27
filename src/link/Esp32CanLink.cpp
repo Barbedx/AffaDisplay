@@ -92,7 +92,8 @@ struct Esp32CanTrampoline {
   }
 };
 
-bool Esp32CanLink::begin(CanPins pins, uint32_t bitrate, uint32_t forceRecoveryMs) {
+bool Esp32CanLink::begin(CanPins pins, uint32_t bitrate, uint32_t forceRecoveryMs,
+                         LinkMode mode) {
   if (_began) {
     AFFA_LOGE(kTag, "begin() called twice: a second call reinstalls the driver on a live "
                     "bus, leaks both queues and wipes all 32 filter slots. Refused.");
@@ -117,6 +118,28 @@ bool Esp32CanLink::begin(CanPins pins, uint32_t bitrate, uint32_t forceRecoveryM
     CAN0.setForceRecovery(true, forceRecoveryMs);
     AFFA_LOGI(kTag, "bus-off auto-recovery armed: full driver restart after %lums",
               static_cast<unsigned long>(forceRecoveryMs));
+  }
+
+  // LISTEN-ONLY IS NOT AVAILABLE, AND THE REASON IS WORTH THE PARAGRAPH.
+  //
+  // The obvious implementation is CAN0.setListenOnlyMode(true) before begin(), reasoning
+  // that the prohibition only covers calls AFTER begin() and that its internal disable()
+  // is a no-op with no driver installed. Both halves of that are true and the conclusion
+  // is still wrong: setListenOnlyMode() is disable() THEN enable(), and enable() creates
+  // task_CAN and task_LowLevelRX, which block on callbackQueue and rx_queue — queues that
+  // only _init() creates, and _init() has not run yet. The driver comes up with two tasks
+  // waiting on null handles and the board is dead before WiFi, i.e. before OTA. Measured,
+  // on the bench, at the cost of a cable.
+  //
+  // Calling it AFTER begin() is worse: that is the live-reinstall the header forbids.
+  // So there is no safe place for it in this driver, and the parameter is honoured only
+  // by refusing to pretend.
+  if (mode == LinkMode::ListenOnly) {
+    AFFA_LOGE(kTag, "LinkMode::ListenOnly is not implementable on collin80/esp32_can — "
+                    "setListenOnlyMode() installs the driver before its queues exist. "
+                    "Refused; bring the link up Normal and shut the software TX gate "
+                    "instead (that stops OUR frames, though the controller still ACKs).");
+    return false;
   }
 
   // Order is load-bearing; see the header. watchFor() is LAST.
@@ -196,6 +219,22 @@ Stats Esp32CanLink::stats() const {
     s.txFailed = st.tx_failed_count;
   }
   return s;
+}
+
+Esp32CanLink::DriverState Esp32CanLink::driverState() const {
+  DriverState d;
+  twai_status_info_t st;
+  if (twai_get_status_info(&st) != ESP_OK) return d;   // valid stays false
+  d.valid    = true;
+  d.state    = static_cast<uint8_t>(st.state);
+  d.msgsToRx = st.msgs_to_rx;
+  d.msgsToTx = st.msgs_to_tx;
+  d.txErr    = st.tx_error_counter;
+  d.rxErr    = st.rx_error_counter;
+  d.busErr   = st.bus_error_count;
+  d.arbLost  = st.arb_lost_count;
+  d.rxMissed = st.rx_missed_count;
+  return d;
 }
 
 void Esp32CanLink::setTxEnabled(bool on) { _txEnabled = on; }

@@ -83,7 +83,23 @@ class Esp32CanLink final : public ICanLink {
   // that standard recovery waits for. Both nodes sit there. Ask for 2000 on a bench.
   //
   // Cost: the bus is dead for that long, and forceDriverRestart() printf()s twice.
-  bool begin(CanPins pins, uint32_t bitrate = 500000, uint32_t forceRecoveryMs = 0);
+  // BRING-UP ONLY, and a deliberate exception to the prohibition above — it is chosen
+  // BEFORE begin() and never changed afterwards, exactly like forceRecoveryMs.
+  //
+  // Normal: we ACK other nodes and transmit. This is the only mode in which the library
+  // can do its job, because the panel's frames go unacknowledged otherwise and it will
+  // retransmit them forever.
+  //
+  // ListenOnly: the controller never emits a dominant bit — no ACKs, no error frames, no
+  // transmissions. It cannot be driven bus-off and it cannot disturb anything. It exists
+  // for one question, and it is the first question worth asking on a bench that will not
+  // talk: CAN WE READ THIS BUS AT ALL? If reception is clean here and collapses in Normal,
+  // the fault is on our transmit side and no amount of protocol work will help. If it is
+  // broken here too, the bitrate or the wiring is wrong. One reflash, one answer.
+  enum class LinkMode : uint8_t { Normal, ListenOnly };
+
+  bool begin(CanPins pins, uint32_t bitrate = 500000, uint32_t forceRecoveryMs = 0,
+             LinkMode mode = LinkMode::Normal);
 
   bool  send(const Frame& f) override;   // never blocks longer than the driver's ~4 ms
                                          // worst case; false if the TX gate is shut
@@ -97,6 +113,20 @@ class Esp32CanLink final : public ICanLink {
   // is required: without our ACK the panel retransmits every frame forever.
   void setTxEnabled(bool on);
   bool txEnabled() const;
+
+  // Raw controller state, for bring-up only. Stats::rxFrames counts what reached OUR
+  // callback; this counts what reached the DRIVER, and the difference is the whole
+  // diagnosis when a bus looks dead: msgsToRx climbing with rxFrames flat means the
+  // controller is receiving and esp32_can is not delivering, while both at zero means
+  // nothing is arriving at the peripheral at all. Nothing in the library reacts to it.
+  struct DriverState {
+    bool     valid    = false;   // false: twai_get_status_info() itself failed
+    uint8_t  state    = 0;       // twai_state_t: 0 stopped, 1 running, 2 bus-off, 3 recovering
+    uint32_t msgsToRx = 0;       // frames queued in the DRIVER, not yet taken by esp32_can
+    uint32_t msgsToTx = 0;
+    uint32_t txErr = 0, rxErr = 0, busErr = 0, arbLost = 0, rxMissed = 0;
+  };
+  DriverState driverState() const;
 
  private:
   friend struct Esp32CanTrampoline;   // defined in the .cpp, where CAN_FRAME exists
