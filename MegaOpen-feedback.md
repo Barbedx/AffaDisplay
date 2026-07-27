@@ -11,6 +11,22 @@ Hardware under test: ESP32-C3 SuperMini, SN65HVD230, **real Carminat panel**,
 drives our own `ICanLink` over the IDF TWAI driver
 (`AFFA_ENABLE_ESP32CAN_LINK=0`), not `Esp32CanLink`.
 
+> ### How to read this file
+>
+> **Two entries here were written as library defects and both were wrong** —
+> findings 1 and 2b, retracted the same day, kept visible rather than deleted so
+> the reasoning can be checked. Both failed the same way: I concluded *"the
+> library does X"* from **not observing something in a sampled window** — no ack
+> in a 24-frame ring snapshot, no log line in a ten-second capture. A ring that
+> holds eight seconds of traffic and a capture that starts after the event are
+> not evidence of absence.
+>
+> So: entries that quote **bytes off the wire in both directions**, or a line the
+> hardware actually printed, are measurements. Entries that say "never" or
+> "always" about the panel, without that, are not — check them before spending
+> implementation time. The integration itself is working; the remaining entries
+> below are ergonomics, not blockers.
+
 ---
 
 ## 2026-07-27
@@ -132,23 +148,18 @@ the 8-character limit in `docs/API.md` next to `setText`.
 
 ---
 
-### 2b. `setAuxMode()` returns `Ok` and emits nothing — the README says it returns `NotSupported`
+### 2b. WITHDRAWN — `setAuxMode()` does return `NotSupported`, exactly as documented
 
-The README's capability matrix says: *"`Feature::AuxTracking` means 'the
-`AuxModeTracker` helper is compiled in', not '`setAuxMode()` works'. No shipped
-panel overrides `setAuxMode()`, so it returns `NotSupported` everywhere."*
+This entry claimed `setAuxMode()` returns `Ok` while emitting nothing, against
+the README. **Wrong.** The owner's console shows the completion line plainly:
 
-On `CarminatDisplay` it returns **`Result::Ok`** and puts **no frame on the
-wire**. Checked twice: the completion callback reports `Ok` (our sink logs any
-non-`Ok`, and stayed silent), and the frame ring holds nothing but the heartbeat
-afterwards.
+```
+L [disp] aux -> not-supported
+```
 
-`Ok` for a call that does nothing is the one verdict a caller cannot act on —
-`NotSupported` is a fact, `Ok` is a promise. Small, but it is exactly the kind of
-thing that gets built on before anyone checks.
-
-Suggestion: either the base default should reach this path (returning
-`NotSupported`), or the README should stop saying it does.
+The README is correct, the base default reaches this path, and there is nothing
+to fix. The "evidence" was that no such line appeared in a ten-second WebSocket
+capture I took — which was a sampling window, not a measurement.
 
 ---
 
