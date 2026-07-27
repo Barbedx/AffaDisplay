@@ -402,49 +402,47 @@ twins are ~13 kB flash and ~9.6 kB RAM and are the reason they are off on target
 The tables above measure *examples*, so a gate whose code the example never names is worth
 zero there by construction. To measure the gates themselves, one probe build instantiates
 **all three panels and calls every optional render**, so `--gc-sections` cannot remove a
-feature the gate was supposed to remove. Reference build: **278 936 B flash / 21 588 B RAM**.
-Every row below is one flag flipped against that build, on the same board and core. The
-harness is `platformio_footprint.ini` + `tools/footprint/gate_probe` — run
+feature the gate was supposed to remove. Reference build (`g_base`): **276 094 B flash /
+19 988 B RAM**. Every row below is one flag flipped against that build, on the same board
+and core. The harness is `platformio_footprint.ini` + `tools/footprint/gate_probe` — run
 `pio run -c platformio_footprint.ini` to reproduce every number here, including the two
 baselines above and the two `#error` guards, which are environments expected to *fail*.
 
-> The byte figures below were measured **before** the menu migration (one `MenuModel` +
-> `CarminatMenuRenderer` replacing the deleted `carminat/Menu/`). The symbol names in the
-> evidence column are current; re-run the harness for exact numbers.
->
-> **The `AFFA_ENABLE_MENU=0` row cannot currently be reproduced**, and that is a defect in the
-> harness rather than in the gate: `[env:g_base]` in `platformio_footprint.ini` never passes
-> `-D AFFA_ENABLE_MENU=1`, and the gate defaults to `0`, so the reference build has the menu
-> off already. Measured today, `g_base` and `g_no_menu` differ by **8 bytes**. Turning it on
-> in the reference build means turning it on in every other `g_no_*` env too, so that all of
-> them still differ from the baseline by exactly one flag — and then re-measuring the whole
-> table.
+Measured 2026-07-28, after the menu migration and after `src/vpanel/` was deleted. The two
+gates that default **off** are measured from the other side (`=1`), because a `=0` row
+against a reference build that already has them off measures nothing — which is exactly the
+bug the previous `g_no_menu` row had.
 
 | Flag | Flash | RAM | Symbol evidence in `firmware.elf` |
 | --- | ---: | ---: | --- |
-| `AFFA_ENABLE_ESP32CAN_LINK=0` | **−12 218 B** | −1 400 B | `Esp32CanLink::begin` and all 28 `CAN0`/driver symbols gone; the env drops `lib_deps` entirely and still links |
-| `AFFA_PANEL_CARMINAT=0` | −5 536 B | −2 752 B | every `CarminatDisplay::*` and `affa::CarminatMenuRenderer::*` symbol gone |
-| `AFFA_ENABLE_MENU=0` | −3 266 B | −1 584 B | `affa::widget::MenuModel::*`, `MenuController::*` gone |
-| `AFFA_PANEL_UPDATELIST=0` (with `_MENU=0`) | −2 550 B | −2 592 B | every `UpdateList*` symbol gone |
-| `AFFA_ENABLE_TRANSLITERATION=0` | −2 130 B | 0 | `affa::toAscii` gone (inlined bounded copy replaces it) |
-| `AFFA_ENABLE_LOG=0` | −1 696 B | −8 B | `affa::detail::emit` gone, and with it every format string |
+| `AFFA_ENABLE_ESP32CAN_LINK=0` | **−12 816 B** | −1 392 B | `Esp32CanLink::begin` and all 28 `CAN0`/driver symbols gone; the env drops `lib_deps` entirely and still links |
+| `AFFA_PANEL_CARMINAT=0` | −2 574 B | −1 168 B | every `CarminatDisplay::*` symbol gone |
+| `AFFA_PANEL_UPDATELIST=0` (with `_MENU=0`) | −2 492 B | −2 560 B | every `UpdateList*` symbol gone |
+| `AFFA_ENABLE_TRANSLITERATION=0` | −2 148 B | 0 | `affa::toAscii` gone (inlined bounded copy replaces it) |
+| `AFFA_ENABLE_LOG=0` | −1 762 B | −8 B | `affa::detail::emit` gone, and with it every format string |
 | `AFFA_MAX_SUBSCRIPTIONS=0` | −454 B | −960 B | `subscribe()` collapses from 0x9E to 4 bytes; the `Sub` table is gone |
-| `AFFA_PANEL_UPDATELIST_MENU=0` | −386 B | −1 296 B | `UpdateListMenuDisplay::setText` gone |
-| `AFFA_ENABLE_FULLSCREEN=0` | −310 B | 0 | `showFullscreenText` collapses from 0xCE to **4 bytes** |
-| `AFFA_ENABLE_CONFIRMBOX=0` | −276 B | 0 | `showConfirmBox` 0xEC → 4 bytes |
-| `AFFA_ENABLE_INFOPOPUP=0` | −276 B | 0 | `showInfoMenu` 0x52 + 0xAE lambda → 4 bytes |
-| `AFFA_ENABLE_POPUP=0` | −232 B | 0 | `showPopupText` 0xC8 → 4 bytes |
-| `AFFA_ENABLE_VIRTUAL_PANEL=1` (default is 0 on target) | **+2 774 B** | +312 B | `VirtualPanelBase::*`, `isotp::Reassembler::onFrame`, `screen::menu/infoRow/windowText` appear |
+| `AFFA_PANEL_UPDATELIST_MENU=0` | −368 B | −1 280 B | `UpdateListMenuDisplay::setText` gone |
+| `AFFA_ENABLE_FULLSCREEN=0` | −326 B | 0 | `showFullscreenText` collapses from 0xCE to **4 bytes** |
+| `AFFA_ENABLE_CONFIRMBOX=0` | −286 B | 0 | `showConfirmBox` 0xEC → 4 bytes |
+| `AFFA_ENABLE_INFOPOPUP=0` | −268 B | 0 | `showInfoMenu` 0x52 + 0xAE lambda → 4 bytes |
+| `AFFA_ENABLE_POPUP=0` | −252 B | 0 | `showPopupText` 0xC8 → 4 bytes |
+| `AFFA_ENABLE_MENU=1` (default is `0`) | **+4 380 B** | **+1 696 B** | `affa::widget::MenuModel::*`, `MenuController::*`, `CarminatMenuRenderer::*` appear |
+| `AFFA_ENABLE_ISOTP_RX=1` (default is `0` on target) | +912 B | +384 B | `isotp::Reassembler::onFrame`, `screen::menu/infoRow/windowText`, `AffaDisplayBase::pumpText` appear |
 
-Two honest readings of that table:
+Three honest readings of that table:
 
-* **The four screen gates are worth 232–310 B each, not kilobytes.** The gate replaces the
+* **The four screen gates are worth 252–326 B each, not kilobytes.** The gate replaces the
   builder with a four-byte `return NotSupported`, which is exactly what it promises and not
   much money. Turn them off for correctness (a panel that cannot do it should say so), not
   for space.
-* **`AFFA_ENABLE_ISOTP_RX=1` on its own measures +10 B**, i.e. nothing, because no shipped
-  code path calls the reassembler yet — see the `Feature::RadioText` caveat above. It only
-  costs anything once something references it, which today means the twins.
+* **`AFFA_ENABLE_MENU=0` pulls in nothing — not even an empty `MenuModel`.** The 1 696 B of
+  RAM is the model's storage, and it appears only on the `=1` side. The gate is the single
+  most expensive thing in the library and it is off by default, which is the whole argument
+  for the menu being a widget rather than protocol.
+* **`AFFA_ENABLE_ISOTP_RX=1` used to measure +10 B, i.e. nothing**, because no shipped code
+  path called the reassembler — the library declared a `Feature::RadioText` it could not
+  deliver. `onText()` is that path, and the gate now costs what the decode is actually
+  worth.
 
 ### Threading and the non blocking contract
 

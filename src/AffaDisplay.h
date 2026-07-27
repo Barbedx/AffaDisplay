@@ -38,6 +38,13 @@
 #  endif
 #endif
 
+// Same story, same layer: a scrolling text window that knows nothing about a panel.
+#if AFFA_ENABLE_MARQUEE
+#  if __has_include("widget/Marquee.h")
+#    include "widget/Marquee.h"
+#  endif
+#endif
+
 #include "link/LoopbackLink.h"
 #if AFFA_ENABLE_ESP32CAN_LINK
 #  include "link/Esp32CanLink.h"

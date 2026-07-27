@@ -136,10 +136,10 @@ uint8_t MenuModel::topIndex() const {
 // The Carminat rule (docs/API.md §8.6) with the hard-coded 2 replaced by geometry.rows, and
 // the selection/row test rewritten as the window test it always was:
 //
-//     count <= 2                                        -> 0x00     count <= rows
-//     sel == 0 || (sel == 1 && row == 1)                -> 0x0B     top == 0
-//     sel == count-1 || (sel == count-2 && row == 0)    -> 0x07     top + rows >= count
-//     otherwise                                         -> 0x0C
+//     count <= 2                                        -> None     count <= rows
+//     sel == 0 || (sel == 1 && row == 1)                -> Down     top == 0
+//     sel == count-1 || (sel == count-2 && row == 0)    -> Up       top + rows >= count
+//     otherwise                                         -> Both
 //
 // Both forms agree for every reachable state at rows = 2 — `top` IS `sel - row`, so
 // "sel 0, or sel 1 on the bottom row" is exactly "the window starts at item 0".
@@ -149,11 +149,11 @@ uint8_t MenuModel::topIndex() const {
 // arrows when the whole list fits is not a cosmetic choice — an arrow that points at
 // nothing is what sent someone hunting for items that were not there.
 uint8_t MenuModel::scrollMask() const {
-  if (_count <= _geom.rows) return 0x00;
+  if (_count <= _geom.rows) return kScrollNone;
   const unsigned top = topIndex();
-  if (top == 0) return 0x0B;
-  if (top + _geom.rows >= _count) return 0x07;
-  return 0x0C;
+  if (top == 0) return kScrollDown;
+  if (top + _geom.rows >= _count) return kScrollUp;
+  return kScrollBoth;
 }
 
 // ---------------------------------------------------------------------------

@@ -60,78 +60,27 @@ Result UpdateListDisplay::setText(const char* text, uint8_t digit) {
 // ---------------------------------------------------------------------------
 // Marquee
 // ---------------------------------------------------------------------------
-// The extracted tickMedia() stepped a position every time it was called and happened to
-// find 400 ms on the clock. Here the position is DERIVED from the clock:
-//
-//     window(now) = (base + (now - epoch) / kScrollStepMs) mod len
-//
-// `base` and `epoch` change only when the text changes or the marquee is paused/resumed,
-// so the function is pure in `now` and cannot drift, cannot catch up in a burst after a
-// stalled loop, and produces the same frames whether poll() runs at 5 Hz or 5 kHz. A
-// render is emitted only when the window actually moves.
+// The scrolling itself is widget::Marquee and is not panel code. What is left here is the
+// three things that ARE this panel's: when to render, what to render it with, and the rule
+// that the AMS banner outranks the scroll.
+
+#if AFFA_ENABLE_MARQUEE
 
 void UpdateListDisplay::setScrollText(const char* text) {
-  char buf[AFFA_TEXT_MAX];
-
-  // normalizeTitle strips the video annotations and trims, on top of transliterating.
-  // The gap is reserved out of the buffer up front so appending it can never truncate
-  // mid-sequence.
-  const size_t n = normalizeTitle(text, buf, sizeof(buf) - kScrollGap);
-  if (n == 0) {
-    // Nothing to scroll. Deliberately transmits nothing: blanking the panel because an
-    // application published an empty title would be a decision the application did not
-    // make. Call setText("") if a blank screen is what you want.
-    _text[0]     = '\0';
-    _len         = 0;
-    _base        = 0;
-    _lastPos     = 0;
-    _needsRedraw = false;
-    return;
-  }
-
-  size_t i = n;
-  for (uint8_t g = 0; g < kScrollGap && i + 1 < sizeof(buf); ++g) buf[i++] = ' ';
-  buf[i] = '\0';
-
-  // Identical content is a no-op. An application that re-publishes the current track on
-  // every media update would otherwise reset the window to 0 forever and the title would
-  // never scroll — this is the one line that stops that.
-  if (std::strcmp(buf, _text) == 0) return;
-
-  std::memcpy(_text, buf, i + 1);
-  _len         = static_cast<uint16_t>(i);
-  _base        = 0;
-  _epochMs     = _clock.millis();
+  if (!_marquee.setText(text, _clock.millis())) return;   // same text: keep scrolling
   _lastPos     = 0;
-  _needsRedraw = true;
+  _needsRedraw = _marquee.length() != 0;
 }
 
 void UpdateListDisplay::setScrollActive(bool on) {
-  if (on == _active) return;
-  const uint32_t now = _clock.millis();
-  if (on) {
-    // Resume where it froze: the base is already the frozen position, so re-basing the
-    // epoch is the whole of it. The pause does not advance the marquee.
-    _epochMs = now;
-  } else {
-    _base    = windowAt(now);
-    _epochMs = now;
-  }
-  _active      = on;
+  if (on == _marquee.active()) return;
+  _marquee.setActive(on, _clock.millis());
   _needsRedraw = true;   // paused draws the frozen window once, then transmits nothing
 }
 
-uint16_t UpdateListDisplay::windowAt(uint32_t now) const {
-  if (_len == 0) return 0;
-  const uint32_t steps = (now - _epochMs) / kScrollStepMs;
-  return static_cast<uint16_t>((static_cast<uint32_t>(_base) + steps) % _len);
-}
-
 void UpdateListDisplay::renderWindow(uint16_t pos) {
-  char win[kScrollWidth + 1];
-  for (uint8_t i = 0; i < kScrollWidth; ++i)
-    win[i] = _text[(pos + i) % _len];
-  win[kScrollWidth] = '\0';
+  char win[updatelist::kScrollWidth + 1];
+  _marquee.window(pos, win, sizeof(win));
   // Virtual: the LCD variant substitutes its own encoding and inherits this marquee
   // unchanged. The Result is dropped on purpose — a scroll step that could not be queued
   // is superseded by the next one 400 ms later, and there is nothing useful to do about
@@ -139,33 +88,35 @@ void UpdateListDisplay::renderWindow(uint16_t pos) {
   (void)setText(win, 255);
 }
 
+#endif  // AFFA_ENABLE_MARQUEE
+
 void UpdateListDisplay::onPoll() {
   UpdateListBase::onPoll();          // the AMS banner schedule runs first, always
 
-  if (_len == 0) return;
+#if AFFA_ENABLE_MARQUEE
+  if (_marquee.length() == 0) return;
   if (amsFeedbackPending()) return;  // the banner owns the screen for its whole window
 
-  if (_active) {
-    const uint16_t p = windowAt(_clock.millis());
-    if (p == _lastPos && !_needsRedraw) return;
-    renderWindow(p);
-    _lastPos     = p;
-    _needsRedraw = false;
-    return;
-  }
-
-  if (_needsRedraw) {
-    renderWindow(_base);
-    _lastPos     = _base;
-    _needsRedraw = false;
-  }
+  // A render is emitted only when the window actually MOVES, which is what keeps a 5 kHz
+  // poll() from producing 5 000 identical screens a second.
+  const uint16_t p = _marquee.active() ? _marquee.windowAt(_clock.millis())
+                                       : _marquee.base();
+  if (!_needsRedraw && (!_marquee.active() || p == _lastPos)) return;
+  renderWindow(p);
+  _lastPos     = p;
+  _needsRedraw = false;
+#endif
 }
 
 void UpdateListDisplay::onRadioText(bool isAux) {
+#if AFFA_ENABLE_MARQUEE
   if (!isAux || !_reassertOnAux) return;
   // The radio has drawn over us. Redraw the current window on the next poll — which is
   // the whole reaction, and notably NOT a change of what is being scrolled.
   _needsRedraw = true;
+#else
+  (void)isAux;
+#endif
 }
 
 }  // namespace affa

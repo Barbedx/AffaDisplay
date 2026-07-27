@@ -14,12 +14,27 @@
 namespace affa {
 namespace widget {
 
+// The scroll hint the model computes and the renderer draws. THE VALUES ARE THE CARMINAT
+// WIRE BYTES, so CarminatMenuRenderer stays a pass-through and nothing has to translate on
+// every redraw — but they are declared HERE, in the panel-independent layer, because this
+// is the layer that computes them. src/widget/ must not include a panel's constants.
+//
+// The tie is a static_assert in carminat/CarminatMenuRenderer.cpp, which is the one place
+// that may see both spellings: change a value here and that file stops compiling rather
+// than quietly drawing the wrong arrow. A panel whose wire values differ translates in its
+// own adapter; that is what the adapter is for.
+enum Scroll : uint8_t {
+  kScrollNone = 0x00,   // no arrows — the whole list fits the window
+  kScrollUp   = 0x07,   // top arrow only    — the window is at the END of the list
+  kScrollDown = 0x0B,   // bottom arrow only — the window is at the START
+  kScrollBoth = 0x0C,   // both — the window is in the middle
+};
+
 struct IMenuRenderer {
   virtual ~IMenuRenderer() = default;
 
-  // `header` is never null (the model substitutes ""). `scrollMask` carries the Carminat
-  // wire values verbatim (docs/API.md §8.6) so that adapter is a pass-through:
-  //     0x00 no arrows   0x0B bottom only   0x07 top only   0x0C both
+  // `header` is never null (the model substitutes ""). `scrollMask` is one of the Scroll
+  // values above — docs/API.md §8.6.
   virtual void beginFrame(const char* header, uint8_t scrollMask) = 0;
 
   // `index` is a ROW index, 0..rows-1 from the top of the window — not an item index and

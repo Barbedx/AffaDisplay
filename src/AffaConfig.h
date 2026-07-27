@@ -79,6 +79,15 @@
 #  define AFFA_ENABLE_MENU 0
 #endif
 
+// src/widget/Marquee — the scrolling text window, and with it UpdateListDisplay's
+// setScrollText / setScrollActive / reassert. Like the menu it is a widget rather than
+// protocol, and like the menu it is gated on THIS FLAG ALONE so it compiles on the host
+// with no panel header. On by default: unlike the menu it is small, and the UpdateList
+// 8-segment panel is nearly unusable without it — eight cells do not hold a track title.
+#ifndef AFFA_ENABLE_MARQUEE
+#  define AFFA_ENABLE_MARQUEE 1
+#endif
+
 // AFFA_ENABLE_AUX_TRACKER (removed) gated AuxModeTracker, a heuristic that inferred a
 // radio's audio source from panel text. The patterns survive as a table in
 // docs/PROTOCOL-NOTES.md §8; implement them over subscribe() on the panel's text id.

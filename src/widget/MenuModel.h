@@ -124,7 +124,7 @@ class MenuModel {
   uint8_t topIndex()    const;                            // item shown on row 0
   const MenuGeometry& geometry() const { return _geom; }
 
-  // 0x00 / 0x0B / 0x07 / 0x0C, derived from the window position — docs/API.md §8.6.
+  // One of widget::Scroll, derived from the window position — docs/API.md §8.6.
   uint8_t scrollMask() const;
 
   // ---- navigation ----------------------------------------------------------

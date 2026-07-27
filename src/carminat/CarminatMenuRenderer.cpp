@@ -5,8 +5,20 @@
 #if AFFA_PANEL_CARMINAT && AFFA_ENABLE_MENU
 
 #include <cstddef>
+#include "CarminatConstants.h"
 
 namespace affa {
+
+// THE ONE PLACE BOTH SPELLINGS ARE IN SCOPE, so it is the place the tie is enforced.
+// widget::Scroll carries this panel's wire bytes so beginFrame() can be a pass-through
+// rather than a translation on every redraw; that is a deliberate coincidence, and these
+// four lines are what keeps it from becoming an accident. Change either side and this file
+// stops compiling — instead of the panel quietly drawing an arrow that points nowhere.
+static_assert(widget::kScrollNone == carminat::kScrollNone, "scroll hint drifted: None");
+static_assert(widget::kScrollUp   == carminat::kScrollUp,   "scroll hint drifted: Up");
+static_assert(widget::kScrollDown == carminat::kScrollDown, "scroll hint drifted: Down");
+static_assert(widget::kScrollBoth == carminat::kScrollBoth, "scroll hint drifted: Both");
+
 namespace {
 
 // Bounded copy into a fixed row buffer. The model hands out a borrowed scratch pointer that
@@ -24,9 +36,7 @@ void copyRow(char (&dst)[N], const char* src) {
 
 void CarminatMenuRenderer::beginFrame(const char* header, uint8_t scrollMask) {
   copyRow(_header, header);
-  // The mask is a PASS-THROUGH: 0x00/0x0B/0x07/0x0C are already this panel's wire values
-  // (carminat::kScrollNone/Down/Up/Both), which is exactly why the model keeps them raw.
-  _scroll = scrollMask;
+  _scroll = scrollMask;   // pass-through; the static_assert above is why that is safe
 }
 
 void CarminatMenuRenderer::row(uint8_t index, const char* text, bool selected) {
