@@ -508,6 +508,116 @@ void runPinTest() {
 }
 
 // ---------------------------------------------------------------------------
+// The bit-timing sweep — the experiment the listen-only/normal split points at
+// ---------------------------------------------------------------------------
+// Listen-only receives 12 000 frames with rxErr 0 and busErr 0. Normal receives NOTHING and
+// storms. The controller's only extra behaviour in normal mode is that it drives dominant
+// bits: the ACK, and error flags. So our ACK is landing at the wrong moment and destroying
+// the very frame it is acknowledging — and everything downstream follows from that.
+//
+// Where the ACK lands is the SAMPLE POINT, which is bit timing. This sweeps it directly,
+// bypassing esp32_can and driving twai_* itself, counting frames actually received in NORMAL
+// mode under each configuration. If any row receives, that row is the fix.
+//
+// The constraint: brp * (1 + tseg_1 + tseg_2) = 80 MHz / 500 kbit/s = 160. And on the C3
+// tseg_1 is capped at 16, tseg_2 at 8, sjw at 4 — a tseg_1 of 17 is silently invalid, which
+// is why the obvious "push the sample point to 90%" row is 16/3 and not 17/2.
+struct TimingCase {
+  const char* name;
+  uint32_t brp;
+  uint8_t  t1, t2, sjw;
+  bool     triple;
+};
+const TimingCase kTimings[] = {
+  {"20tq SP80 (default)", 8,  15, 4, 3, false},
+  {"20tq SP85",           8,  16, 3, 3, false},
+  {"20tq SP70",           8,  13, 6, 4, false},
+  {"20tq SP60",           8,  11, 8, 4, false},
+  {"20tq SP80 triple",    8,  15, 4, 3, true },
+  {"16tq SP81",           10, 12, 3, 2, false},
+  {"10tq SP80",           16,  7, 2, 2, false},
+  {"8tq  SP75",           20,  5, 2, 2, false},
+};
+constexpr size_t kTimingCount = sizeof(kTimings) / sizeof(kTimings[0]);
+
+volatile int8_t g_wantNoAck = -1;
+volatile bool g_wantSweep = false;
+bool     g_swRan = false;
+uint32_t g_swGot[kTimingCount] = {0};
+int      g_swBest = -1;
+
+void runTimingSweep() {
+  g_swRan  = true;
+  g_swBest = -1;
+  logmsg("timing sweep: %u configs, NORMAL mode, 1.5 s each",
+         static_cast<unsigned>(kTimingCount));
+
+  CAN0.disable();                       // hand the peripheral over; this deletes its tasks
+  delay(50);
+
+  for (size_t i = 0; i < kTimingCount; ++i) {
+    const TimingCase& c = kTimings[i];
+    g_swGot[i] = 0;
+
+    twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(kTxPin, kRxPin, TWAI_MODE_NORMAL);
+    g.rx_queue_len = 32;
+    g.tx_queue_len = 8;
+    twai_timing_config_t t{};
+    t.brp             = c.brp;
+    t.tseg_1          = c.t1;
+    t.tseg_2          = c.t2;
+    t.sjw             = c.sjw;
+    t.triple_sampling = c.triple;
+    twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+    if (twai_driver_install(&g, &t, &f) != ESP_OK) {
+      logmsg("  %-20s INSTALL REFUSED (invalid timing for this chip)", c.name);
+      continue;
+    }
+    if (twai_start() != ESP_OK) {
+      logmsg("  %-20s start failed", c.name);
+      twai_driver_uninstall();
+      continue;
+    }
+
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 1500) {
+      twai_message_t m;
+      if (twai_receive(&m, pdMS_TO_TICKS(20)) == ESP_OK) ++g_swGot[i];
+    }
+
+    twai_status_info_t st{};
+    twai_get_status_info(&st);
+    logmsg("  %-20s rx=%lu rxErr=%lu busErr=%lu state=%u", c.name,
+           static_cast<unsigned long>(g_swGot[i]),
+           static_cast<unsigned long>(st.rx_error_counter),
+           static_cast<unsigned long>(st.bus_error_count),
+           static_cast<unsigned>(st.state));
+
+    twai_stop();
+    twai_driver_uninstall();
+    delay(50);
+
+    if (g_swGot[i] && (g_swBest < 0 || g_swGot[i] > g_swGot[g_swBest]))
+      g_swBest = static_cast<int>(i);
+  }
+
+  if (g_swBest >= 0)
+    logmsg("timing sweep: BEST is \"%s\" with %lu frames in NORMAL mode",
+           kTimings[g_swBest].name, static_cast<unsigned long>(g_swGot[g_swBest]));
+  else
+    logmsg("timing sweep: NO configuration received a single frame in normal mode");
+
+  // Give the peripheral back to esp32_can exactly as it was.
+  CAN0.setCANPins(kRxPin, kTxPin);
+  CAN0.begin(g_rate);
+  if (g_listen) CAN0.setListenOnlyMode(true);
+  CAN0.setGeneralCallback(&onCanFrame);
+  CAN0.watchFor();
+  logmsg("timing sweep: restored %s", g_listen ? "listen-only" : "normal");
+}
+
+// ---------------------------------------------------------------------------
 // JSON
 // ---------------------------------------------------------------------------
 char   g_out[8192];
@@ -749,6 +859,47 @@ void routes() {
     return replyJson(r);
   });
 
+  // The third mode, and the one that splits "we transmit at all" from "we send the ACK".
+  // NO_ACK drives the bus like normal mode but does not acknowledge what it receives. If
+  // frames arrive here and not in normal mode, the ACK bit alone is the problem.
+  // Watch OUR OWN transmit pin while TWAI owns it. We send no frames, so in every mode this
+  // pad should sit recessive (HIGH) essentially all of the time — dipping only for an ACK.
+  // If it reads LOW in normal/NO_ACK and HIGH in listen-only, our transmit output is holding
+  // the bus dominant and that alone explains why reception dies the moment we are allowed to
+  // drive. Reading a pad owned by a peripheral is not guaranteed, so a constant answer in
+  // BOTH modes means the probe failed, not that the pin is fine.
+  g_server.on("/api/txwatch", HTTP_GET, [](PsychicRequest* r) {
+    uint32_t ones = 0;
+    constexpr uint32_t kN = 2000;
+    for (uint32_t i = 0; i < kN; ++i) {
+      if (gpio_get_level(kTxPin)) ++ones;
+      delayMicroseconds(10);
+    }
+    const uint32_t rxOnes = [] {
+      uint32_t o = 0;
+      for (uint32_t i = 0; i < 2000; ++i) { if (gpio_get_level(kRxPin)) ++o; delayMicroseconds(10); }
+      return o;
+    }();
+    jclear();
+    jf("{\"txHighPct\":%lu,\"rxHighPct\":%lu,\"listenOnly\":%s}",
+       static_cast<unsigned long>((ones * 100) / kN),
+       static_cast<unsigned long>((rxOnes * 100) / 2000),
+       g_listen ? "true" : "false");
+    return replyJson(r);
+  });
+
+  g_server.on("/api/noack", HTTP_GET, [](PsychicRequest* r) {
+    g_wantNoAck = pnum(r, "on", 1) != 0 ? 1 : 0;
+    jclear(); jf("{\"queued\":true,\"noack\":%s}", g_wantNoAck ? "true" : "false");
+    return replyJson(r);
+  });
+
+  g_server.on("/api/timingsweep", HTTP_GET, [](PsychicRequest* r) {
+    g_wantSweep = true;
+    jclear(); jf("{\"queued\":true}");
+    return replyJson(r);
+  });
+
   g_server.on("/api/pintest", HTTP_GET, [](PsychicRequest* r) {
     g_wantPinTest = true;
     jclear(); jf("{\"queued\":true}");
@@ -895,6 +1046,25 @@ void loop() {
     const bool on = g_wantListen != 0;
     g_wantListen = -1;
     applyListen(on);
+  }
+
+  if (g_wantNoAck >= 0 && !g_otaRunning) {
+    const bool on = g_wantNoAck != 0;
+    g_wantNoAck = -1;
+    logmsg("switching to %s ...", on ? "NO_ACK (we transmit, but never acknowledge)"
+                                     : "normal");
+    CAN0.setNoACKMode(on);
+    CAN0.setGeneralCallback(&onCanFrame);
+    CAN0.watchFor();
+    g_listen = false;
+    twai_status_info_t st{};
+    twai_get_status_info(&st);
+    logmsg("now %s, drv.state=%u", on ? "NO_ACK" : "normal", static_cast<unsigned>(st.state));
+  }
+
+  if (g_wantSweep && !g_otaRunning) {
+    g_wantSweep = false;
+    runTimingSweep();
   }
 
   if (g_wantPinTest && !g_otaRunning) {
