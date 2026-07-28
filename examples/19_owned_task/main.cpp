@@ -234,6 +234,31 @@ struct Popup {
 } g_pop;
 
 // ---------------------------------------------------------------------------
+// Backing off a panel that has stopped acknowledging
+// ---------------------------------------------------------------------------
+// ON A TWO-NODE BUS, AN UNACKNOWLEDGED TRANSMITTER DRIVES ITSELF BUS-OFF. There is no third
+// node to acknowledge a frame, so when the panel stops answering, the controller
+// retransmits, TEC climbs to 255, and the peripheral goes BUS_OFF — from our own traffic,
+// against a bus that is electrically fine. Measured on the rig: a window where every render
+// completed Timeout at exactly AFFA_ACK_TIMEOUT_MS intervals, with busErr going 9 -> 143 and
+// the controller flapping in and out of BUS_OFF 22 times in ten minutes.
+//
+// Retrying harder is the worst possible response and it is the obvious one. So: three
+// consecutive Timeouts and this application stops drawing for ten seconds. The library's
+// own 1 Hz heartbeat keeps going — that is the sync channel, it is what notices the panel
+// coming back, and it is two frames a second rather than three screens.
+//
+// This is APPLICATION policy, not library behaviour, and it belongs here: the library
+// cannot know whether your screen is worth the bus time.
+constexpr uint8_t  kTimeoutStreak = 3;
+constexpr uint32_t kCooldownMs    = 10000;
+
+uint8_t  g_toStreak      = 0;
+uint32_t g_cooldownUntil = 0;
+uint32_t g_cooldowns     = 0;
+uint32_t g_timeouts      = 0;
+
+// ---------------------------------------------------------------------------
 // Callbacks — EVERY ONE OF THESE RUNS ON THE LIBRARY'S OWN TASK
 // ---------------------------------------------------------------------------
 // Which is the entire point, and the entire obligation: none of them may block. They
@@ -296,9 +321,23 @@ void onSyncChanged(affa::SyncState s, void*) {
 void onDone(affa::rtos::TxRequest req, affa::Result r, void*) {
   if (r == affa::Result::Ok) {
     ++g_screen.delivered;
+    g_toStreak = 0;                         // the panel is answering again
   } else if (r == affa::Result::Aborted || r == affa::Result::Cancelled) {
     ++g_screen.stale;                       // ours: coalescing or a resync. Not a fault.
   } else {
+    if (r == affa::Result::Timeout) {
+      ++g_timeouts;
+      // The streak, not the count: one Timeout is a lost frame, three in a row is a panel
+      // that has stopped listening and a controller about to punish us for it.
+      if (++g_toStreak >= kTimeoutStreak) {
+        g_toStreak      = 0;
+        g_cooldownUntil = millis() + kCooldownMs;
+        ++g_cooldowns;
+        logmsg(2, "backoff", "%u renders timed out — pausing the screen for %lu ms",
+               static_cast<unsigned>(kTimeoutStreak),
+               static_cast<unsigned long>(kCooldownMs));
+      }
+    }
     ++g_screen.failed;
     g_screen.lastFail   = r;
     g_screen.lastFailMs = millis();
@@ -333,6 +372,7 @@ void onDone(affa::rtos::TxRequest req, affa::Result r, void*) {
 // where it is shouting into a dead controller.
 bool linkUsable(const affa::rtos::Status& s) {
   if (!g_canUp || !g_link.isLive()) return false;
+  if (!affa::expired(millis(), g_cooldownUntil)) return false;
   return !hasFlag(s.sync, affa::SyncState::Failed);
 }
 
@@ -622,6 +662,10 @@ void jStatus() {
      static_cast<unsigned long>(g_screen.failed),
      static_cast<unsigned long>(g_screen.refused),
      static_cast<unsigned long>(g_screen.lastFailMs));
+  jf("\"timeouts\":%lu,\"cooldowns\":%lu,\"cooling\":%s,",
+     static_cast<unsigned long>(g_timeouts),
+     static_cast<unsigned long>(g_cooldowns),
+     affa::expired(millis(), g_cooldownUntil) ? "false" : "true");
   jkv("lastFail", resultName(g_screen.lastFail)); jf(",");
   jkv("l1", g_screen.lastL1); jf(",");
   jkv("l2", g_screen.lastL2); jf(",");
@@ -790,6 +834,28 @@ void routes() {
     logmsg(2, "http", "resync requested");
     g_clockPending = true;
     return replyRequest(r, g_task.resync());
+  });
+
+  // THE TEST THAT SETTLES "IS IT US OR THE BUS".
+  //
+  // setTxEnabled(false) is a SOFTWARE gate — send() returns false — not a driver mode
+  // change (ESP32CAN-CONTRACT rule 4). The controller stays installed and still
+  // acknowledges other nodes at the hardware level, which a two-node bus requires. So with
+  // the gate shut we are electrically a listener:
+  //
+  //   busErr stops climbing while gated  -> the errors follow OUR transmissions
+  //   busErr keeps climbing while gated  -> the errors are on the other node's frames
+  //
+  // Nothing else on this board can distinguish those two, and they want opposite fixes.
+  g_server.on("/api/txgate", HTTP_GET, [](PsychicRequest* r) {
+    const bool on = pnum(r, "on", 1) != 0;
+    if (g_canUp) g_link.setTxEnabled(on);
+    logmsg(2, "http", "TX gate %s", on ? "open" : "SHUT (listening only)");
+    const auto d = g_link.driverState();
+    jclear();
+    jf("{\"txGate\":%s,\"busErr\":%lu,\"state\":%u}", on ? "true" : "false",
+       static_cast<unsigned long>(d.busErr), static_cast<unsigned>(d.state));
+    return replyJson(r);
   });
 
   // Off is for watching a dead controller stay dead on purpose; on is the default because
