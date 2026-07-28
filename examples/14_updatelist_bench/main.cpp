@@ -253,7 +253,37 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  // NETWORK FIRST, ALWAYS. Everything after this may fail and still leave a way back in.
+  // CAN BEFORE WIFI, AND THIS ORDER IS THE WHOLE POINT OF THIS FILE.
+  //
+  // The Carminat panel is UNIVERSAL: attached to an UpdateList radio it behaves as an
+  // UpdateList panel. It decides which it is at ITS power-up, from the radio it can hear —
+  // and the panel shares a supply with this board, so the two boot together. Bringing WiFi
+  // up first costs up to kStaJoinMs of SILENCE on the bus, during which the panel hears no
+  // radio at all and settles into its default family. By the time we start sending 0x3DF it
+  // has already chosen, and every AFFA2 frame after that is acknowledged and not rendered.
+  //
+  // Every other example in this repository says NETWORK FIRST, ALWAYS, and means it: on a
+  // board with no serial cable, OTA is the only way back in. The exception is safe here for
+  // one reason — Esp32CanLink::begin() is BOUNDED. It installs a driver, reads a status
+  // word and returns; there is no join, no retry loop and nothing to wait for. It cannot
+  // hang the way a WiFi join can, so it cannot cost us the network.
+  g_canUp = g_hw.begin(kPins, kBitrate, /*forceRecoveryMs=*/250);
+
+  g_display.onFrame(&onTap, nullptr);
+  g_display.begin();
+
+  // Start the heartbeat IMMEDIATELY, before the network, so the panel hears an UpdateList
+  // radio within a few ms of its own boot rather than fifteen seconds later.
+  for (uint8_t i = 0; i < 40; ++i) { g_display.poll(); delay(5); }
+
+  // MANDATORY. `0x1B1 04 52 02 FF FF` (WIRE-SPEC §9.3). Without it the panel acknowledges
+  // every frame and renders none of them — a healthy link drawing to a dark screen.
+  (void)g_display.setPower(true);
+  g_display.setScrollText(kText);
+  g_display.setScrollActive(true);
+  for (uint8_t i = 0; i < 60; ++i) { g_display.poll(); delay(5); }
+
+  // NOW the network, so there is still a way back in.
   startNetwork();
   g_server.config.max_uri_handlers = 24;
   g_server.listen(80);
@@ -263,21 +293,8 @@ void setup() {
   ElegantOTA.onStart([]() { g_hw.setTxEnabled(false); });
   ElegantOTA.begin(&g_server);
 
-  // 250 ms forced recovery, not 0 and not 2000 — the bench value. docs/ESP32CAN-CONTRACT §3.
-  g_canUp = g_hw.begin(kPins, kBitrate, /*forceRecoveryMs=*/250);
-  if (!g_canUp) Serial.println("[can ] begin() failed — network is still up for OTA");
-
-  g_display.onFrame(&onTap, nullptr);
-  g_display.begin();
-
-  // MANDATORY. `0x1B1 04 52 02 FF FF` (WIRE-SPEC §9.3). Without it the panel acknowledges
-  // every frame and renders none of them — a healthy link drawing to a dark screen.
-  (void)g_display.setPower(true);
-
-  g_display.setScrollText(kText);
-  g_display.setScrollActive(true);
-
-  Serial.println("[bench] updatelist LCD: running text, OTA at /update");
+  if (!g_canUp) Serial.println("[can ] begin() failed — network is up for OTA");
+  Serial.println("[bench] updatelist: running text, OTA at /update");
 }
 
 void loop() {
