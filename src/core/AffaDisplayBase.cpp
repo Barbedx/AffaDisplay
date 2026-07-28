@@ -31,6 +31,7 @@ bool AffaDisplayBase::begin() {
   _lastEnqueued   = kNoTicket;
   _lastResult     = Result::Ok;
   _lastOverflow   = _link.stats().ringOverflow;
+  _begun          = true;
 
   AFFA_LOGI(kTag, "begin: syncId=0x%03X reply=0x%03X funcs=%u",
             static_cast<unsigned>(_profile.syncId),
@@ -40,6 +41,13 @@ bool AffaDisplayBase::begin() {
 }
 
 void AffaDisplayBase::poll() {
+  // WRONG TASK: do nothing, and count it. In library-owned mode (src/rtos/) the owned task
+  // is the only legal caller; an application that ALSO calls poll() — a leftover line in
+  // loop(), most likely — would otherwise drive this FSM concurrently with the owned task
+  // and corrupt it in a way that presents as a panel that occasionally draws garbage.
+  // Silence would be the worst answer, so Status::foreignPolls surfaces it.
+  if (_pollOwnerFn && _pollOwnerFn() != _pollOwner) { ++_foreignPolls; return; }
+
   // A nested poll() does nothing. This is a guard, not a feature — a callback that wants
   // the library pumped is a callback that should have returned.
   if (_inPoll) return;
@@ -901,6 +909,13 @@ bool AffaDisplayBase::menuHotkey(Key& k, KeyEdge& e) const {
 // ---------------------------------------------------------------------------
 // Options and observation
 // ---------------------------------------------------------------------------
+
+void AffaDisplayBase::setPollOwner(void* owner, TaskIdFn fn) {
+  _pollOwner   = owner;
+  _pollOwnerFn = fn;
+}
+uint32_t AffaDisplayBase::foreignPolls() const { return _foreignPolls; }
+bool     AffaDisplayBase::begun() const { return _begun; }
 
 void AffaDisplayBase::setPassive(bool on) { _passive = on; }
 bool AffaDisplayBase::passive() const { return _passive; }

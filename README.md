@@ -463,9 +463,13 @@ Three honest readings of that table:
 
 ### Threading and the non blocking contract
 
-* **No `delay()`, no `vTaskDelay()`, no busy-wait, anywhere in `src/`.** `IClock` exposes
-  `millis()` and deliberately nothing else. If something in this library wanted to sleep,
-  its state machine would be wrong.
+* **No `delay()`, no busy-wait, and no `vTaskDelay()` in `core/`, `util/`, `proto/`,
+  `widget/`, `link/` or either panel.** `IClock` exposes `millis()` and deliberately nothing
+  else. If something on a data path in this library wanted to sleep, its state machine would
+  be wrong. **The single exception, added in 0.3.0, is `src/rtos/AffaTask.cpp`**: the owned
+  task's own `vTaskDelayUntil` between iterations, which is what a task period *is*. It is
+  one call, in the one directory that requires FreeRTOS, and it sleeps the library's task —
+  never yours, and never a data path.
 * **No heap after `begin()`.** Every buffer is static and sized by a macro in
   `AffaConfig.h`. No `String`, no `std::vector`, no `std::function` in the core.
 * **No file-scope or function-local state.** Every counter, deadline and buffer is a member,
@@ -476,21 +480,32 @@ Three honest readings of that table:
   is a deliberate choice, not an omission, and it is what keeps `poll()` free of critical
   sections. Any other context (an HTTP handler, a BLE callback, a second task) must post a
   request into a mailbox that the `poll()` task drains. `examples/90_bench_ota` does exactly
-  this and is worth copying.
+  this and is worth copying — **or set `AFFA_ENABLE_TASK=1` and let the library own both the
+  task and the mailbox** (`examples/19_owned_task`, which needs neither), in which case
+  `poll()` additionally *refuses* any caller that is not the owning task and counts it.
 * **Callbacks fire from the `poll()` context**, never from the CAN driver task. State is
   committed *before* the callback that reports it, so a callback may call back into the
   library — render calls, `abortPending()`, `pressKey()`, `subscribe()` — but never `poll()`
   itself.
 * **Pointers inside an `Event` are valid only for the duration of the callback.** They point
   at library-internal storage. Copy what you keep.
-* `poll()` is **frequency-independent**: calling it once per second and a million times per
-  second produce the same frames in the same order with the same timing. There is no minimum
-  rate for correctness — only for latency and for keeping `Stats::ringOverflow` at zero.
-* **The library owns no task, and there is no flag that gives it one.** There is no
-  `vTaskCreate` anywhere in `src/`, and there will not be one while "no `vTaskDelay` in
-  `src/`" is the contract above. Own the loop yourself. (An `AFFA_ENABLE_TASK` knob was
-  documented in earlier revisions and implemented by nothing; setting it now `#error`s
-  rather than silently producing a library that never polls.)
+* **The frames we emit are frequency-independent; whether a transfer completes is not.**
+  Calling `poll()` once per second and a million times per second produce the same frames in
+  the same order with the same timing — nothing counts calls. But `AFFA_ACK_TIMEOUT_MS` and
+  `AFFA_PEER_TIMEOUT_MS` are wall-clock deadlines evaluated *inside* `poll()`, so a late
+  `poll()` does not delay a result, it **changes** it: `Ok` becomes `Timeout`, and an expired
+  peer deadline tears down registration. Earlier revisions said "no minimum rate for
+  correctness" without that second half, and it was read as licence to share the poll task.
+  (docs/API.md §4.4.)
+* **Since 0.3.0 the library can own the task, and on ESP32 it should.** `-D
+  AFFA_ENABLE_TASK=1` compiles `src/rtos/`, creates a 2 ms task at priority 2, and makes
+  every render callable **from any task** through `affa::rtos::AffaTask` — no mutex, no
+  mailbox, no hand-off. `KeyCb` still fires synchronously inside `poll()`, so key latency is
+  unchanged: it is bounded by the task period and nothing else. `poll()` refuses a caller
+  that is not the owning task and counts it. Off by default, because turning it on changes
+  which task your callbacks run on. **`examples/19_owned_task`** is the reference; docs/API.md
+  §4b is the contract. `core/`, `util/`, `proto/` and `widget/` are untouched by it and still
+  compile on the host against nothing but C++17.
 * **There is no exception.** Earlier revisions offered one, `sendBlocking(ticket,
   timeoutMs)`, which spun on `poll()` until a ticket completed. It is gone: nothing in
   `src/`, `examples/` or `test/` ever called it, and a library whose headline promise is
@@ -1103,9 +1118,12 @@ platformio_footprint.ini` відтворює всі числа звідси, в�
 
 ### Багатозадачність і неблокуючий контракт
 
-* **Ніякого `delay()`, `vTaskDelay()` чи активного очікування — ніде в `src/`.** `IClock`
-  віддає `millis()` і навмисно більше нічого. Якби чомусь тут захотілося поспати, це
-  означало б, що автомат станів побудовано неправильно.
+* **Ніякого `delay()`, активного очікування чи `vTaskDelay()` — ні в `core/`, `util/`,
+  `proto/`, `widget/`, `link/`, ні в жодній із панелей.** `IClock` віддає `millis()` і
+  навмисно більше нічого. **Єдиний виняток, доданий у 0.3.0, — `src/rtos/AffaTask.cpp`**:
+  власний `vTaskDelayUntil` задачі бібліотеки між ітераціями, бо саме це і є період задачі.
+  Один виклик, у єдиному каталозі, що потребує FreeRTOS; він присипляє задачу бібліотеки —
+  ніколи вашу і ніколи шлях даних.
 * **Ніякої купи після `begin()`.** Усі буфери статичні і задані макросами в `AffaConfig.h`.
   Ні `String`, ні `std::vector`, ні `std::function` в ядрі.
 * **Ніякого стану на рівні файлу чи статичних локальних змінних.** Кожен лічильник, дедлайн і
@@ -1116,21 +1134,30 @@ platformio_footprint.ini` відтворює всі числа звідси, в�
   свідомий вибір, а не недогляд, і саме він тримає `poll()` вільним від критичних секцій.
   Будь-який інший контекст (HTTP-обробник, BLE callback, друга задача) має покласти запит у
   поштову скриньку, яку розгрібає задача з `poll()`. `examples/90_bench_ota` робить саме так —
-  його варто копіювати.
+  його варто копіювати. **Або ввімкніть `AFFA_ENABLE_TASK=1`**, і бібліотека візьме на себе
+  і задачу, і скриньку (`examples/19_owned_task`, якому не потрібне ні те, ні те); тоді
+  `poll()` ще й **відмовляє** будь-якому викликачеві, що не є задачею-власником.
 * **Callback-и викликаються з контексту `poll()`**, ніколи із задачі драйвера CAN. Стан
   фіксується *до* того callback-у, який про нього повідомляє, тож із callback-у можна
   викликати бібліотеку далі — рендери, `abortPending()`, `pressKey()`, `subscribe()` — але
   ніколи сам `poll()`.
 * **Вказівники всередині `Event` дійсні лише на час виконання callback-у.** Вони вказують на
   внутрішню пам'ять бібліотеки. Копіюйте те, що зберігаєте.
-* `poll()` **не залежить від частоти виклику**: раз на секунду і мільйон разів на секунду
-  дають ті самі кадри в тому самому порядку з тим самим таймінгом. Мінімальної частоти для
-  коректності не існує — лише для затримки і для того, щоб `Stats::ringOverflow` лишався нулем.
-* **Бібліотека не володіє жодною задачею, і немає прапорця, який би її створив.** У `src/`
-  немає жодного `vTaskCreate`, і не буде, доки діє контракт «жодного `vTaskDelay` у `src/`».
-  Циклом володієте ви. (Перемикач `AFFA_ENABLE_TASK` описувався в ранніх редакціях і не був
-  реалізований нічим; тепер його ввімкнення дає `#error`, а не бібліотеку, яка мовчки не
-  опитується.)
+* **Кадри, які ми надсилаємо, не залежать від частоти виклику; а от чи завершиться передача —
+  залежить.** Раз на секунду і мільйон разів на секунду дають ті самі кадри в тому самому
+  порядку з тим самим таймінгом — ніщо не рахує виклики. Але `AFFA_ACK_TIMEOUT_MS` і
+  `AFFA_PEER_TIMEOUT_MS` — це дедлайни за реальним часом, які перевіряються *всередині*
+  `poll()`, тож запізнілий `poll()` не затримує результат, а **змінює** його: `Ok` стає
+  `Timeout`, а прострочений дедлайн однолітка зносить реєстрацію. У ранніх редакціях була
+  лише перша половина, і це читалося як дозвіл ділити задачу опитування. (docs/API.md §4.4.)
+* **Починаючи з 0.3.0 бібліотека може володіти задачею — і на ESP32 має.** `-D
+  AFFA_ENABLE_TASK=1` вмикає `src/rtos/`, створює задачу з періодом 2 мс і пріоритетом 2, і
+  робить кожен рендер доступним **з будь-якої задачі** через `affa::rtos::AffaTask` — без
+  м'ютексів, без поштової скриньки, без передавання. `KeyCb` і далі спрацьовує синхронно
+  всередині `poll()`, тож затримка клавіші не змінилася: її межа — період задачі й нічого
+  більше. `poll()` відмовляє викликачеві, який не є задачею-власником, і рахує такі виклики.
+  Вимкнено за замовчуванням, бо ввімкнення змінює, у якій задачі працюють ваші колбеки.
+  **`examples/19_owned_task`** — взірець; docs/API.md §4b — контракт.
 * **Винятку немає.** У ранніх редакціях він був — `sendBlocking(ticket, timeoutMs)`, який
   крутив `poll()`, доки квиток не завершиться. Його видалено: його не викликало ніщо в
   `src/`, `examples/` чи `test/`, а бібліотека, головна обіцянка якої — ніколи не блокувати,

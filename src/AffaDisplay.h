@@ -50,6 +50,16 @@
 #  include "link/Esp32CanLink.h"
 #endif
 
+// The owned poll task. THE ONLY PART OF THIS LIBRARY THAT IS NOT PORTABLE, and the one
+// directory a non-FreeRTOS port omits: everything above this line compiles on the host
+// against nothing but C++17. docs/API.md §4b.
+#if AFFA_ENABLE_TASK
+#  if __has_include("rtos/AffaTask.h")
+#    include "rtos/AffaCommand.h"
+#    include "rtos/AffaTask.h"
+#  endif
+#endif
+
 #if AFFA_ENABLE_ISOTP_RX
 #  if __has_include("proto/IsoTp.h")
 #    include "proto/IsoTp.h"

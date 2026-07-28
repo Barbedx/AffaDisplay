@@ -42,7 +42,26 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // RX strictly precedes TX so key latency is bounded by the poll period ALONE, not by
   // queue depth or a message in flight; reordering breaks the headline guarantee.
   // FREQUENCY-INDEPENDENT: nothing counts calls. docs/API.md §4.
+  //
+  // A call from a task that is not the registered poll owner (see setPollOwner) does
+  // NOTHING and is counted in foreignPolls(). Two tasks pumping the same instance corrupts
+  // the transmit FSM, and it does it silently.
   void poll() override;
+
+  // ---- poll ownership (used by src/rtos/, optional everywhere else) -------
+  // Identity of the calling task, as an opaque token. A FUNCTION POINTER, not a FreeRTOS
+  // call: core/ compiles on the host against nothing but C++17, and it stays that way.
+  using TaskIdFn = void* (*)();
+
+  // Declare which task owns poll(). `fn` returns the current task's token; poll() is a
+  // no-op unless fn() == owner. Both null (the default) disables the check entirely, which
+  // is the caller-owned mode: one task, by contract, unchecked.
+  void setPollOwner(void* owner, TaskIdFn fn);
+  uint32_t foreignPolls() const;   // poll() calls refused because they were off-task
+
+  // Has begin() run? AffaTask::start() refuses on false — a task that starts polling a
+  // display that was never begun transmits nothing and reports no reason.
+  bool begun() const;
 
   // ---- ports and options --------------------------------------------------
   void setLogSink(ILogSink* s);
@@ -344,6 +363,10 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   bool      _passive = false;
   bool      _selfAck = false;
   bool      _inPoll  = false;   // re-entrancy guard, not a feature
+  bool      _begun   = false;   // begin() has run at least once
+  void*     _pollOwner   = nullptr;   // null = unchecked (caller-owned mode)
+  TaskIdFn  _pollOwnerFn = nullptr;
+  uint32_t  _foreignPolls = 0;  // poll() calls from a task that is not the owner
   uint32_t  _lastOverflow = 0;  // last ICanLink ringOverflow we reported
   uint32_t  _txDropCount  = 0;  // frames ICanLink::send() refused, counted here so the
                                 // LinkError event does not need a driver status read

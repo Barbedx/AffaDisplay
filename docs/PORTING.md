@@ -183,6 +183,7 @@ and what you cannot avoid rewriting.
 | `src/widget/` | ~940 | **No.** `MenuModel` + `IMenuRenderer` + `MenuGeometry` are a list UI with no wire knowledge; `Marquee` is a scrolling window with none either. Both take their geometry as data and reach a display through an interface. | you want either widget on your own glass (see B.3) |
 | `src/carminat/` | ~1250 | **Yes**, except the menu adapter, which is just the seam between `src/widget/` and this panel's frames. | you keep a Carminat panel |
 | `src/updatelist/` | ~805 | **Yes** — the 8-segment and LCD encodings. The marquee they drive is **not** here; it moved to `src/widget/Marquee`. | you keep an UpdateList panel |
+| `src/rtos/` | ~480 | **No**, but it is the **one directory in this library that requires FreeRTOS** and therefore the one a port to anything else omits entirely. `AffaTask` owns the poll task; `AffaCommand.h` (the command POD, the dispatch table and the ticket→request map) needs nothing but C++17 and is host-tested. Compiled only under `AFFA_ENABLE_TASK=1`, which is an `#error` off ESP-IDF / Arduino-ESP32. | your target has FreeRTOS and you want the library to own its own task (docs/API.md §4b) |
 
 `src/vpanel/` (~825 lines) was here: panel twins used as a test oracle and a no-hardware
 dev loop. **Deleted** — they were application-shaped code shipped as library surface.

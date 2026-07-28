@@ -97,8 +97,18 @@ no `std::function`, no heap after `begin()`.
 | `updatelist/UpdateListBase.{h,cpp}` | Shared AFFA2 behaviour: `setPower`, `0x121` radio-text sniffing. Gated on `AFFA_PANEL_UPDATELIST`. | `core/*`, `util/*` | yes |
 | `updatelist/UpdateListDisplay.{h,cpp}` | The 8-segment panel; non-blocking title scroll driven from `poll()`. Same gate. | as above | yes |
 | `updatelist/UpdateListMenuDisplay.{h,cpp}` | The LCD variant; different `setText` channel/location encoding. Gated on `AFFA_PANEL_UPDATELIST_MENU`. | as above | yes |
+| `rtos/AffaCommand.h` | `TxRequest`, `Op`, `Command`, `setArg`, `applyCommand`, `RequestTable` — one posted render as data, the dispatch table, and the ticket→request map. Header-only and **not gated**: it needs nothing but C++17 and `AffaDisplayBase`, which is what makes the interesting half of the owned-task mode host-testable. | `core/AffaDisplayBase.h`, `<cstring>` | yes |
+| `rtos/AffaTask.{h,cpp}` | `TaskOptions`, `Status`, `AffaTask` — creates the task, drains the command queue, calls `poll()`, publishes `Status`. **The only file in the library that includes FreeRTOS**, the only `vTaskDelayUntil`, and the one directory a non-FreeRTOS port omits. Entire body gated on `AFFA_ENABLE_TASK`, which is itself an `#error` off ESP-IDF / Arduino-ESP32. | `AffaCommand.h`, `core/*`, `util/AffaLog.h`, `<freertos/*>`, `<esp_timer.h>` | **no** |
 
 **Enforced rules.**
+
+* **`src/rtos/` is the single exception to "Host" above, and it is fenced.** FreeRTOS
+  headers appear in `rtos/AffaTask.h` and nowhere else; `core/`, `util/`, `proto/` and
+  `widget/` remain compilable against nothing but C++17, which is why the 208-case host
+  suite is untouched by the owned-task mode. The poll-owner guard the mode needs inside
+  `core/` is a **function pointer** (`AffaDisplayBase::TaskIdFn`) precisely so that `core/`
+  does not learn what a task is — and it is host-tested through that seam
+  (`test_owned_task`).
 
 * `<esp32_can.h>` appears exactly once in the repository, in `link/Esp32CanLink.cpp`.
   A CI grep asserts this. The original code's `Menu.h` included it for `CAN_FRAME`;
@@ -2071,6 +2081,20 @@ host against `LoopbackLink` + `FakeClock`; none needs hardware.
 
 ## 4. Threading contract
 
+**Since 0.3.0 there are two modes, and you pick one at compile time.**
+
+| | `AFFA_ENABLE_TASK = 0` (default) | `AFFA_ENABLE_TASK = 1` |
+| --- | --- | --- |
+| Who calls `poll()` | **you**, from exactly one task, for ever | the library, on a task it owns |
+| Who may render | that same task only | **any task**, through `affa::rtos::AffaTask` |
+| What breaks it | anything blocking that task — see §4b.1 | a callback that blocks, and nothing else |
+| Where the contract lives | §4.1 – §4.6, below | §4b |
+
+§4.1 – §4.6 describe the caller-owned mode and remain exactly true of it. Everything in
+them about *which context a callback fires in* is also true of the owned task — the only
+thing that changes is which task that is. §4b describes the owned-task mode and the four
+things it adds.
+
 ### 4.1 Where frames come from
 
 `collin80/esp32_can` delivers frames from its own FreeRTOS tasks:
@@ -2142,10 +2166,30 @@ after the current dispatch finishes, so the tap sees frames in wire order, not n
 > Nothing counts calls. Calling `poll()` once per second and calling it a million
 > times per second produce **the same frames, in the same order, with the same
 > timing**; they differ only in how soon a received frame is noticed and in how much
-> CPU is burned. There is no minimum call rate for correctness — only for latency and
-> for keeping `Stats::ringOverflow` at zero.
+> CPU is burned.
 
-Sizing follows from that last clause, not from the protocol: at 500 kbit/s a full
+**That is a statement about the frames we EMIT. It is not a statement about whether a
+transfer COMPLETES, and the difference is expensive.** An earlier edition of this section
+ended with "there is no minimum call rate for correctness — only for latency and for
+keeping `Stats::ringOverflow` at zero", and a consumer read it, correctly, as licence to
+share the poll task with a BLE stack and a web server. It cost them 401 timed-out renders,
+a latched `BUS_OFF` and two lost registrations in one day.
+
+Split it in two, because the two halves are governed by different things:
+
+* **The transmitted frame sequence is frequency-independent.** Proven, by the two tests
+  below. Nothing in the library counts calls.
+* **Delivery is not.** `AFFA_ACK_TIMEOUT_MS` and `AFFA_PEER_TIMEOUT_MS` are wall-clock
+  deadlines evaluated *inside* `poll()`. A `poll()` that arrives late does not merely
+  delay a result, it **changes** it: an ACK that arrived on time and sat in the ring for
+  two seconds is a `Result::Timeout`, and an expired peer deadline tears down `FUNCSREG`
+  and cancels the queue. There is a minimum call rate for *delivery*, and it is set by
+  the tightest deadline you care about.
+
+So: the frames are frequency-independent; the outcomes are not. If your task can be
+blocked for longer than `AFFA_ACK_TIMEOUT_MS` by anything at all, you want §4b.
+
+Sizing follows from `ringOverflow`, not from the protocol: at 500 kbit/s a full
 8-byte frame takes ~228 µs, so `AFFA_RX_RING_DEPTH = 32` tolerates a ~7 ms gap between
 `poll()` calls on a fully saturated bus, and far longer on the 2-node bus this library
 actually runs on.
@@ -2175,7 +2219,10 @@ is replayed through `pressKey()` from the task that owns `poll()`.
 
 The library is **not internally locked**. If two tasks must reach it, either put a
 mutex around every entry point in your adapter, or — better — give the second task a
-queue and drain it from the task that owns `poll()`.
+queue and drain it from the task that owns `poll()`. **Better still, since 0.3.0: set
+`AFFA_ENABLE_TASK=1` and let the library own both the task and the queue (§4b).** That
+queue is proven code, it is the shape this section has recommended since 0.1.0, and
+having every consumer write it again is how it gets written wrong.
 
 The one thing that is genuinely concurrent, `Esp32CanLink::ingest` writing into
 `AffaRing` from `task_CAN` while `poll()` reads, is handled by the ring's SPSC
@@ -2230,10 +2277,144 @@ callback. Deferring them by one task wakeup would put the reaction behind whatev
 counter enqueued in the meantime and reintroduce exactly the backlog §3b exists to
 prevent. Defer the slow work, never the preemption.
 
-`examples/03_carminat_menu` ships this shape. **The library will not own that loop for
-you**: it creates no task, and there is no flag that makes it — see the `AFFA_ENABLE_TASK`
-row in §5.3, which documents a knob that was specified, never implemented, and now
-`#error`s rather than silently doing nothing.
+`examples/03_carminat_menu` ships this shape. In owned-task mode the split still applies
+and for the same reason — the callback runs on the library's task now, so the expensive
+half belongs off it more than ever — but the queue in the second half is yours to keep or
+delete: the *preemption* half is what must stay in the callback.
+
+---
+
+## 4b. The owned-task mode — `AFFA_ENABLE_TASK = 1`
+
+```cpp
+affa::CarminatDisplay display(link, clock);
+affa::rtos::AffaTask  task;
+
+void setup() {
+  display.setLogSink(&sink);
+  display.onKey(&onKey, nullptr);      // 1. callbacks
+  display.onSync(&onSync, nullptr);
+  task.onComplete(&onDone, nullptr);
+  display.begin();                     // 2. begin()
+  task.start(display);                 // 3. start() — and never call poll() again
+}
+
+void loop() {
+  task.setText("HELLO");               // from here, or an HTTP handler, or a BLE task
+  delay(10);
+}
+```
+
+`examples/19_owned_task` is this, complete, with WiFi and OTA on a real panel.
+
+### 4b.1 What it is for
+
+The caller-owned contract is one sentence and it is violated **by addition**: by the next
+feature somebody puts in `loop()`, not by the code that was reviewed. One competent
+consumer broke it three times in a single day, each time somewhere else, each time with
+the same symptom on the glass:
+
+| What went on the poll task | How it presented |
+| --- | --- |
+| a BLE service call, allowed to block on GATT | sync stuck at `0x08`, **401 of 644 renders `Timeout`**, every error counter zero |
+| a retry site that advanced its backoff only on success | **21 261 frames transmitted against 9 625 received**, `BUS_OFF` latched, registration lost |
+| a blocking WebSocket write | *"it froze again — because I opened the web interface?"* Two browser tabs, 115 failed renders |
+
+In all three the frames arrived correctly and on time; the consumer was not awake to
+consume them. The owned task removes the whole class, because the task that polls is no
+longer a task anyone else can put anything on.
+
+### 4b.2 Key latency does not regress, and that is the acceptance criterion
+
+`KeyCb` still fires **synchronously inside `poll()`**, before any TX pumping, exactly as
+it always has. Keys are **never** routed back to an application task through a queue —
+that would add a task hop and make key latency depend on the application's scheduling,
+which is the precise property this mode exists to remove.
+
+What follows from that:
+
+* **Key latency ≈ `AFFA_TASK_PERIOD_MS`, and nothing else.** It defaults to **2 ms**, not
+  10 or 20. Measured on the bench rig at that period: worst observed iteration 472 µs.
+* **The owned task outranks the application.** `AFFA_TASK_PRIO` defaults to **2**, above
+  the Arduino loop task's 1. A key must not wait behind an application that is busy.
+* **Your `KeyCb` now runs on the library's task, so it must not block.** This has the same
+  force as "callbacks must not call `poll()`". It cannot be prevented, so it is made
+  visible: `Status::pollLateMaxUs`.
+* **Commands drain before `poll()`.** One iteration is `drainCommands()` then `poll()`
+  then `publishStatus()`, so a render posted this period is pumped this period.
+
+### 4b.3 A queue, not a mutex
+
+Callbacks fire from inside `poll()` and are explicitly permitted to call back into the
+library (§4.3). A non-recursive mutex deadlocks on the first such call; a recursive one
+lets an application hold the library locked while it blocks on something else; and either
+puts a lock in `core/`, which would end its portability. So a render made from another
+task is **copied into a command queue** that the owned task drains — no lock anywhere, and
+the single-caller invariant is untouched.
+
+Two consequences a caller can see:
+
+* **Arguments are copied**, bounded by `AFFA_TASK_ARG_MAX` (48). No pointer into a
+  caller's stack ever crosses a task boundary.
+* **A render made from inside a callback takes the DIRECT path**, because it is already on
+  the owned task. `AffaTask` detects this. Self-enqueueing there would deadlock §4.3's
+  documented preemption pattern against a full queue.
+
+### 4b.4 `TxRequest`, not `TxTicket`
+
+`AffaTask`'s render methods return a **`TxRequest`**, and the different name is the point:
+a `TxTicket` is issued by `enqueue()`, which for a posted render has not run yet. A
+`TxRequest` is issued at post time and mapped to the real ticket when the command drains.
+
+* non-zero — accepted;
+* `kNoRequest` — **refused**, never "accepted but untracked". The queue was full
+  (`Status::queueDropped` counts it) or the render was refused outright.
+
+Completions arrive through `AffaTask::onComplete(cb, ctx)` with the same `TxRequest` the
+caller was given. `AffaTask` takes over `AffaDisplayBase::onComplete` to do the
+translation, so **do not install your own on the display in this mode** — there is one
+handle space, and this is it. A completion reported with `kNoRequest` is a render the
+*library* made (a menu redraw, the close banner); it is forwarded rather than swallowed.
+
+### 4b.5 Observers become a snapshot
+
+`synced()`, `busy()`, `registered()`, `syncState()` and `stats()` still exist and are
+still correct **from the owned task's own callbacks**. Off-task they are reads racing a
+writer, and `Stats` is a seven-field struct: read field by field it can return a mixture
+of two moments.
+
+The owned task publishes an `affa::rtos::Status` once per iteration under a seqlock.
+**Every reader that is not the owned task should use `task.status()`** — one snapshot, one
+moment, lock-free, and it can never block an HTTP handler.
+
+### 4b.6 The numbers that prove it is working
+
+| Field | What a healthy board reports | What a bad number means |
+| --- | --- | --- |
+| `foreignPolls` | **0** | somebody still calls `poll()`. Those calls did nothing (`poll()` refuses a non-owner and counts it), which is why this is a counter and not a crash. |
+| `pollLateMaxUs` | near the period — 472 µs measured at a 2 ms period | a callback is blocking the owned task. Past `AFFA_TASK_LATE_FACTOR × period` it also logs, rate-limited to once a second. |
+| `queueDropped` | **0** | you are posting renders faster than the wire drains them. Gate on `status().busy`, as `examples/19_owned_task` does. |
+| `stackFreeBytes` | 2036 measured on the C3 with the marquee widget and a rendering `KeyCb` — i.e. about half of `AFFA_TASK_STACK` unused | shrink `AFFA_TASK_STACK` at your own risk; a deep callback chain lives on this stack. |
+
+### 4b.7 Failure modes, and what each one does
+
+| | Behaviour |
+| --- | --- |
+| `start()` before `begin()` | refused, `false`, logged. A task polling an un-begun display transmits nothing and reports no reason. |
+| `start()` twice | refused, `false`. Two tasks polling one display is the same corruption as an application that never stopped calling `poll()`. |
+| task or queue creation fails | refused, `false`, logged. Never a silent success that never polls. |
+| the application also calls `poll()` | the call does **nothing** and increments `foreignPolls`. |
+| the command queue is full | `kNoRequest`, `queueDropped++`. Never blocks the caller, never drops silently. |
+| a callback blocks | cannot be prevented; recorded in `pollLateMaxUs` and logged. |
+| `stop()` | drains, drops unstarted renders as `Cancelled`, lets a message already on the wire finish (bounded by two ACK timeouts), then joins. No torn ISO-TP left on the panel. |
+| `stop()` from a callback | it is on the owned task and cannot join itself: the stop is requested and `stop()` returns. |
+
+### 4b.8 What it does not change
+
+`core/`, `util/`, `proto/` and `widget/` are untouched and still compile on the host
+against nothing but C++17. `src/rtos/` is the only FreeRTOS-dependent directory in the
+library and the only one a port omits (`docs/PORTING.md`). `AFFA_ENABLE_TASK=1` on a
+non-FreeRTOS target is still an `#error`.
 
 ---
 
@@ -2400,7 +2581,14 @@ the image", which the map file and the flash number report.
 | `AFFA_ENABLE_ESP32CAN_LINK` | 1 | `Esp32CanLink.{h,cpp}` and the `<esp32_can.h>` dependency. | 0 on a project that uses a different CAN driver: nothing pulls `esp32_can` in, and you supply your own `ICanLink`. 1 without the dependency in `lib_deps`: link error. |
 | `AFFA_ENABLE_ISOTP_RX` | 0 on target, 1 on host | `isotp::Reassembler` + `screen::*` + the `onText()` path — decoding inbound multi-frame traffic (sniffing another head unit, replaying a capture) and the callback that reports it (§2.14). | 1 on a shipping target in the radio role: you pay ~900 B flash / ~384 B RAM for a decode path nothing in that role calls. 0 on the host: `test_seam`'s `onText` cases and `test_bench_surface`'s wire oracle stop compiling — which is the point, since a host build without them tests bytes instead of meaning. |
 | `AFFA_ENABLE_MARQUEE` | 1 | `widget::Marquee`, and with it `UpdateListDisplay::setScrollText` / `setScrollActive` / `reassert` / `setReassertOnAux`. A widget, not protocol — but a cheap one. | 0 on a Carminat-only build: it costs nothing there anyway, since nothing names it. 0 on an UpdateList build: the 8-segment panel shows the first eight characters of a title and no more, which is usually not what anyone wants. |
-| `AFFA_ENABLE_TASK` | — | **NOT IMPLEMENTED.** An owned FreeRTOS task that calls `poll()` was specified here and written nowhere: there is no `vTaskCreate` under `src/`, and there will not be one while "no `vTaskDelay` in `src/`" (§4) is the contract. Until the review that found this, the knob existed, defaulted to 0 and was referenced by nothing — so a consumer who set it to 1 got a library that never polled, with no diagnostic. | Setting it to 1 is now an `#error`. Own the loop: call `poll()` from exactly one task. `AFFA_TASK_PERIOD_MS`, `AFFA_TASK_STACK` and `AFFA_TASK_PRIO` were removed with it. |
+| `AFFA_ENABLE_TASK` | 0 | **Real since 0.3.0** (§4b): compiles `src/rtos/`, the library creates and owns the task that calls `poll()`, and every render becomes callable from any task through `affa::rtos::AffaTask`. Off by default and deliberately not defaulted on for `ARDUINO_ARCH_ESP32`, because turning it on changes *which task* an existing consumer's callbacks run on — observable behaviour, so it stays something you ask for. `=1` on a non-FreeRTOS target is still an `#error`; that is the one the old unconditional error became. | Leave it 0 and call `poll()` from exactly one task, as §4 has always said. Nothing else changes. |
+| `AFFA_TASK_PERIOD_MS` | 2 | **Key latency is bounded by this and nothing else** (§4b.2). At 500 kbit/s a frame is ~228 µs, so 2 ms keeps `ringOverflow` at zero with margin and is far below anything a human perceives. | Raising it is a direct, linear regression in the one number this mode protects. 10 ms is a fivefold one. |
+| `AFFA_TASK_PRIO` | 2 | Above the Arduino loop task (1), below the WiFi/TCP tasks (18+). A key must not wait behind a busy application, and the network stack must not wait behind us. | Below 2 and a busy `loop()` delays keys; above ~17 and you are preempting the radio. |
+| `AFFA_TASK_STACK` | 4096 | `poll()` plus the deepest callback nesting §4.3 permits. **Measured**: 2036 bytes still free on the C3 with the marquee widget and a rendering `KeyCb` — reported live as `Status::stackFreeBytes`, so this is checkable rather than taken on trust. | Shrinking it is safe only against your own callbacks; check `stackFreeBytes` on your build. |
+| `AFFA_TASK_QUEUE_DEPTH` | 8 | Command slots, `sizeof(Command)` ≈ 156 B each ≈ 1.2 kB. Matched to `AFFA_TX_QUEUE_DEPTH + 2`: a command queue deeper than the transmit queue only defers `QueueFull` to a worse place, where the caller has already been told the render was accepted. | Deeper hides backpressure; shallower turns a burst into `kNoRequest`, which is at least honest. |
+| `AFFA_TASK_ARG_MAX` | 48 | Bytes per string argument, three per command. What a **queued** render truncates at — arguments are copied by value so no pointer crosses a task boundary. Covers every string any panel here can put on glass (the Carminat menu row is 26 usable, `setText` 14). | Below your longest string, silently truncated (always NUL-terminated). |
+| `AFFA_TASK_CORE` | -1 | `tskNO_AFFINITY`. The C3 is single-core and ignores it. | On a dual-core part, pinning away from the WiFi core is worth measuring. |
+| `AFFA_TASK_LATE_FACTOR` | 8 | An iteration slower than this many periods logs once per second and is recorded in `Status::pollLateMaxUs`. It is how a blocking user callback becomes visible instead of mysterious. | Higher hides the thing you most want to see. |
 | `AFFA_TX_COALESCE` | 1 | Latest-value-wins replacement of a queued, not-yet-started render of the same `RenderSlot` (§3b.4). Costs one linear scan of at most `AFFA_TX_QUEUE_DEPTH` entries per enqueue, and 4 bytes per `TxJob`. Buys a bounded queue under any render rate. | 0: a repeated render stacks. At `f` Hz in front of a `T`-second transfer you get `min(⌈f·T⌉, depth−1)` stale messages on screen after the key and `QueueFull` for the rest (§3b.7) — the panel keeps counting after Pause. Set it to 0 only when consecutive same-slot messages are a sequence that must all be seen, and prefer `TxOptions::coalesce = false` on those specific messages instead. |
 | `AFFA_TX_QUEUE_DEPTH` | 6 | `sizeof(TxJob)` ≈ `AFFA_MAX_PAYLOAD + 12` bytes each ≈ 750 B of static RAM at the defaults. 6 and not 4 because `showInfoPopup` is three non-coalescing messages and the first call after a resync also carries two registration probes: 2 + 3 = 5 outstanding, plus one slot of headroom for an `Urgent`. | Below 3 the lazy registration burst (2 probes + 1 payload for either panel) cannot fit and the first send after a resync returns `QueueFull` forever. Below what your app bursts: renders start returning `QueueFull`. |
 | `AFFA_MAX_PAYLOAD` | 113 | Largest single ISO-TP message. **113 is a wire limit, not a budget**: 8 bytes in frame 0 plus 15 continuations of 7 is `8 + 15×7 = 113`, the point at which the continuation counter would wrap. `showConfirmBox` sits at exactly 113. The Carminat menu screen is 96 bytes; the `setText` payload is 22. | Below 96: `showMenu` returns `TooLong` and the menu never draws. Above 113: `#error`, unless you define `AFFA_UNSAFE_LONG_PAYLOAD` after bench-validating a longer transmit. |

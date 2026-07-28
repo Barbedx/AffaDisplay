@@ -140,13 +140,73 @@
 #  endif
 #endif
 
-// NOT IMPLEMENTED. The library owns no task and there is no vTaskCreate under src/.
-// Setting this is an #error rather than a silent no-op, because a consumer who set it got
-// a library that never polled with no diagnostic. Call poll() from one task of your own.
-#ifdef AFFA_ENABLE_TASK
-#  if AFFA_ENABLE_TASK
-#    error "AffaDisplay: AFFA_ENABLE_TASK is not implemented. The library owns no task; call poll() from exactly one task of your own (docs/API.md §4)."
-#  endif
+// src/rtos/ — the library creates and owns a FreeRTOS task that calls poll(), and the
+// application never calls poll() at all. Render calls then become legal FROM ANY TASK,
+// because they are copied into a command queue that the owned task drains. docs/API.md §4b.
+//
+// OFF BY DEFAULT, and deliberately not defaulted on for ARDUINO_ARCH_ESP32: turning it on
+// changes WHICH TASK a consumer's callbacks run on, which is observable behaviour, so it
+// stays something you ask for.
+//
+// The #error below is the one that used to be unconditional. It still fires for every
+// non-FreeRTOS target — src/rtos/ is the one directory a port omits — it just no longer
+// fires for the targets that can actually honour the flag.
+#ifndef AFFA_ENABLE_TASK
+#  define AFFA_ENABLE_TASK 0
+#endif
+#if AFFA_ENABLE_TASK && !defined(ESP_PLATFORM) && !defined(ARDUINO_ARCH_ESP32)
+#  error "AffaDisplay: AFFA_ENABLE_TASK=1 needs a FreeRTOS target (ESP_PLATFORM / ARDUINO_ARCH_ESP32). src/rtos/ is the only part of this library that is not portable; on any other target call poll() from exactly one task of your own (docs/API.md §4)."
+#endif
+
+// KEY LATENCY IS BOUNDED BY THIS AND NOTHING ELSE. KeyCb fires synchronously inside poll()
+// on the owned task, before any TX pumping, so 2 ms is the whole added delay between a
+// key frame landing in the RX ring and the application seeing it. Do not "save power" by
+// raising it: 10 ms is a fivefold regression in the one number this mode exists to protect.
+#ifndef AFFA_TASK_PERIOD_MS
+#  define AFFA_TASK_PERIOD_MS 2
+#endif
+
+// ABOVE the Arduino loop task, which runs at 1. A key must not wait behind an application
+// that is busy. Below the WiFi/TCP stack tasks (18..23), which must not wait behind us.
+#ifndef AFFA_TASK_PRIO
+#  define AFFA_TASK_PRIO 2
+#endif
+
+// poll() plus the deepest documented callback nesting (docs/API.md §4.3). MEASURED on the
+// bench rig (C3, marquee widget, rendering KeyCb, examples/19_owned_task): 2036 bytes
+// still free, i.e. about half of this unused. Status::stackFreeBytes reports it live, so
+// shrinking this is checkable against your own callbacks rather than a guess.
+#ifndef AFFA_TASK_STACK
+#  define AFFA_TASK_STACK 4096
+#endif
+
+// Command slots. Matches AFFA_TX_QUEUE_DEPTH + 2 for the same reason the transmit queue is
+// 6: a deeper command queue than transmit queue only defers QueueFull to a worse place,
+// where the caller has already been told the render was accepted.
+#ifndef AFFA_TASK_QUEUE_DEPTH
+#  define AFFA_TASK_QUEUE_DEPTH 8
+#endif
+
+// Bytes per string argument in a queued command, three per command. A command is copied by
+// value into the queue — no pointer into a caller's stack ever crosses a task boundary —
+// so this is what a queued render truncates at. 48 covers every string any panel in this
+// library can put on glass (the Carminat menu row is 26 usable, setText is 14).
+#ifndef AFFA_TASK_ARG_MAX
+#  define AFFA_TASK_ARG_MAX 48
+#endif
+
+// -1 is tskNO_AFFINITY. The C3 is single-core and ignores it; on a dual-core part, pinning
+// the owned task to the core that is NOT running WiFi is worth measuring.
+#ifndef AFFA_TASK_CORE
+#  define AFFA_TASK_CORE -1
+#endif
+
+// An iteration slower than this many periods logs once (rate-limited) and is recorded in
+// Status::pollLateMaxUs. It is how a blocking user callback becomes visible instead of
+// mysterious — the three incidents in docs/CR-0.3.0-OWNED-TASK.md §2 all presented as "the
+// panel is frozen" with every error counter at zero.
+#ifndef AFFA_TASK_LATE_FACTOR
+#  define AFFA_TASK_LATE_FACTOR 8
 #endif
 
 // The ISO-TP reassembler, the screen decoder, and the onText() callback they feed. For

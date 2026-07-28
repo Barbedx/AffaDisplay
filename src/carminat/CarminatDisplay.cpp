@@ -296,9 +296,14 @@ Result CarminatDisplay::showMenu(const char* header, const char* row0, const cha
 // The transient overlay ("VOL 28"): setText's wire family with mode 0x74, and here the
 // declared length IS correct.
 //
-// THE POPUP IS A NON-DESTRUCTIVE OVERLAY — the screen underneath keeps being redrawn while
-// it is up, and it stays until it auto-reverts or hidePopup() closes it. Hence
-// RenderSlot::Popup never coalescing against RenderSlot::Text.
+// THE POPUP IS THE ONE TRUE OVERLAY ON THIS PANEL, and its lifetime belongs to the
+// APPLICATION. Measured 2026-07-28 on a real Carminat: with a popup up, the screen
+// underneath was redrawn (BASE-A -> BASE-B, visible at the line ends the overlay does not
+// cover) and the popup stayed on top. No auto-revert was observed — hidePopup() is what
+// clears it, so an application that shows one owns a deadline to close it.
+//
+// Hence RenderSlot::Popup never coalescing against RenderSlot::Text: they are two
+// independent layers, not two versions of one screen.
 Result CarminatDisplay::showPopupText(const char* text, uint8_t icon, uint8_t srcIcon,
                                       uint8_t fmt) {
   const Ascii t(text);
@@ -347,8 +352,19 @@ Result CarminatDisplay::hidePopup() { return Result::NotSupported; }
 // ---------------------------------------------------------------------------
 #if AFFA_ENABLE_FULLSCREEN
 
-// The same 0x21 screen command as showMenu with mode 0x05: the panel takes the whole glass
-// and renders later menu/volume screens as popups over it.
+// The same 0x21 screen command as showMenu with mode 0x05: three equal lines on the whole
+// glass, no row tags.
+//
+// IT IS NOT AN OVERLAY AND IT NEEDS NO TEARDOWN. Measured on a real Carminat, 2026-07-28:
+// a plain setText() over a live fullscreen REPLACED it, with no hideFullscreenText() sent.
+// Every full-screen-class render — showMenu, showFullscreenText, setText — simply replaces
+// the last one, so a fullscreen can be animated at the rate the wire sustains (~190 ms per
+// screen, 14 frames, every one acknowledged) with no close in between.
+//
+// The POPUP is the true overlay: it survives a redraw of the screen underneath, the redraw
+// still lands, and only hidePopup() clears it. WIRE-SPEC.md §8.6 had these two the wrong
+// way round until that bench session; if you are holding a comment that says a fullscreen
+// owns the glass until closed, it is the old one.
 //
 // The most strongly corroborated builder in the library: the OEM head unit's own "Please
 // insert navigation CD" screen is in the capture with matching header, frame count and
@@ -385,6 +401,10 @@ Result CarminatDisplay::showFullscreenText(const char* l1, const char* l2, const
   return submit(kIdSetText, p, static_cast<uint8_t>(sizeof(p)), RenderSlot::Fullscreen);
 }
 
+// OPTIONAL, unlike hidePopup(). Drawing any other screen leaves a fullscreen, so this is
+// the explicit "close the window" command for the case where there is nothing to draw
+// instead — not a teardown the caller owes the panel after every fullscreen.
+//
 // Identical bytes to hidePopup(); a different RenderSlot, because a pending "close the
 // fullscreen" must not be superseded by a pending "close the popup".
 Result CarminatDisplay::hideFullscreenText() {

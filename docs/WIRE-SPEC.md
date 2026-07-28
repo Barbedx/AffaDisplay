@@ -987,21 +987,34 @@ Same `0x21` screen command as `showMenu` with mode byte `0x05` instead of `0x01`
 takes the whole screen and renders later menu/volume screens as popups over it.
 Reverse-engineered from the OEM "Please insert navigation CD" screen.
 
-> **[CAP] THE FULLSCREEN SCREEN OWNS THE GLASS UNTIL IT IS CLOSED.** Confirmed on a real
-> Carminat, 2026-07-28:
+> **[CAP] THE FULLSCREEN NEEDS NO CLOSE. ANY OTHER FULL-SCREEN RENDER REPLACES IT.**
+> Confirmed on a real Carminat, 2026-07-28, with the media repaint stopped first so nothing
+> else was drawing:
 >
-> * **Between fullscreen frames, no close is needed.** Each screen replaces the last, so a
->   fullscreen can be animated at the rate the wire sustains — measured at ~190 ms per
->   screen, 14 frames each, every one acknowledged.
-> * **To leave it, `hideFullscreenText()` is mandatory.** With a fullscreen up, a plain
->   `setText()` was **delivered `Result::Ok`** — the panel acknowledged every frame — and
->   the glass did not change at all.
+> ```
+> showFullscreenText  FS-ONE / FS-TWO / FS-THREE   -> delivered Ok
+> setText             PLAINTXT                     -> delivered Ok
+> ```
 >
-> So on this screen **a delivered `Ok` is not evidence that anything appeared**. That is the
-> same shape as the display-power trap (§8.3: a render to a powered-off panel also completes
-> `Ok` and shows nothing) — the transport succeeded and the screen still did not move. It is
-> the reason `hideFullscreenText()` exists as its own call rather than being implied by the
-> next render.
+> **The glass then read `PLAINTXT`**, with no `hideFullscreenText()` sent. On this panel
+> every full-screen-class render — `showMenu`, `showFullscreenText`, `setText` — simply
+> replaces the last one.
+>
+> * **Between fullscreen frames, no close is needed either.** A fullscreen can be animated
+>   at the rate the wire sustains — measured at ~190 ms per screen, 14 frames each, every
+>   one acknowledged. `examples/19_owned_task` does exactly this, continuously.
+> * **`hideFullscreenText()` is therefore optional**, and is the explicit close for the case
+>   where there is nothing to draw instead. It is not a teardown you owe the panel.
+>
+> **THIS ENTRY SAID THE OPPOSITE UNTIL THAT SESSION**, as a `[CAP]`: that a fullscreen owned
+> the glass until closed, and that a `setText()` over one was delivered `Ok` and changed
+> nothing. The behaviour it described is real — it is the **popup's** (§8.7) — and it was
+> attributed to the wrong screen. That is worth leaving visible: a `[CAP]` marker means
+> *observed*, and an observation can still be filed against the wrong operation.
+>
+> One trap from the old text survives intact and belongs to §8.3, not here: a render to a
+> **powered-off** panel completes `Ok` and shows nothing. A delivered `Ok` is an acceptance
+> and transport verdict, never evidence that a human can see something.
 
 Payload is `uint8_t payload[2 + 96]`, so `L = 98` always.
 
@@ -1054,9 +1067,23 @@ L    = 8 + tlen
 | 7 | `0x01` | control byte |
 | 8.. | text | space-padded to `tlen`, truncated at 16 |
 
-Observed property: the popup is a **non-destructive overlay**. The screen underneath keeps
-being redrawn while it is up; the popup stays until it auto-reverts or `hidePopup()` closes
-it.
+> **[CAP] THE POPUP IS THE ONE TRUE OVERLAY, AND ITS LIFETIME IS THE APPLICATION'S.**
+> Confirmed on a real Carminat, 2026-07-28, in the same session as §8.6:
+>
+> ```
+> showFullscreenText  BASE-A1 / BASE-A2 / BASE-A3   -> Ok
+> showPopupText       POPUP-X                       -> Ok
+> showFullscreenText  BASE-B1 / BASE-B2 / BASE-B3   -> Ok
+> ```
+>
+> The popup was **still on top**, and the base underneath had **updated to `BASE-B`** —
+> visible at the line ends the overlay does not cover. So a popup survives a redraw of the
+> screen underneath, the redraw still lands, and **only `hidePopup()` clears it**: no
+> auto-revert was observed. An application that shows a popup owns a deadline to close it.
+>
+> This is what §8.6 used to claim for the fullscreen. It is the popup's property, and it is
+> why `RenderSlot::Popup` never coalesces against `RenderSlot::Text` — they are two
+> independent layers, not two versions of one screen.
 
 Minimum `tlen` of 8 keeps the captured "VOL 28" byte-identical (`10 0E …`).
 

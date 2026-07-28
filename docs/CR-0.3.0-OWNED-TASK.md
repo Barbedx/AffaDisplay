@@ -1,8 +1,51 @@
 # CR 0.3.0 — the library owns the poll task
 
-> **Status:** design request, not implemented. Written from a consumer's failure log.
-> **Target:** v0.3.0 (a new capability and a new directory, so a minor bump, not a patch).
+> **Status: IMPLEMENTED in 0.3.0, 2026-07-28.** Kept as the design record — what was asked
+> for, why, and what the evidence was. The shipped contract is `docs/API.md` §4b; where the
+> two differ, §4b is what the code does.
 > **Requested by:** the MegaOpen integration, 2026-07-28.
+>
+> **What shipped, against this document:**
+>
+> * §3 (key latency) — honoured exactly. `KeyCb` still fires synchronously inside `poll()`,
+>   before TX pumping; nothing routes keys through a queue. Period 2 ms, priority 2.
+> * §4.1 — `src/rtos/` is new and FreeRTOS-only. `core/`, `util/`, `proto/`, `widget/` are
+>   unchanged except for the poll-owner guard §6.2 asked for, which is a function pointer
+>   and no FreeRTOS.
+> * §4.2 — a queue, not a mutex, as argued.
+> * §4.3 — the surface shipped as described **except the handle type**, see the open
+>   questions below.
+> * §4.4, §4.5, §5, §6.1–§6.8, §7 — all shipped. `Status` is published under a seqlock
+>   rather than a double-buffered slot; same guarantee, one fewer buffer.
+> * §9 — the host tests are `test/test_owned_task` (11 cases, including the poll-owner
+>   guard, which turned out to be host-testable). The target example is
+>   `examples/19_owned_task`, not `16_owned_task`: 16 was taken.
+> * §10 — done, including the §4.4 amendment and the §8.6 correction below.
+>
+> **The three open questions in §11, answered:**
+>
+> 1. **`AFFA_ENABLE_TASK=1` is NOT defaulted on for `ARDUINO_ARCH_ESP32`.** The
+>    recommendation here was accepted for exactly the reason given: it silently changes
+>    which task existing consumers' callbacks run on.
+> 2. **Neither option in §11.2 was taken.** A posted render returns a **`TxRequest`** — a
+>    handle from `AffaTask`'s own space, issued at post time, mapped to the real `TxTicket`
+>    when the command drains, and reported back through `AffaTask::onComplete`. Non-zero
+>    means accepted; `kNoRequest` means refused. So the caller gets a usable handle *and*
+>    the honesty §11.2 wanted, at the cost of `AffaTask` owning `AffaDisplayBase::onComplete`
+>    in this mode. The different type name is deliberate: two handle spaces that looked
+>    alike would be worse than either.
+> 3. **`stop()` is safe from a callback.** It is on the owned task and cannot join itself,
+>    so it requests the stop and returns; the iteration that is running does not start
+>    another.
+>
+> **Still open, and deliberately not closed by this CR:** the residual 36/312 MegaOpen
+> render failures in §2. They occurred with `poll()` already unblocked, so this refactor
+> does not get to claim them.
+>
+> **§12's first bullet is now resolved**: `WIRE-SPEC.md` §8.6 and §8.7 have been rewritten
+> and the `[CAP]` marker moved to the popup, on the owner's confirmation of the bench
+> measurement. The old text is not deleted silently — §8.6 says what it used to claim and
+> that the behaviour it described belongs to the popup.
 
 ---
 

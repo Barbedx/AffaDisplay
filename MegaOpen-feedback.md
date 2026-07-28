@@ -31,6 +31,13 @@ drives our own `ICanLink` over the IDF TWAI driver
 
 ## 2026-07-28
 
+> **ALL THREE ENTRIES BELOW ARE RESOLVED IN 0.3.0** (2026-07-28). A: `WIRE-SPEC.md` §8.6
+> and §8.7 rewritten, the `[CAP]` marker moved to the popup, the old claim left visible
+> rather than deleted; the panel owner confirmed the measurement, which is what settled a
+> single-report rewrite. B: `docs/API.md` §4.4 split into "the frames we emit are
+> frequency-independent" and "delivery is not". C: implemented — `src/rtos/`,
+> `docs/API.md` §4b, `examples/19_owned_task`, `test/test_owned_task`.
+
 ### A. `WIRE-SPEC.md` §8.6 `[CAP]` — fullscreen and popup are the wrong way round
 
 **This is a measurement, not a reading of the code.** Real Carminat, bench rig, with the

@@ -334,7 +334,10 @@ here rather than in a commit message:
 **The popup is a non-destructive overlay** — observed directly on the real panel and
 recorded in the `showPopupText` docblock (W7): while a `0x74` popup is up, the screen
 underneath can keep being redrawn (it visibly blinks *under* the popup) and other commands
-still apply; the popup stays until it auto-reverts or `02 54 03` closes it. This is a panel
+still apply; the popup stays until `02 54 03` closes it. (The docblock said "until it
+auto-reverts or `02 54 03` closes it"; a 2026-07-28 bench session watched one stay up
+across two full redraws of the screen underneath and saw **no auto-revert**, so the
+lifetime is the application's — WIRE-SPEC §8.7.) This is a panel
 fact with a direct design consequence: `RenderSlot::Popup` and `RenderSlot::Text` are
 **independent** slots. A popup must not coalesce with, invalidate or be invalidated by the
 screen behind it, and closing a popup must not trigger a redraw of that screen.
