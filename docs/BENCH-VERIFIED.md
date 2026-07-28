@@ -67,6 +67,13 @@ it failed; candidates 2–8 (BCD, swapped operands, Carminat's `05 56` shape on 
 |---|---|---|
 | Everything | ⬜ | `src/cluster/` is transcribed from ONE capture and has **never been run**. No cluster hardware was present. It renders no text because the capture contains no text frame |
 
+`examples/18_cluster_web` is the firmware to flash the day a cluster is on the bench: it
+brings the profile up, exposes the captured clock frame (`3EF A6 hh mm` — this is the family
+it was captured on, unlike the UpdateList attempt above), offers the three known text
+encodings on `0x121` as labelled `[GUESS]` probes, and puts the frame ring on `/api/frames`
+so the answer comes from the wire rather than from a theory. Its siblings do the same two
+operations on the families that *have* been seen: `16_carminat_web`, `17_updatelist_web`.
+
 ---
 
 ## Two traps this session paid for twice
