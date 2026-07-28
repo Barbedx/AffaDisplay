@@ -1,0 +1,46 @@
+schema: spec-driven
+
+context: |
+  AffaDisplay — a C++17 Arduino/ESP32 library that drives Renault AFFA display
+  panels (Carminat / AFFA3, UpdateList / AFFA2, and a dashboard-cluster profile)
+  over CAN at 500 kbit/s.
+
+  Tech stack: C++17, -fno-exceptions, no heap after begin(). PlatformIO. Target is
+  ESP32-C3 (Arduino framework) on collin80/esp32_can, pinned by SHA. A `native`
+  environment compiles the same sources for the host, so everything outside
+  src/link/ and src/rtos/ must stay free of Arduino and FreeRTOS.
+
+  Layering, strictly one direction:
+    core/     protocol engine, portable, knows no driver
+    proto/    ISO-TP reassembly and screen decoding
+    carminat/ cluster/ updatelist/   panel families, one per protocol
+    widget/   OPTIONAL shared UI (menu model, marquee), off by default
+    link/     the only code that knows a CAN driver exists
+    rtos/     the only code that knows FreeRTOS exists
+
+  SINGLE RESPONSIBILITY IS THE PROJECT'S ORGANISING RULE. The library owns wire
+  format, sync, queueing and delivery verdicts — nothing else. Scrolling,
+  animation, menus, screen layout, reconnect policy and clock sources are
+  application policy or an opt-in widget under src/widget/. A feature that is not
+  the protocol does not go in the protocol layer.
+
+  Configuration is compile-time AFFA_* macros in src/AffaConfig.h, every one of
+  them always #define'd so -Wundef catches a misspelling inside the library.
+
+  Conventions:
+    - Comments explain WHY, and record what was measured on hardware. A comment
+      that only restates the code is noise.
+    - Every non-obvious constant cites the capture or bench run it came from.
+    - Render calls are [[nodiscard]] — a dropped Result is a screen that never
+      appears.
+    - Results are acceptance verdicts; delivery verdicts arrive via onComplete.
+
+  Hardware truth for the bench rig lives in the specs, not in tribal memory:
+  measurements are quoted with the date they were taken.
+
+rules:
+  spec:
+    - Every requirement must be falsifiable by a host test or a bench measurement.
+    - Quote real captured bytes rather than describing them in prose.
+    - When a requirement exists because something failed on hardware, say so and
+      give the date; a rule without its reason gets "tidied" away later.
