@@ -91,6 +91,7 @@ struct Cmd {
 const char* resultName(affa::Result r) {
   switch (r) {
     case affa::Result::Ok:           return "Ok";
+    case affa::Result::UnknownFunc:  return "UnknownFunc";
     case affa::Result::NoSync:       return "NoSync";
     case affa::Result::LinkDown:     return "LinkDown";
     case affa::Result::QueueFull:    return "QueueFull";
@@ -183,6 +184,43 @@ void routes() {
   g_server.on("/api/time", HTTP_GET, [](PsychicRequest* r) {
     return post(r, "time", qs(r, "hhmm", "1000").c_str(), 0);
   });
+  // /api/raw?id=<dec>&hex=<payload> — enqueue an ARBITRARY payload on an ARBITRARY id.
+  //
+  // The bench tool this session kept needing. enqueue() is public API, so an application
+  // can put any bytes on any function id and let the transport do the ISO-TP framing, the
+  // registration and the ACK matching. That makes it possible to try an encoding this
+  // firmware was not built for — a different panel family's setText, say — without a
+  // reflash per experiment.
+  g_server.on("/api/raw", HTTP_GET, [](PsychicRequest* r) {
+    const uint16_t id  = static_cast<uint16_t>(qs(r, "id", "289").toInt());
+    const String   hex = qs(r, "hex");
+    uint8_t  buf[AFFA_MAX_PAYLOAD];
+    uint8_t  n = 0;
+    for (size_t i = 0; i + 1 < hex.length() && n < sizeof(buf); i += 2) {
+      auto nib = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+      };
+      const int hi = nib(hex[i]), lo = nib(hex[i + 1]);
+      if (hi < 0 || lo < 0) break;
+      buf[n++] = static_cast<uint8_t>((hi << 4) | lo);
+    }
+    if (n == 0) return r->reply(400, "application/json", "{\"error\":\"bad hex\"}");
+
+    affa::TxOptions opt;
+    opt.slot     = affa::RenderSlot::None;   // never coalesced
+    opt.coalesce = false;
+    const affa::TxTicket t = g_display.enqueue(id, buf, n, opt);
+    char b[128];
+    snprintf(b, sizeof(b), "{\"id\":%u,\"len\":%u,\"ticket\":%lu,\"result\":\"%s\"}",
+             static_cast<unsigned>(id), static_cast<unsigned>(n),
+             static_cast<unsigned long>(t),
+             t == affa::kNoTicket ? resultName(g_display.lastResult()) : "Queued");
+    return r->reply(200, "application/json", b);
+  });
+
   g_server.on("/api/frames", HTTP_GET, [](PsychicRequest* r) {
     String out = "{\"f\":[";
     const uint8_t head = g_head;
