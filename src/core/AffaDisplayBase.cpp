@@ -408,8 +408,20 @@ void AffaDisplayBase::pumpSync() {
     setSync(SyncState::Failed, EventKind::PeerLost);   // every other bit, FuncsReg
                                                        // included, is dropped
     _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
-    // Anything queued was addressed to a panel that has now forgotten us.
-    dropUnstarted(Result::Cancelled);
+
+    // THE QUEUE SURVIVES THE PEER NOW. This used to be dropUnstarted(Cancelled) — the panel
+    // has forgotten us, so everything addressed to it was destroyed and the application had
+    // to notice the sync event, keep its own copy of what was on screen, and re-issue it.
+    // That is precisely the recovery work 0.3.0 moves into the library.
+    //
+    // What actually became invalid is the REGISTRATION, so that is what is dropped; the
+    // renders are held, re-registered by pumpTx() when the panel comes back, and given up
+    // by their own hold windows if it does not.
+    dropRegistrations();
+    for (uint8_t i = 0; i < _qCount; ++i) {
+      if (_queue[i].kind == JobKind::Payload && !_queue[i].started)
+        _queue[i].holdUntilMs = now + AFFA_TX_HOLD_MS;
+    }
   }
 }
 
@@ -497,6 +509,9 @@ void AffaDisplayBase::pushJob(uint16_t funcId, const uint8_t* d, uint8_t len, Jo
   j.len        = len;
   j.sent       = 0;
   j.frameIndex = 0;
+  j.tries      = 0;
+  j.readyAtMs  = _clock.millis();          // startable immediately; a retry moves it out
+  j.holdUntilMs = _clock.millis() + AFFA_TX_HOLD_MS;
   std::memcpy(j.data, d, len);
 }
 
@@ -510,20 +525,38 @@ TxTicket AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t 
                                   TxOptions opt) {
   _lastEnqueued = kNoTicket;
 
+  // PERMANENT REJECTIONS, and only these. Every one of them is a programming error the
+  // caller can fix and no amount of waiting will: a null buffer, a payload past the
+  // transport ceiling, an id this panel does not own. Rejecting is the whole point.
   if (!data || len == 0)          { _lastResult = Result::BadArgument;  return kNoTicket; }
   if (len > AFFA_MAX_PAYLOAD)     { _lastResult = Result::TooLong;      return kNoTicket; }
   if (!knownFunc(funcId))         { _lastResult = Result::UnknownFunc;  return kNoTicket; }
-  if (!_link.isLive())            { _lastResult = Result::LinkDown;     return kNoTicket; }
-  if (!_passive && hasFlag(_sync, SyncState::Failed)) {
-    _lastResult = Result::NoSync;
+
+  // A LINK THAT IS MERELY NOT READY IS NOT A REJECTION ANY MORE.
+  //
+  // Before 0.3.0 this returned NoSync or LinkDown here and the application owned the
+  // recovery: notice the failure, keep the value, watch for sync, re-issue. Every consumer
+  // wrote that loop and at least one wrote it without a backoff, which on a two-node bus
+  // spins at loop rate and drives our own controller toward BUS_OFF (docs/API.md §3.1).
+  //
+  // So the job is ACCEPTED and HELD instead, for up to AFFA_TX_HOLD_MS, and pumpTx() starts
+  // it when the link is usable. Latest-value-wins coalescing means the held job is always
+  // the newest value for its slot, so what eventually lands is current rather than stale.
+  // AFFA_TX_HOLD_MS = 0 restores the old behaviour exactly.
+  const uint32_t now = _clock.millis();
+  if (AFFA_TX_HOLD_MS == 0 && !linkReady()) {
+    _lastResult = _link.isLive() ? Result::NoSync : Result::LinkDown;
     return kNoTicket;
   }
 
   // Lazy function registration, byte-identical to the legacy wire order: the first send
   // after a resync walks the WHOLE function table in declaration order and sends a 1-byte
   // 0x70 to each, then latches FUNCSREG, then the payload.
-  const bool needReg = !_passive && !hasFlag(_sync, SyncState::FuncsReg) &&
-                       !registrationQueued();
+  //
+  // Only when the link is up: registering into a dead bus would burn the queue slots the
+  // held payload needs, and pumpTx() splices the burst in when the link returns anyway.
+  const bool needReg = !_passive && linkReady() &&
+                       !hasFlag(_sync, SyncState::FuncsReg) && !registrationQueued();
 
   int ci = -1;
   if (opt.coalesce) ci = findCoalescable(funcId, opt.slot);
@@ -554,6 +587,12 @@ TxTicket AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t 
     j.len      = len;
     j.ticket   = t;
     j.coalesce = opt.coalesce;
+    // A NEW VALUE GETS A NEW RETRY BUDGET, BUT NOT A NEW WIRE. `tries` resets — this is a
+    // different render and it deserves its own attempts — while readyAtMs is left alone,
+    // because the backoff protects the panel and the panel does not care that we changed
+    // our mind. Resetting both would let a repainting application defeat the backoff.
+    j.tries       = 0;
+    j.holdUntilMs = now + AFFA_TX_HOLD_MS;
 
     if (opt.priority == Priority::Urgent && j.prio == Priority::Normal) {
       // A promotion cannot be silently ignored, so the entry moves to the urgent
@@ -579,6 +618,55 @@ TxTicket AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t 
   return t;
 }
 
+// A failure worth another attempt: exactly the two that mean NOBODY ANSWERED.
+//
+//   Timeout   the panel did not answer within AFFA_ACK_TIMEOUT_MS — it was busy, asleep,
+//             mid-reassembly, or our frames never arrived
+//   LinkDown  the controller was not usable at that instant — bus-off, recovering
+//
+// SendFailed is deliberately NOT retryable, and the distinction is the whole point:
+// it means the panel ANSWERED and the answer was neither DONE nor PARTIAL. That is a
+// disagreement about the CONTENT, and re-sending byte-identical content to a panel that has
+// just rejected it will get the same answer three more times — while burying the one
+// diagnostic that says the builder is wrong under a retry storm. Silence is transient;
+// rejection is not.
+//
+// NotSupported / BadArgument / TooLong / UnknownFunc are the caller's, and retrying them is
+// a loop. Aborted / Cancelled are DELIBERATE — the application asked for them — and
+// retrying one would be the library overruling the caller.
+bool AffaDisplayBase::retryable(Result r) {
+  return r == Result::Timeout || r == Result::LinkDown;
+}
+
+void AffaDisplayBase::armRetry(TxJob& job, uint32_t now, bool torn) {
+  // Doubling, capped. `tries` has already been incremented, so the first backoff is
+  // AFFA_TX_RETRY_MS exactly.
+  uint32_t back = AFFA_TX_RETRY_MS;
+  for (uint8_t i = 1; i < job.tries && back < AFFA_TX_RETRY_MAX_MS; ++i) back <<= 1;
+  if (back > AFFA_TX_RETRY_MAX_MS) back = AFFA_TX_RETRY_MAX_MS;
+
+  // A TORN TRANSFER OWES THE PANEL SILENCE. Its reassembler is holding our first frames and
+  // waiting for continuations; the next thing it should hear is nothing, long enough to
+  // give up, rather than a fresh first frame landing inside the old message.
+  if (torn) back += AFFA_TX_DIRTY_QUIET_MS;
+
+  job.readyAtMs = now + back;
+  job.sent       = 0;
+  job.frameIndex = 0;      // MANDATORY: a stale continuation counter would make the retry's
+  job.started    = false;  // first frame start at 0x2n instead of its own byte 0
+  job.abandon    = false;
+  // The hold window is re-armed too: a job that is actively being retried is not a job that
+  // has been sitting unwanted, and it should not be cancelled out from under the retry.
+  job.holdUntilMs = now + AFFA_TX_HOLD_MS;
+}
+
+// Passive mode never handshakes, so "ready" there is only "is there a controller".
+bool AffaDisplayBase::linkReady() const {
+  if (!_link.isLive()) return false;
+  if (_passive) return true;
+  return !hasFlag(_sync, SyncState::Failed);
+}
+
 void AffaDisplayBase::pumpTx() {
   const uint32_t now = _clock.millis();
 
@@ -601,7 +689,43 @@ void AffaDisplayBase::pumpTx() {
 
   if (_tx == TxState::WaitAck) return;
   if (_qCount == 0) { _tx = TxState::Idle; return; }
-  if (!_link.isLive()) { finishJob(Result::LinkDown); return; }
+
+  // ---- the three gates in front of the head job -----------------------------
+  // HEAD-OF-LINE, DELIBERATELY. A job waiting out a backoff stalls the queue behind it
+  // rather than being skipped, because skipping would reorder renders the application
+  // issued in sequence — and ordering is a contract (docs/API.md §3b.4). Priority::Urgent
+  // still overtakes: a retrying job has started == false, so insertIndexFor() puts an
+  // urgent one in front of it.
+  if (!expired(now, _queue[0].readyAtMs)) return;
+
+  // 2. The link is not usable. The head is HELD, not failed — until its hold window runs
+  //    out, at which point it is given up as Cancelled rather than left there for ever.
+  if (!linkReady()) {
+    if (expired(now, _queue[0].holdUntilMs)) {
+      AFFA_LOGW(kTag, "held %d ms without a usable link, giving up",
+                static_cast<int>(AFFA_TX_HOLD_MS));
+      finishJob(_link.isLive() ? Result::NoSync : Result::LinkDown);
+    }
+    return;
+  }
+
+  // 3. The panel has forgotten us — a resync happened while this job was queued, or the job
+  //    was enqueued before the link came up. The lazy registration burst goes in FRONT of
+  //    it, exactly as enqueue() would have done had the link been up at the time. Without
+  //    this, a held payload would go out to a panel that rejects it and the SendFailed
+  //    would look exactly like a wire-format bug.
+  if (!_passive && _queue[0].kind == JobKind::Payload &&
+      !hasFlag(_sync, SyncState::FuncsReg) && !registrationQueued()) {
+    if (_qCount + _funcCount <= AFFA_TX_QUEUE_DEPTH) {
+      static const uint8_t kReg[1] = { kRegisterByte };
+      TxOptions ro;
+      ro.coalesce = false;
+      for (uint8_t i = 0; i < _funcCount; ++i)
+        pushJob(_funcIds[i], kReg, 1, JobKind::Registration, kNoTicket, ro,
+                static_cast<uint8_t>(i));
+    }
+    // Fall through: the head is now the first registration probe.
+  }
 
   TxJob& job = _queue[0];
 
@@ -630,7 +754,14 @@ void AffaDisplayBase::pumpTx() {
   // finishJob().
   job.started = true;         // from here this job is no longer preemptable
 
-  if (!txFrame(f)) { finishJob(Result::SendFailed); return; }
+  // A REFUSAL BY A LINK THAT SAYS IT IS DOWN IS LinkDown, NOT SendFailed. The distinction
+  // decides whether this job is retried: the TX gate shut for an OTA, or a controller
+  // mid-bus-off recovery, is silence and will pass; a live link refusing a frame is the
+  // driver's queue and is reported as it always was.
+  if (!txFrame(f)) {
+    finishJob(_link.isLive() ? Result::SendFailed : Result::LinkDown);
+    return;
+  }
 
   _ackDeadlineMs = now + AFFA_ACK_TIMEOUT_MS;
   _tx            = TxState::WaitAck;
@@ -668,6 +799,26 @@ void AffaDisplayBase::creditAck(bool done) {
 void AffaDisplayBase::finishJob(Result r) {
   if (_qCount == 0) { _tx = TxState::Idle; return; }
 
+  // ---- retry, before anything is torn down --------------------------------
+  // THE APPLICATION NEVER SEES A TRANSIENT FAILURE IT COULD HAVE RETRIED ITSELF. It sees
+  // one verdict per ticket: the value that finally landed, or the failure that survived
+  // AFFA_TX_MAX_RETRIES attempts. Before 0.3.0 every one of these reached onComplete and
+  // the consumer owned the loop — see docs/API.md §3.1 for what that cost.
+  if (AFFA_TX_MAX_RETRIES > 0 && retryable(r) && _queue[0].tries < AFFA_TX_MAX_RETRIES) {
+    TxJob& j = _queue[0];
+    const bool torn = (j.sent > 0);     // bytes were already on the wire: the panel is
+                                        // holding a partial and wants silence, not a retry
+    ++j.tries;
+    armRetry(j, _clock.millis(), torn);
+    _tx             = TxState::Idle;
+    _selfAckPending = SelfAck::None;
+    AFFA_LOGD(kTag, "retry %u/%d for 0x%03X after %u%s",
+              static_cast<unsigned>(j.tries), AFFA_TX_MAX_RETRIES,
+              static_cast<unsigned>(j.funcId), static_cast<unsigned>(r),
+              torn ? " (torn, quiet first)" : "");
+    return;
+  }
+
   TxJob& job = _queue[0];
   const JobKind  kind   = job.kind;
   const TxTicket ticket = job.ticket;
@@ -692,11 +843,18 @@ void AffaDisplayBase::finishJob(Result r) {
     if (r == Result::Ok) {
       if (!registrationQueued()) setSync(_sync | SyncState::FuncsReg, EventKind::Registered);
     } else {
-      // The payload behind it completes with the registration's own failure, exactly as
-      // the legacy affa3_send propagated it to its caller.
-      AFFA_LOGW(kTag, "registration of 0x%03X failed (%u)",
+      // IT NO LONGER TAKES THE PAYLOADS WITH IT. The legacy affa3_send propagated a failed
+      // registration to its caller and this did the same — failAllQueued(r) — which meant a
+      // panel that was briefly unreachable destroyed every render behind it and the
+      // application had to notice and re-issue them.
+      //
+      // Now: the dead probes are dropped and the payloads stay HELD. pumpTx() splices a
+      // fresh registration burst in front of them the next time the link is ready, and if
+      // that never happens their own hold windows give up on them. Bounded, and the
+      // application is not part of the loop.
+      AFFA_LOGW(kTag, "registration of 0x%03X failed (%u) — payloads held for retry",
                 static_cast<unsigned>(funcId), static_cast<unsigned>(r));
-      failAllQueued(r);
+      dropRegistrations();
     }
     return;                        // registration jobs carry kNoTicket and are invisible
   }
@@ -746,6 +904,23 @@ uint8_t AffaDisplayBase::dropUnstarted(Result r) {
     ++i;
   }
   for (uint8_t k = 0; k < n; ++k) completeTicket(t[k], r);
+  return n;
+}
+
+uint8_t AffaDisplayBase::dropRegistrations() {
+  uint8_t n = 0;
+  uint8_t i = 0;
+  while (i < _qCount) {
+    // A STARTED registration is left alone for the same reason any started job is: its
+    // first frame is already on the wire and removing it would leave the FSM waiting for an
+    // ACK against a job that is no longer at the head.
+    if (_queue[i].kind == JobKind::Registration && !_queue[i].started) {
+      removeJob(i);
+      ++n;
+      continue;
+    }
+    ++i;
+  }
   return n;
 }
 

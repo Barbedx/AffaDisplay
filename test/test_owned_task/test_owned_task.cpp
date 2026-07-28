@@ -141,6 +141,29 @@ void bringUpSync(D& d, L& link, FakeClock& clk) {
 
 Command cmd(Op op) { Command c; c.op = op; return c; }
 
+// Advance the clock the way a running system does: in small steps, polling, with the
+// panel's ~1 Hz ping still arriving. A single big clk.advance() would trip the peer
+// watchdog and quietly turn every retry test below into a sync test — which is exactly what
+// the first draft of these did.
+template <class D>
+void advanceAlive(D& d, LoopbackLink<>& link, FakeClock& clk, uint32_t ms) {
+  constexpr uint32_t kStep = 100;
+  for (uint32_t t = 0; t < ms; t += kStep) {
+    clk.advance(kStep);
+    link.inject(affatest::panelPeerAlive());
+    d.poll();
+  }
+}
+
+// Payload frames of WireDisplay::setText, ignoring heartbeats, ACKs and registration.
+uint32_t takeTextFrames(LoopbackLink<>& link) {
+  uint32_t n = 0;
+  Frame f;
+  while (link.takeSent(f))
+    if (f.id == 0x151 && f.data[0] == 0x05 && f.data[1] == 0x77) ++n;
+  return n;
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
@@ -261,16 +284,47 @@ void test_apply_reports_the_ticket_the_enqueue_issued() {
   TEST_ASSERT_EQUAL_UINT16(d.lastEnqueued(), t);
 }
 
-void test_a_refused_render_reports_its_reason_and_no_ticket() {
+void test_a_render_into_a_dead_link_is_held_not_refused() {
   LoopbackLink<> link;
   FakeClock clk;
   WireDisplay d(link, clk);
   d.begin();                                  // begun, but never synced
 
+  // The owned task posts this from an application thread that has no idea whether the panel
+  // is awake, and it must not have to care: the command is accepted, the caller gets a
+  // handle, and the library holds the job until the link is usable.
   Command c = cmd(Op::SetText); setArg(c.s0, "ONE");
-  TxTicket t = 0x1234;
-  ASSERT_RESULT(NoSync, applyCommand(d, c, t));
-  TEST_ASSERT_EQUAL_UINT16(kNoTicket, t);
+  TxTicket t = kNoTicket;
+  ASSERT_RESULT(Ok, applyCommand(d, c, t));
+  TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
+
+  affatest::drain(link);
+  for (int i = 0; i < 5; ++i) d.poll();
+  Frame f;
+  while (link.takeSent(f))
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(0x151u, f.id, "a held job must not transmit before sync");
+}
+
+void test_a_permanently_bad_render_is_still_refused_at_the_call() {
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  bringUpSync(d, link, clk);
+
+  // The line between "hold it" and "refuse it" is whether waiting could ever help. A null
+  // buffer, an over-long payload and an unknown function id are the caller's mistakes, and
+  // holding one would turn a programming error into a silent eight-second delay.
+  TEST_ASSERT_EQUAL_UINT16(kNoTicket, d.enqueue(0x151, nullptr, 4));
+  ASSERT_RESULT(BadArgument, d.lastResult());
+
+  uint8_t big[AFFA_MAX_PAYLOAD];
+  std::memset(big, 0x5A, sizeof(big));
+  TEST_ASSERT_EQUAL_UINT16(kNoTicket, d.enqueue(0x151, big, AFFA_MAX_PAYLOAD + 1));
+  ASSERT_RESULT(TooLong, d.lastResult());
+
+  uint8_t one = 0x11;
+  TEST_ASSERT_EQUAL_UINT16(kNoTicket, d.enqueue(0x999, &one, 1));
+  ASSERT_RESULT(UnknownFunc, d.lastResult());
 }
 
 void test_commands_drain_in_submission_order() {
@@ -310,6 +364,181 @@ void test_commands_drain_in_submission_order() {
     ++found;
   }
   TEST_ASSERT_EQUAL_INT(3, found);
+}
+
+// ---------------------------------------------------------------------------
+// Delivery: what the library does about a transfer that did not land
+// ---------------------------------------------------------------------------
+// These are the tests for "the application is not the recovery layer". Every one of them
+// describes something a consumer used to have to write, and got wrong at least once.
+
+void test_a_timeout_is_retried_before_the_application_hears_about_it() {
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  bringUpSync(d, link, clk);
+  link.setAutoAck(true);
+  ASSERT_RESULT(Ok, d.setText("WARM", 255));      // registration out of the way
+  affatest::pumpUntilIdle(d);
+  affatest::drain(link);
+
+  static int completions = 0;
+  static Result lastResult = Result::Ok;
+  completions = 0;
+  d.onComplete([](TxTicket, Result r, void*) { ++completions; lastResult = r; }, nullptr);
+
+  link.setAutoAck(false);                         // the panel goes quiet
+  ASSERT_RESULT(Ok, d.setText("ONE", 255));
+
+  // Attempt 1 times out. The application hears NOTHING: the job is still in the queue with
+  // a backoff on it, which is the entire point.
+  advanceAlive(d, link, clk, AFFA_ACK_TIMEOUT_MS + 100);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, completions, "a retryable failure is not reported");
+  TEST_ASSERT_TRUE_MESSAGE(d.busy(), "the job is still queued for another attempt");
+
+  // And it does not transmit again immediately either — that spin is what the backoff
+  // exists to prevent, and what a consumer's own retry loop got wrong.
+  affatest::drain(link);
+  advanceAlive(d, link, clk, 200);
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, takeTextFrames(link), "no retry before the backoff");
+
+  // After the backoff it goes out again, and this time the panel answers.
+  link.setAutoAck(true);
+  advanceAlive(d, link, clk, AFFA_TX_RETRY_MS + AFFA_TX_DIRTY_QUIET_MS + 400);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, completions, "exactly one verdict per ticket");
+  ASSERT_RESULT(Ok, lastResult);
+  d.onComplete(nullptr, nullptr);
+}
+
+void test_retries_are_bounded_and_the_last_failure_is_reported() {
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  bringUpSync(d, link, clk);
+  link.setAutoAck(true);
+  ASSERT_RESULT(Ok, d.setText("WARM", 255));
+  affatest::pumpUntilIdle(d);
+  affatest::drain(link);
+
+  static int completions = 0;
+  static Result lastResult = Result::Ok;
+  completions = 0;
+  d.onComplete([](TxTicket, Result r, void*) { ++completions; lastResult = r; }, nullptr);
+
+  link.setAutoAck(false);                         // the panel never answers again
+  ASSERT_RESULT(Ok, d.setText("ONE", 255));
+
+  // AFFA_TX_MAX_RETRIES + 1 attempts, then it gives up and says so ONCE. A library that
+  // retried for ever would be a library that never tells you the panel is gone.
+  for (int i = 0; i <= AFFA_TX_MAX_RETRIES; ++i)
+    advanceAlive(d, link, clk,
+                 AFFA_ACK_TIMEOUT_MS + AFFA_TX_RETRY_MAX_MS + AFFA_TX_DIRTY_QUIET_MS + 200);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, completions, "one verdict, after the attempts are spent");
+  ASSERT_RESULT(Timeout, lastResult);
+  TEST_ASSERT_FALSE(d.busy());
+  d.onComplete(nullptr, nullptr);
+}
+
+void test_a_rejection_by_the_panel_is_never_retried() {
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  bringUpSync(d, link, clk);
+  link.setAutoAck(true);
+  ASSERT_RESULT(Ok, d.setText("WARM", 255));
+  affatest::pumpUntilIdle(d);
+  affatest::drain(link);
+
+  static int completions = 0;
+  static Result lastResult = Result::Ok;
+  completions = 0;
+  d.onComplete([](TxTicket, Result r, void*) { ++completions; lastResult = r; }, nullptr);
+
+  link.setAutoAck(false);
+  ASSERT_RESULT(Ok, d.setText("ONE", 255));
+  d.poll();                                        // frame 0 goes out
+
+  // The panel ANSWERED, and the answer was neither DONE nor PARTIAL. Re-sending identical
+  // bytes to a panel that has just rejected them gets the same answer three more times and
+  // buries the diagnostic. Reported immediately, once.
+  Frame bad = affatest::mk(0x151 | affa::kReplyFlag, {0x7F, 0x00, 0x00, 0x00, 0, 0, 0, 0});
+  link.inject(bad);
+  d.poll();
+
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, completions, "a rejection is reported at once");
+  ASSERT_RESULT(SendFailed, lastResult);
+  TEST_ASSERT_FALSE_MESSAGE(d.busy(), "and it is NOT left in the queue for another go");
+  d.onComplete(nullptr, nullptr);
+}
+
+void test_a_held_job_survives_a_resync_and_registers_itself_again() {
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  bringUpSync(d, link, clk);
+  link.setAutoAck(true);
+  ASSERT_RESULT(Ok, d.setText("WARM", 255));
+  affatest::pumpUntilIdle(d);
+  TEST_ASSERT_TRUE(d.registered());
+
+  // The panel goes away long enough for the watchdog to declare it lost. FUNCSREG goes with
+  // it — the panel has forgotten us.
+  link.setAutoAck(false);
+  clk.advance(AFFA_PEER_TIMEOUT_MS + AFFA_SYNC_INTERVAL_MS + 1);
+  d.poll();
+  TEST_ASSERT_FALSE_MESSAGE(d.synced(), "peer loss");
+  TEST_ASSERT_FALSE_MESSAGE(d.registered(), "FUNCSREG goes with the peer");
+
+  // A render issued while the panel is away. The application does not know and must not
+  // have to: this used to be rejected with NoSync, and before that it would have been
+  // destroyed by the peer-loss teardown.
+  ASSERT_RESULT(Ok, d.setText("LATE", 255));
+  affatest::drain(link);
+
+  // The panel comes back.
+  link.setAutoAck(true);
+  link.inject(affatest::panelSyncRequest());
+  clk.advance(AFFA_SYNC_INTERVAL_MS + 1);
+  affatest::pumpUntilIdle(d, 800);
+
+  // It re-registered ITSELF — the burst was spliced in front of the held render by the
+  // transmit pump, not by the application noticing the sync event.
+  TEST_ASSERT_TRUE_MESSAGE(d.registered(), "the library re-registered without being asked");
+
+  bool sawReg = false, sawText = false;
+  Frame f;
+  while (link.takeSent(f)) {
+    if (f.id == 0x151 && f.data[0] == affa::kRegisterByte) sawReg = true;
+    if (f.id == 0x151 && f.data[0] == 0x05 && f.data[1] == 0x77 && f.data[2] == 'L')
+      sawText = true;
+  }
+  TEST_ASSERT_TRUE_MESSAGE(sawReg,  "the registration probe went out again");
+  TEST_ASSERT_TRUE_MESSAGE(sawText, "and the held render landed after it");
+}
+
+void test_a_held_job_is_given_up_rather_than_waiting_for_ever() {
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  d.begin();                                       // never synced at all
+
+  static int completions = 0;
+  static Result lastResult = Result::Ok;
+  completions = 0;
+  d.onComplete([](TxTicket, Result r, void*) { ++completions; lastResult = r; }, nullptr);
+
+  ASSERT_RESULT(Ok, d.setText("NEVER", 255));
+  clk.advance(AFFA_TX_HOLD_MS / 2);
+  affatest::pump(d, 3);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, completions, "still holding, still hoping");
+
+  // A screen that appears ninety seconds late is worse than one that never appeared, so the
+  // hold is bounded and the application gets told.
+  clk.advance(AFFA_TX_HOLD_MS);
+  affatest::pump(d, 3);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, completions, "the hold window is bounded");
+  ASSERT_RESULT(NoSync, lastResult);
+  d.onComplete(nullptr, nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -417,8 +646,14 @@ int main(int, char**) {
   RUN_TEST(test_a_key_command_fires_the_callback_and_never_a_ticket);
   RUN_TEST(test_arguments_are_copied_by_value_and_truncated);
   RUN_TEST(test_apply_reports_the_ticket_the_enqueue_issued);
-  RUN_TEST(test_a_refused_render_reports_its_reason_and_no_ticket);
+  RUN_TEST(test_a_render_into_a_dead_link_is_held_not_refused);
+  RUN_TEST(test_a_permanently_bad_render_is_still_refused_at_the_call);
   RUN_TEST(test_commands_drain_in_submission_order);
+  RUN_TEST(test_a_timeout_is_retried_before_the_application_hears_about_it);
+  RUN_TEST(test_retries_are_bounded_and_the_last_failure_is_reported);
+  RUN_TEST(test_a_rejection_by_the_panel_is_never_retried);
+  RUN_TEST(test_a_held_job_survives_a_resync_and_registers_itself_again);
+  RUN_TEST(test_a_held_job_is_given_up_rather_than_waiting_for_ever);
   RUN_TEST(test_request_table_round_trip_frees_the_slot);
   RUN_TEST(test_request_table_reports_unknown_tickets_as_no_request);
   RUN_TEST(test_request_table_full_refuses_rather_than_evicting);

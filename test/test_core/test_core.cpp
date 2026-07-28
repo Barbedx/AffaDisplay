@@ -316,10 +316,25 @@ void test_enqueue_is_gated_and_bounded(void) {
   d.begin();
 
   uint8_t one = 0x11;
-  // FAILED gates everything: nothing may reach the wire before the panel has answered.
-  TEST_ASSERT_EQUAL_UINT16(kNoTicket, d.enqueue(0x151, &one, 1));
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Result::NoSync),
+  // A LINK THAT IS NOT READY IS NO LONGER A REJECTION — it is a HOLD. Before 0.3.0 this
+  // returned kNoTicket with Result::NoSync and the application owned the recovery: keep the
+  // value, watch for sync, re-issue. Now the job is accepted, held for up to
+  // AFFA_TX_HOLD_MS, and started when the panel answers. What must still be true is that
+  // NOTHING REACHES THE WIRE before the handshake — that half is unchanged and is what the
+  // frame assertion below pins.
+  const TxTicket held = d.enqueue(0x151, &one, 1);
+  TEST_ASSERT_NOT_EQUAL_MESSAGE(kNoTicket, held, "a render into a dead link is HELD, not refused");
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Result::Ok),
                           static_cast<uint8_t>(d.lastResult()));
+  drainSent(link);
+  for (int i = 0; i < 5; ++i) d.poll();
+  {
+    Frame f;
+    bool sawPayload = false;
+    while (link.takeSent(f)) if (f.id == 0x151) sawPayload = true;
+    TEST_ASSERT_FALSE_MESSAGE(sawPayload, "a held job must not transmit before sync");
+  }
+  d.abortPending();          // clear it so the rest of this test starts from empty
 
   establishSync(d, link);
   TEST_ASSERT_EQUAL_UINT16(kNoTicket, d.enqueue(0x999, &one, 1));

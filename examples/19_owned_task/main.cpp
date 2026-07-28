@@ -233,30 +233,20 @@ struct Popup {
   uint32_t hides    = 0;
 } g_pop;
 
-// ---------------------------------------------------------------------------
-// Backing off a panel that has stopped acknowledging
-// ---------------------------------------------------------------------------
-// ON A TWO-NODE BUS, AN UNACKNOWLEDGED TRANSMITTER DRIVES ITSELF BUS-OFF. There is no third
-// node to acknowledge a frame, so when the panel stops answering, the controller
-// retransmits, TEC climbs to 255, and the peripheral goes BUS_OFF — from our own traffic,
-// against a bus that is electrically fine. Measured on the rig: a window where every render
-// completed Timeout at exactly AFFA_ACK_TIMEOUT_MS intervals, with busErr going 9 -> 143 and
-// the controller flapping in and out of BUS_OFF 22 times in ten minutes.
+// WHAT USED TO BE HERE, AND WHY IT IS GONE.
 //
-// Retrying harder is the worst possible response and it is the obvious one. So: three
-// consecutive Timeouts and this application stops drawing for ten seconds. The library's
-// own 1 Hz heartbeat keeps going — that is the sync channel, it is what notices the panel
-// coming back, and it is two frames a second rather than three screens.
+// This file carried thirty lines of recovery policy: a streak counter over consecutive
+// Timeouts, a ten-second cooldown that stopped the repaint, and a link gate every producer
+// had to remember to call. All of it was correct and none of it belonged in an application
+// — every consumer would have written the same thing, and the one that wrote it without a
+// backoff spun at loop rate and drove the controller toward BUS_OFF.
 //
-// This is APPLICATION policy, not library behaviour, and it belongs here: the library
-// cannot know whether your screen is worth the bus time.
-constexpr uint8_t  kTimeoutStreak = 3;
-constexpr uint32_t kCooldownMs    = 10000;
-
-uint8_t  g_toStreak      = 0;
-uint32_t g_cooldownUntil = 0;
-uint32_t g_cooldowns     = 0;
-uint32_t g_timeouts      = 0;
+// It is in the library now (AffaConfig.h "Delivery", docs/API.md §3.1): a transient failure
+// is retried with a doubling backoff, a torn transfer buys the panel a quiet period before
+// the next attempt, and a render made while the link is down is HELD and sent when the
+// panel comes back rather than rejected for the application to re-issue. What is left here
+// is what an application actually owns: what to draw and how often.
+uint32_t g_timeouts = 0;      // still counted, purely so the soak can see the wire quality
 
 // ---------------------------------------------------------------------------
 // Callbacks — EVERY ONE OF THESE RUNS ON THE LIBRARY'S OWN TASK
@@ -321,23 +311,14 @@ void onSyncChanged(affa::SyncState s, void*) {
 void onDone(affa::rtos::TxRequest req, affa::Result r, void*) {
   if (r == affa::Result::Ok) {
     ++g_screen.delivered;
-    g_toStreak = 0;                         // the panel is answering again
   } else if (r == affa::Result::Aborted || r == affa::Result::Cancelled) {
     ++g_screen.stale;                       // ours: coalescing or a resync. Not a fault.
   } else {
-    if (r == affa::Result::Timeout) {
-      ++g_timeouts;
-      // The streak, not the count: one Timeout is a lost frame, three in a row is a panel
-      // that has stopped listening and a controller about to punish us for it.
-      if (++g_toStreak >= kTimeoutStreak) {
-        g_toStreak      = 0;
-        g_cooldownUntil = millis() + kCooldownMs;
-        ++g_cooldowns;
-        logmsg(2, "backoff", "%u renders timed out — pausing the screen for %lu ms",
-               static_cast<unsigned>(kTimeoutStreak),
-               static_cast<unsigned long>(kCooldownMs));
-      }
-    }
+    // A Timeout REACHING HERE means the library already retried it AFFA_TX_MAX_RETRIES
+    // times over several seconds and the panel never answered. It is one verdict for the
+    // whole episode, not one per attempt — which is why this counter is now a measure of
+    // the wire rather than a measure of how excited the repaint loop is.
+    if (r == affa::Result::Timeout) ++g_timeouts;
     ++g_screen.failed;
     g_screen.lastFail   = r;
     g_screen.lastFailMs = millis();
@@ -363,24 +344,14 @@ void onDone(affa::rtos::TxRequest req, affa::Result r, void*) {
 // ---------------------------------------------------------------------------
 // The application — runs in loop(), which is now allowed to be slow
 // ---------------------------------------------------------------------------
-// THE ONE GATE EVERY PRODUCER IN THIS FILE PASSES THROUGH.
-//
-// `synced` alone is not enough and that is the lesson from the soak: when the panel was
-// disconnected, `isLive()` went false about 170 ms BEFORE the peer watchdog expired, so for
-// that whole window the library was correctly answering `LinkDown` to a producer that
-// thought everything was fine. A producer that only checks sync will always have a window
-// where it is shouting into a dead controller.
-bool linkUsable(const affa::rtos::Status& s) {
-  if (!g_canUp || !g_link.isLive()) return false;
-  if (!affa::expired(millis(), g_cooldownUntil)) return false;
-  return !hasFlag(s.sync, affa::SyncState::Failed);
-}
-
+// NO LINK GATE ANY MORE. A render issued while the panel is asleep is held by the library
+// and sent when it wakes; a render that times out is retried without the application
+// hearing about it. What is left is one deadline, and it exists only because the COMMAND
+// QUEUE can be full — the one refusal the library cannot absorb for us, because absorbing
+// it would mean blocking the caller.
 void clockTick(uint32_t now) {
   if (!g_clockPending) return;
   if (!affa::expired(now, g_clockRetryAt)) return;
-  const affa::rtos::Status s = g_task.status();
-  if (!linkUsable(s)) { g_clockRetryAt = now + kClockRetryMs; return; }
   const affa::rtos::TxRequest req = g_task.setTime(kLinkClock);
   if (req == affa::rtos::kNoRequest) { g_clockRetryAt = now + kClockRetryMs; return; }
   g_clockReq     = req;
@@ -394,8 +365,11 @@ void screenTick(uint32_t now) {
   // frames, each waiting on a panel ACK — about 190 ms — so enqueueing on every step would
   // not make the panel faster: coalescing would supersede the queued screen, completions
   // would arrive Aborted, and the glass would look frozen while the counters said "busy".
+  // busy IS the whole gate. Not "is the link up", not "is the panel answering" — a
+  // fourteen-frame screen takes longer to deliver than the marquee takes to step, and that
+  // is the only thing this loop still has to know.
   const affa::rtos::Status s = g_task.status();
-  if (s.busy || !linkUsable(s)) return;
+  if (s.busy) return;
 
   char l1[32], l2[32], l3[32];
   clockLine(l1, sizeof(l1), now);
@@ -421,14 +395,6 @@ void screenTick(uint32_t now) {
 
 void popupTick(uint32_t now) {
   if (!g_screen.run) return;
-  // The popup cycle keeps its DEADLINES running while the link is down — it just does not
-  // transmit. Freezing the clock instead would produce a burst of catch-up popups the
-  // moment the panel came back.
-  if (!linkUsable(g_task.status())) {
-    if (affa::expired(now, g_pop.nextMs)) g_pop.nextMs = now + kPopupPeriodMs;
-    if (g_pop.up && affa::expired(now, g_pop.downMs)) g_pop.up = false;
-    return;
-  }
 
   if (!g_pop.up && affa::expired(now, g_pop.nextMs)) {
     g_pop.up     = true;
@@ -662,10 +628,10 @@ void jStatus() {
      static_cast<unsigned long>(g_screen.failed),
      static_cast<unsigned long>(g_screen.refused),
      static_cast<unsigned long>(g_screen.lastFailMs));
-  jf("\"timeouts\":%lu,\"cooldowns\":%lu,\"cooling\":%s,",
+  jf("\"timeouts\":%lu,\"maxRetries\":%u,\"holdMs\":%u,",
      static_cast<unsigned long>(g_timeouts),
-     static_cast<unsigned long>(g_cooldowns),
-     affa::expired(millis(), g_cooldownUntil) ? "false" : "true");
+     static_cast<unsigned>(AFFA_TX_MAX_RETRIES),
+     static_cast<unsigned>(AFFA_TX_HOLD_MS));
   jkv("lastFail", resultName(g_screen.lastFail)); jf(",");
   jkv("l1", g_screen.lastL1); jf(",");
   jkv("l2", g_screen.lastL2); jf(",");

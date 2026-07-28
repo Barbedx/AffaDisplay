@@ -1760,7 +1760,54 @@ and match the **exact ticket** it was given, never compare ticket numbers. (`Res
 used to appear in the table above, and a one-slot ticket watcher used to exist inside the
 base class; both were there only for `sendBlocking()`, and all three are gone.)
 
-### 3.1 A rejection is INSTANT, so a retry needs a deadline
+### 3.1 Delivery: the library is the recovery layer, not your application
+
+**Since 0.3.0 an application does not retry, does not hold a value while the panel is away,
+and does not re-register after a resync.** All three used to be the consumer's job, every
+consumer wrote them, and the failures were expensive enough to be worth listing:
+
+| What the app used to own | What the library does now |
+| --- | --- |
+| retry a `Timeout` | retried up to `AFFA_TX_MAX_RETRIES` with a doubling backoff from `AFFA_TX_RETRY_MS`, capped at `AFFA_TX_RETRY_MAX_MS`. The application is told **once**, at the end, if all attempts fail. |
+| leave the panel alone after a torn transfer | a job whose bytes had already started going out waits an extra `AFFA_TX_DIRTY_QUIET_MS` before the next attempt, so the panel's reassembler hears silence rather than a fresh first frame landing inside the old message |
+| keep the value and re-issue it when sync returns | a render made while the link is down is **accepted and held** for up to `AFFA_TX_HOLD_MS`, then started when the link is usable |
+| notice `PeerLost` and re-render everything | the queue **survives** the peer. Only the registration is invalidated; the renders are held |
+| re-register after a resync | `pumpTx()` splices the `0x70` burst in front of a held payload when `FUNCSREG` is missing |
+
+**What is still refused at the call site**, because waiting could never help: `BadArgument`,
+`TooLong`, `UnknownFunc` (your mistake, fix the call) and `QueueFull` (backpressure, and the
+one thing the library cannot absorb without blocking you).
+
+**What is never retried**, and the distinction matters:
+
+* `SendFailed` — the panel **answered**, and the answer was neither DONE nor PARTIAL. That
+  is a disagreement about *content*; re-sending identical bytes gets the same answer three
+  more times and buries the one diagnostic that says your builder is wrong. Silence is
+  transient, rejection is not.
+* `Aborted` / `Cancelled` — deliberate. The application asked, and retrying would be the
+  library overruling the caller.
+
+Set `AFFA_TX_MAX_RETRIES = 0` and `AFFA_TX_HOLD_MS = 0` to get the pre-0.3.0 contract back
+exactly: one attempt, rejections at the call site, and the recovery is yours again.
+
+#### 3.1.1 What this costs you
+
+**One ticket now covers several seconds and several attempts.** `onComplete` fires once per
+ticket, as it always has, but the gap between enqueue and verdict can now be
+`AFFA_TX_MAX_RETRIES × (AFFA_ACK_TIMEOUT_MS + backoff)` — about eleven seconds at the
+defaults. If you were using completion latency as a health signal, use
+`Stats`/`AffaTask::Status` instead.
+
+**Head-of-line, deliberately.** A job waiting out a backoff stalls the queue behind it
+rather than being skipped, because skipping would reorder renders the application issued in
+sequence. `Priority::Urgent` still overtakes — a retrying job has not started, so an urgent
+one is spliced in front of it.
+
+**Coalescing still wins.** A newer render of the same `RenderSlot` replaces a waiting one
+and gets a fresh retry budget, but **not** a fresh backoff: the backoff protects the panel,
+and the panel does not care that you changed your mind.
+
+### 3.1.2 A rejection is INSTANT, so a retry needs a deadline
 
 `NoSync`, `LinkDown`, `UnknownFunc`, `BadArgument`, `TooLong` and `QueueFull` are all
 decided inside `enqueue()`, before anything touches the wire. The call is a few dozen
@@ -1779,6 +1826,11 @@ in `examples/19_owned_task`'s own soak, 4 800 failures and 170 log lines per sec
 seconds, which then pushed the one line that explained it — `peer lost` — out of the log
 ring. It is failure mode #2 from `docs/CR-0.3.0-OWNED-TASK.md` §2, written a second time by
 someone who had just read it.
+
+**§3.1 is the reason that example no longer needs the loop at all** — the library holds and
+retries. This section survives because the *shape* is still a trap for anything the library
+cannot absorb for you: a `QueueFull` from `AffaTask`, or your own producer reacting to a
+verdict. If you write a retry, give it a deadline.
 
 **Every retry site needs a deadline against `IClock::millis()`, exactly like everything
 else in this library:**

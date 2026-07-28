@@ -245,6 +245,61 @@
 #  warning "AffaDisplay: AFFA_TX_QUEUE_DEPTH < 5 with the info popup enabled — the first showInfoPopup() after a resync will drop its third row (2 registration probes + 3 rows)."
 #endif
 
+// ---------------------------------------------------------------------------
+// Delivery: what the library does about a transfer that did not land
+// ---------------------------------------------------------------------------
+// THE APPLICATION IS NOT THE RECOVERY LAYER. Every consumer that has integrated this
+// library has written the same three things — a retry with a backoff, a quiet period after
+// an interrupted transfer, and a "hold this until the panel comes back" — and got at least
+// one of them wrong, at a cost measured in thousands of failed renders (docs/API.md §3.1,
+// docs/CR-0.3.0-OWNED-TASK.md §2). It is protocol behaviour, it belongs here, and it is a
+// state machine over IClock like everything else in this file.
+
+// How many times a job is re-attempted after a TRANSIENT failure — Timeout, SendFailed,
+// LinkDown. A permanent one (NotSupported, BadArgument, TooLong, UnknownFunc) is never
+// retried, and neither is a deliberate one (Aborted, Cancelled): the application asked.
+//
+// 0 restores the pre-0.3.0 behaviour exactly: one attempt, then the failure is reported.
+#ifndef AFFA_TX_MAX_RETRIES
+#  define AFFA_TX_MAX_RETRIES 3
+#endif
+
+// First backoff, doubling per attempt (250, 500, 1000 …) and capped at
+// AFFA_TX_RETRY_MAX_MS. NOT zero and not "immediately": an immediate retry into a panel
+// that has just failed to answer is the storm this exists to prevent, and on a two-node bus
+// it is also what drives our own controller toward BUS_OFF — there is no third node to
+// acknowledge us, so an unanswered transmitter punishes itself.
+#ifndef AFFA_TX_RETRY_MS
+#  define AFFA_TX_RETRY_MS 250
+#endif
+#ifndef AFFA_TX_RETRY_MAX_MS
+#  define AFFA_TX_RETRY_MAX_MS 2000
+#endif
+
+// Extra quiet time before re-attempting a job whose bytes had ALREADY STARTED going out.
+//
+// The panel is then holding a partial transfer and is waiting for continuation frames that
+// will never come. Bench-measured 2026-07-28: it does recover on its own — an interrupted
+// multi-frame message costs a message or two, not a wedge — but it recovers FASTER and more
+// predictably if the next thing it hears is silence rather than a fresh first frame landing
+// in the middle of its reassembly buffer.
+#ifndef AFFA_TX_DIRTY_QUIET_MS
+#  define AFFA_TX_DIRTY_QUIET_MS 400
+#endif
+
+// How long a queued render waits for a link that is not ready, before it is given up as
+// Cancelled. This is what makes "the app never thinks about recovery" true: a render issued
+// while the panel is asleep, mid-resync or bus-off is HELD and sent when the link returns,
+// rather than rejected at the call site with NoSync for the application to re-issue.
+//
+// It is bounded on purpose. A screen that appears ninety seconds late is worse than one
+// that never appeared, and latest-value-wins coalescing means the held job is always the
+// newest value for its slot anyway. 0 disables holding: enqueue() then rejects with NoSync
+// or LinkDown immediately, which is the pre-0.3.0 contract.
+#ifndef AFFA_TX_HOLD_MS
+#  define AFFA_TX_HOLD_MS 8000
+#endif
+
 // Largest single ISO-TP message, in payload bytes before framing.
 //
 // 113 IS A WIRE LIMIT, NOT A BUDGET: 8 bytes in frame 0, 7 per continuation, and the

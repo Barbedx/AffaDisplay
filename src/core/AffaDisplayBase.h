@@ -288,6 +288,10 @@ class AffaDisplayBase : public IDisplay, public IPanel {
     uint8_t    len        = 0;
     uint8_t    sent       = 0;          // bytes already handed to the link
     uint8_t    frameIndex = 0;          // ISO-TP continuation counter `num`
+    uint8_t    tries      = 0;          // transmit attempts already made and failed
+    uint32_t   readyAtMs  = 0;          // not startable before this: retry backoff, or the
+                                        // quiet period a torn transfer owes the panel
+    uint32_t   holdUntilMs = 0;         // give up waiting for a usable link at this point
     uint8_t    data[AFFA_MAX_PAYLOAD]   = {0};
   };
 
@@ -330,13 +334,26 @@ class AffaDisplayBase : public IDisplay, public IPanel {
                const TxOptions& opt, uint8_t at);
   void removeJob(uint8_t index);
   void creditAck(bool done);
+  // Ends the head job: retries it if the failure was transient and it has attempts left,
+  // otherwise removes it and reports. THE ONLY PLACE a job leaves the queue on completion.
   void finishJob(Result r);
+  // true if `r` is worth another attempt at all — transient, not permanent, not deliberate.
+  static bool retryable(Result r);
+  // Re-arm the head job for another attempt. Backoff doubles per try; a job whose bytes had
+  // already started going out additionally owes the panel AFFA_TX_DIRTY_QUIET_MS of silence.
+  void armRetry(TxJob& job, uint32_t now, bool torn);
+  // Is the link in a state where the head job may be started at all?
+  bool linkReady() const;
   // Drops every job in the queue, started or not, reporting `r` for each payload ticket.
   // begin() and a failed registration are its only callers.
   void failAllQueued(Result r);
   // Drops every NOT-YET-STARTED Payload job — the shared body of abortPending() (with
   // Aborted) and of the sync-loss teardown (with Cancelled). Registration jobs survive.
   uint8_t dropUnstarted(Result r);
+  // The mirror image: drops queued, not-yet-started REGISTRATION probes and leaves payloads
+  // alone. Used when registration failed or the panel forgot us — the probes are void, the
+  // renders behind them are still what the application wants on the glass.
+  uint8_t dropRegistrations();
   void completeTicket(TxTicket t, Result r);
   // Stores the new state and fires SyncCb + EventKind::SyncChanged, but only on an actual
   // change. `extra` fires additionally (Registered / PeerLost); pass SyncChanged for none.
