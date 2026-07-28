@@ -448,19 +448,49 @@ bool     g_otaRunning = false;
 uint32_t g_deadSince  = 0;      // 0 = the controller was RUNNING last time we looked
 uint32_t g_reboots    = 0;      // survives nothing; it is here to be read before one
 
+// A FLAP IS NOT A FAILURE, AND COUNTING THEM IS THE ONLY WAY TO TELL.
+//
+// On a two-node bus a controller that goes BUS_OFF and recovers (forceRecoveryMs = 250)
+// looks, in any single sample, exactly like one that is dead — and exactly like one that is
+// healthy, depending on when you sampled. Neither snapshot is the truth. What matters is
+// how OFTEN it leaves RUNNING and how long it stays out, so those are counted rather than
+// sampled: `flaps` and `downMs` are a bus-health measurement, `busErr` is its cause.
+uint32_t g_flaps      = 0;
+uint32_t g_downMs     = 0;
+uint32_t g_wdtLogAt   = 0;      // rate limit: a flapping bus must not flood the ring again
+
 void linkWatchdogTick(uint32_t now) {
   if (!g_canUp) return;                       // never came up; a reboot will not help
   const auto d = g_link.driverState();
   const bool running = d.valid && d.state == 1;   // twai_state_t: 1 = RUNNING
 
-  if (running) { g_deadSince = 0; return; }
-  if (g_deadSince == 0) {
-    g_deadSince = now;
-    logmsg(2, "wdt", "controller state %u (not RUNNING) — %lu s to reboot",
-           static_cast<unsigned>(d.state),
-           static_cast<unsigned long>(kDeadLinkMs / 1000));
+  if (running) {
+    if (g_deadSince) {                        // it came back on its own — the normal case
+      const uint32_t out = now - g_deadSince;
+      g_downMs += out;
+      if (affa::expired(now, g_wdtLogAt)) {
+        g_wdtLogAt = now + 10000;
+        logmsg(2, "wdt", "controller recovered after %lu ms (flap %lu, busErr %lu)",
+               static_cast<unsigned long>(out), static_cast<unsigned long>(g_flaps),
+               static_cast<unsigned long>(d.busErr));
+      }
+      g_deadSince = 0;
+    }
     return;
   }
+
+  if (g_deadSince == 0) {
+    g_deadSince = now;
+    ++g_flaps;
+    if (affa::expired(now, g_wdtLogAt)) {
+      g_wdtLogAt = now + 10000;
+      logmsg(2, "wdt", "controller state %u (not RUNNING), flap %lu — %lu s to reboot",
+             static_cast<unsigned>(d.state), static_cast<unsigned long>(g_flaps),
+             static_cast<unsigned long>(kDeadLinkMs / 1000));
+    }
+    return;
+  }
+
   if (!affa::expired(now, g_deadSince + kDeadLinkMs)) return;
   if (!g_watchdog || g_otaRunning || g_rebootAt) return;
 
@@ -542,10 +572,13 @@ void jStatus() {
        static_cast<unsigned long>(d.txErr),   static_cast<unsigned long>(d.rxErr),
        static_cast<unsigned long>(d.busErr),  static_cast<unsigned long>(d.arbLost),
        static_cast<unsigned long>(d.rxMissed));
-    jf("\"wdt\":{\"on\":%s,\"deadSince\":%lu,\"reboots\":%lu},",
+    jf("\"wdt\":{\"on\":%s,\"deadSince\":%lu,\"reboots\":%lu,\"flaps\":%lu,"
+       "\"downMs\":%lu},",
        g_watchdog ? "true" : "false",
        static_cast<unsigned long>(g_deadSince),
-       static_cast<unsigned long>(g_reboots));
+       static_cast<unsigned long>(g_reboots),
+       static_cast<unsigned long>(g_flaps),
+       static_cast<unsigned long>(g_downMs));
   }
 
   // The three numbers that ARE the owned-task design.
