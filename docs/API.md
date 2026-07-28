@@ -1760,6 +1760,40 @@ and match the **exact ticket** it was given, never compare ticket numbers. (`Res
 used to appear in the table above, and a one-slot ticket watcher used to exist inside the
 base class; both were there only for `sendBlocking()`, and all three are gone.)
 
+### 3.1 A rejection is INSTANT, so a retry needs a deadline
+
+`NoSync`, `LinkDown`, `UnknownFunc`, `BadArgument`, `TooLong` and `QueueFull` are all
+decided inside `enqueue()`, before anything touches the wire. The call is a few dozen
+instructions and it returns *now*.
+
+That is the right behaviour — a render call must never block — and it is a trap for the
+caller, because the obvious reaction to a failed render is to try again:
+
+```cpp
+// WRONG. Spins at loop rate the moment the panel is unplugged.
+if (g_clockPending && display.setTime("1000") == affa::Result::Ok) g_clockPending = false;
+```
+
+With the panel disconnected, that costs **one failed render per loop iteration**: measured
+in `examples/19_owned_task`'s own soak, 4 800 failures and 170 log lines per second in 90
+seconds, which then pushed the one line that explained it — `peer lost` — out of the log
+ring. It is failure mode #2 from `docs/CR-0.3.0-OWNED-TASK.md` §2, written a second time by
+someone who had just read it.
+
+**Every retry site needs a deadline against `IClock::millis()`, exactly like everything
+else in this library:**
+
+```cpp
+if (g_clockPending && affa::expired(now, g_retryAt)) {
+  if (display.setTime("1000") == affa::Result::Ok) g_clockPending = false;
+  else                                             g_retryAt = now + 1000;
+}
+```
+
+And log the *transition*, not the attempt: one line when it starts failing, one when it
+recovers. The same applies to the completion side — a render that is accepted and then
+completes `Timeout` must re-arm the same deadline, not retry immediately.
+
 ---
 
 ## 3b. Latency and preemption

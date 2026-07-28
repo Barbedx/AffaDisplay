@@ -266,8 +266,21 @@ void onKey(affa::Key k, affa::KeyEdge e, void*) {
 // verdict is not a delivery verdict, and a render that completed Timeout because the panel
 // was not acknowledging yet would otherwise leave the clock frozen while the link came good
 // underneath it.
-constexpr const char* kLinkClock = "1000";
+//
+// AND IT RETRIES ON A DEADLINE, NOT AS FAST AS IT CAN. That sentence is the whole of the
+// bug this example shipped with for one soak iteration. A render that cannot be accepted
+// fails IMMEDIATELY — `LinkDown` and `NoSync` are decided inside `enqueue()`, before any
+// wire access — so "retry until it works" from `loop()` is a spin at loop rate. Measured
+// when the panel was disconnected mid-soak: **4 800 failed renders in about 90 seconds**,
+// 170 log lines a second, and a completion storm on the owned task's callback. Nothing was
+// wrong with the library; the retry site had no backoff, which is failure mode #2 from the
+// change request that produced this whole release (`docs/CR-0.3.0-OWNED-TASK.md` §2:
+// "retry sites that advanced their backoff only on success"). It is an easy defect to
+// write twice.
+constexpr const char* kLinkClock     = "1000";
+constexpr uint32_t    kClockRetryMs  = 1000;
 bool                  g_clockPending = true;
+uint32_t              g_clockRetryAt = 0;
 affa::rtos::TxRequest g_clockReq     = affa::rtos::kNoRequest;
 
 void onSyncChanged(affa::SyncState s, void*) {
@@ -295,8 +308,13 @@ void onDone(affa::rtos::TxRequest req, affa::Result r, void*) {
   if (req != affa::rtos::kNoRequest && req == g_clockReq) {
     g_clockReq = affa::rtos::kNoRequest;
     if (r != affa::Result::Ok) {
+      // ONE LINE PER FAILURE, and the next attempt is a second away. The first version
+      // logged from the retry site instead, which is how 170 identical lines a second got
+      // into the ring and pushed the "peer lost" that explained all of them out of it.
+      if (!g_clockPending) logmsg(2, "clock", "link clock not delivered (%s) — will retry",
+                                  resultName(r));
       g_clockPending = true;
-      logmsg(2, "clock", "link clock not delivered (%s) — will retry", resultName(r));
+      g_clockRetryAt = millis() + kClockRetryMs;
     } else {
       logmsg(3, "clock", "link clock delivered");
     }
@@ -306,12 +324,25 @@ void onDone(affa::rtos::TxRequest req, affa::Result r, void*) {
 // ---------------------------------------------------------------------------
 // The application — runs in loop(), which is now allowed to be slow
 // ---------------------------------------------------------------------------
-void clockTick() {
+// THE ONE GATE EVERY PRODUCER IN THIS FILE PASSES THROUGH.
+//
+// `synced` alone is not enough and that is the lesson from the soak: when the panel was
+// disconnected, `isLive()` went false about 170 ms BEFORE the peer watchdog expired, so for
+// that whole window the library was correctly answering `LinkDown` to a producer that
+// thought everything was fine. A producer that only checks sync will always have a window
+// where it is shouting into a dead controller.
+bool linkUsable(const affa::rtos::Status& s) {
+  if (!g_canUp || !g_link.isLive()) return false;
+  return !hasFlag(s.sync, affa::SyncState::Failed);
+}
+
+void clockTick(uint32_t now) {
   if (!g_clockPending) return;
+  if (!affa::expired(now, g_clockRetryAt)) return;
   const affa::rtos::Status s = g_task.status();
-  if (hasFlag(s.sync, affa::SyncState::Failed)) return;
+  if (!linkUsable(s)) { g_clockRetryAt = now + kClockRetryMs; return; }
   const affa::rtos::TxRequest req = g_task.setTime(kLinkClock);
-  if (req == affa::rtos::kNoRequest) return;      // retry next pass
+  if (req == affa::rtos::kNoRequest) { g_clockRetryAt = now + kClockRetryMs; return; }
   g_clockReq     = req;
   g_clockPending = false;
 }
@@ -324,7 +355,7 @@ void screenTick(uint32_t now) {
   // not make the panel faster: coalescing would supersede the queued screen, completions
   // would arrive Aborted, and the glass would look frozen while the counters said "busy".
   const affa::rtos::Status s = g_task.status();
-  if (s.busy || hasFlag(s.sync, affa::SyncState::Failed)) return;
+  if (s.busy || !linkUsable(s)) return;
 
   char l1[32], l2[32], l3[32];
   clockLine(l1, sizeof(l1), now);
@@ -350,6 +381,14 @@ void screenTick(uint32_t now) {
 
 void popupTick(uint32_t now) {
   if (!g_screen.run) return;
+  // The popup cycle keeps its DEADLINES running while the link is down — it just does not
+  // transmit. Freezing the clock instead would produce a burst of catch-up popups the
+  // moment the panel came back.
+  if (!linkUsable(g_task.status())) {
+    if (affa::expired(now, g_pop.nextMs)) g_pop.nextMs = now + kPopupPeriodMs;
+    if (g_pop.up && affa::expired(now, g_pop.downMs)) g_pop.up = false;
+    return;
+  }
 
   if (!g_pop.up && affa::expired(now, g_pop.nextMs)) {
     g_pop.up     = true;
@@ -376,6 +415,59 @@ void popupTick(uint32_t now) {
     // observed on this panel, so its lifetime is the application's.
     if (g_task.hidePopup() == affa::rtos::kNoRequest) ++g_screen.refused;
   }
+}
+
+// ---------------------------------------------------------------------------
+// The controller watchdog — APPLICATION POLICY, and it has to be
+// ---------------------------------------------------------------------------
+// `Esp32CanLink` never re-installs the driver after `begin()`. That is a deliberate
+// prohibition, not an omission (docs/ESP32CAN-CONTRACT.md rule 4): every runtime mode
+// setter in `esp32_can` is disable()+enable() underneath, i.e. a driver reinstall on a live
+// bus which, from inside the general callback, deletes its own caller.
+//
+// So a controller that has ended up STOPPED is a state only a reinstall fixes, and the
+// library will not do it. On a bench board with no cable and no buttons, the application's
+// honest recovery is a reboot — WiFi and OTA come up first in setup(), so a reboot always
+// leaves a way back in.
+//
+// THE DISTINCTION THAT KEEPS THIS FROM BECOMING A REBOOT LOOP:
+//
+//   controller not RUNNING for kDeadLinkMs   -> reboot. Only a reinstall fixes this.
+//   controller RUNNING but no peer           -> DO NOTHING. The panel is off, or asleep,
+//                                               or unplugged. Rebooting does not fix a
+//                                               panel, and the library resyncs by itself
+//                                               the moment one comes back.
+//
+// The soak that produced this code hit the first case: the panel went away, our heartbeat
+// went unacknowledged on a two-node bus, the TX error counter ran to bus-off, and the
+// controller did not come back.
+constexpr uint32_t kDeadLinkMs = 60000;
+
+bool     g_watchdog   = true;
+bool     g_otaRunning = false;
+uint32_t g_deadSince  = 0;      // 0 = the controller was RUNNING last time we looked
+uint32_t g_reboots    = 0;      // survives nothing; it is here to be read before one
+
+void linkWatchdogTick(uint32_t now) {
+  if (!g_canUp) return;                       // never came up; a reboot will not help
+  const auto d = g_link.driverState();
+  const bool running = d.valid && d.state == 1;   // twai_state_t: 1 = RUNNING
+
+  if (running) { g_deadSince = 0; return; }
+  if (g_deadSince == 0) {
+    g_deadSince = now;
+    logmsg(2, "wdt", "controller state %u (not RUNNING) — %lu s to reboot",
+           static_cast<unsigned>(d.state),
+           static_cast<unsigned long>(kDeadLinkMs / 1000));
+    return;
+  }
+  if (!affa::expired(now, g_deadSince + kDeadLinkMs)) return;
+  if (!g_watchdog || g_otaRunning || g_rebootAt) return;
+
+  ++g_reboots;
+  logmsg(1, "wdt", "controller down %lu s — rebooting to reinstall the driver",
+         static_cast<unsigned long>((now - g_deadSince) / 1000));
+  g_rebootAt = now + 300;                     // after this log line has a chance to be read
 }
 
 // ---------------------------------------------------------------------------
@@ -434,7 +526,27 @@ void jStatus() {
   }
   jf("\"rssi\":%d},", WiFi.isConnected() ? static_cast<int>(WiFi.RSSI()) : 0);
 
-  jf("\"canUp\":%s,", g_canUp ? "true" : "false");
+  // RAW CONTROLLER STATE. `link.rxFrames` counts what reached the LIBRARY; `drv.msgsToRx`
+  // counts what reached the DRIVER. Both zero means nothing is arriving at the peripheral
+  // at all; msgsToRx climbing while rxFrames stays flat means the driver is not delivering
+  // what it already has. That one number separates a bus problem from a library bug, and
+  // not having it here cost a soak iteration of guessing.
+  {
+    const auto d = g_link.driverState();
+    jf("\"canUp\":%s,\"live\":%s,", g_canUp ? "true" : "false",
+       g_link.isLive() ? "true" : "false");
+    jf("\"drv\":{\"valid\":%s,\"state\":%u,\"msgsToRx\":%lu,\"msgsToTx\":%lu,"
+       "\"txErr\":%lu,\"rxErr\":%lu,\"busErr\":%lu,\"arbLost\":%lu,\"rxMissed\":%lu},",
+       d.valid ? "true" : "false", static_cast<unsigned>(d.state),
+       static_cast<unsigned long>(d.msgsToRx), static_cast<unsigned long>(d.msgsToTx),
+       static_cast<unsigned long>(d.txErr),   static_cast<unsigned long>(d.rxErr),
+       static_cast<unsigned long>(d.busErr),  static_cast<unsigned long>(d.arbLost),
+       static_cast<unsigned long>(d.rxMissed));
+    jf("\"wdt\":{\"on\":%s,\"deadSince\":%lu,\"reboots\":%lu},",
+       g_watchdog ? "true" : "false",
+       static_cast<unsigned long>(g_deadSince),
+       static_cast<unsigned long>(g_reboots));
+  }
 
   // The three numbers that ARE the owned-task design.
   jf("\"task\":{\"running\":%s,\"iterations\":%lu,\"pollLateMaxUs\":%lu,"
@@ -647,6 +759,16 @@ void routes() {
     return replyRequest(r, g_task.resync());
   });
 
+  // Off is for watching a dead controller stay dead on purpose; on is the default because
+  // an unattended board that reboots itself is worth more than one that sits there.
+  g_server.on("/api/watchdog", HTTP_GET, [](PsychicRequest* r) {
+    g_watchdog = pnum(r, "on", 1) != 0;
+    logmsg(3, "http", "watchdog %s", g_watchdog ? "on" : "off");
+    jclear();
+    jf("{\"watchdog\":%s}", g_watchdog ? "true" : "false");
+    return replyJson(r);
+  });
+
   g_server.on("/api/reboot", HTTP_GET, [](PsychicRequest* r) {
     g_rebootAt = millis() + 400;
     jclear();
@@ -707,6 +829,10 @@ void startHttp() {
   // 2 ms task polling a gated link that the reboot is about to reset anyway.
   ElegantOTA.onStart([]() {
     pushLog(2, "ota", "update started — CAN TX gated off, RX stalls on flash writes");
+    // The gate makes isLive() false, which is exactly what the watchdog is watching for.
+    // Without this flag it would count the upload as a dead controller and reboot the board
+    // in the middle of writing its own firmware.
+    g_otaRunning = true;
     g_screen.run = false;
     if (g_canUp) g_link.setTxEnabled(false);
   });
@@ -771,9 +897,10 @@ void loop() {
   // else: no timed-out ACK, no lost registration, no missed key.
   const uint32_t now = millis();
 
-  clockTick();
+  clockTick(now);
   screenTick(now);
   popupTick(now);
+  linkWatchdogTick(now);
 
   ElegantOTA.loop();
   if (g_rebootAt && affa::expired(now, g_rebootAt)) ESP.restart();
