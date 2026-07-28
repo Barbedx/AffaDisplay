@@ -172,20 +172,13 @@ bool CarminatDisplay::routeKeyToMenu(Key k, KeyEdge e) { return _menuCtrl.routeK
 
 #endif  // AFFA_ENABLE_MENU
 
-// ---------------------------------------------------------------------------
 // setText — 0x151, docs/WIRE-SPEC.md §8.1
-// ---------------------------------------------------------------------------
 //
-//   10 0E 77 55 55 FF 60 01 | <14 text bytes, NUL-padded>
-//
-// DO NOT "FIX" THE DECLARED LENGTH. 0x0E says 14 content bytes; we transmit 20 (a 6-byte
-// header plus 14 text). The panel consumes only the declared 14 — the header plus the
-// first EIGHT text bytes, which is exactly why the original docstring said "max 7
-// characters shown". The remaining six go on the wire, are ACKed, and are ignored. This
-// is observed working behaviour; shortening the payload to match is an untested change.
+// DO NOT "FIX" THE DECLARED LENGTH. 0x0E says 14 content bytes; we transmit 20. The panel
+// consumes only the declared 14 — header plus the first EIGHT text bytes, hence "max 7
+// characters shown". Observed working behaviour; shortening it is an untested change.
 Result CarminatDisplay::setText(const char* text, uint8_t digit) {
-  (void)digit;                      // Carminat has no digit addressing; the parameter
-                                    // exists for the UpdateList signature
+  (void)digit;                      // no digit addressing here; it is UpdateList's signature
   const Ascii t(text);
 
   uint8_t d[8 + kTextCells];
@@ -201,9 +194,7 @@ Result CarminatDisplay::setText(const char* text, uint8_t digit) {
   d[n++] = kFormatPlain;            // 0x60: plain ASCII
   d[n++] = kControlByte;            // always 0x01
 
-  // strncpy semantics into a zero-initialised char[15]: NUL-padded, truncated at 14,
-  // never a stray terminator.
-  for (uint8_t i = 0; i < kTextCells; ++i)
+  for (uint8_t i = 0; i < kTextCells; ++i)   // NUL-padded, truncated at 14
     d[n++] = (i < t.len) ? static_cast<uint8_t>(t.buf[i]) : 0x00;
 
   return submit(kIdSetText, d, n, RenderSlot::Text);
@@ -227,29 +218,20 @@ Result CarminatDisplay::setTime(const char* hhmm) {
   return submit(kIdSetText, d, sizeof(d), RenderSlot::Clock);
 }
 
-// ---------------------------------------------------------------------------
-// setPower (the legacy setState) — 0x151, §8.3.  03 52 <09|00> FF FF
-// ---------------------------------------------------------------------------
+// setPower — 0x151, WIRE-SPEC §8.3.  03 52 <09|00> FF FF
 //
-// DO NOT UNIFY THIS WITH UpdateList. Carminat declares 0x03 for four bytes after the PCI,
-// UpdateList declares 0x04 for the same shape. Only UpdateList's is self-consistent; both
-// have been accepted by their panels for months.
+// DO NOT UNIFY THIS WITH UpdateList: Carminat declares 0x03 for four bytes after the PCI,
+// UpdateList declares 0x04 for the same shape. Only UpdateList's is self-consistent, and
+// both have been accepted by their panels for months.
 Result CarminatDisplay::setPower(bool on) {
   const uint8_t d[5] = {0x03, kCmdCtrl, on ? kDisplayCtrlOn : kDisplayCtrlOff, 0xFF, 0xFF};
   return submit(kIdDisplayCtrl, d, sizeof(d), RenderSlot::Control);
 }
 
-// ---------------------------------------------------------------------------
-// highlightItem — 0x151, §8.4.  07 29 01 <7E|7F> 80 00 00 00
-// ---------------------------------------------------------------------------
+// highlightItem — 0x151, WIRE-SPEC §8.4.  07 29 01 <7E|7F> 80 00 00 00
 //
-// Legacy sent this raw, bypassing the transport. Fed to the TX FSM as an 8-byte payload it
-// produces exactly this one frame (L = 8 -> one frame, no PCI, no filler), so the message
-// is byte-identical. The one session-level difference: with FUNCSREG not yet latched the
-// transport prepends the two 0x70 registration probes, which legacy never sent for this.
-//
-// It gets its OWN RenderSlot, not Menu's: a highlight must not replace a pending full
-// redraw, and a full redraw must not replace a pending highlight.
+// Its OWN RenderSlot, not Menu's: a highlight must not replace a pending full redraw, and
+// a full redraw must not replace a pending highlight.
 Result CarminatDisplay::highlightItem(uint8_t row) {
   if (row > 1) return Result::BadArgument;   // the panel renders exactly two rows
   const uint8_t d[8] = {0x07, kCmdHilite, 0x01,
@@ -258,18 +240,12 @@ Result CarminatDisplay::highlightItem(uint8_t row) {
   return submit(kIdSetText, d, sizeof(d), RenderSlot::Highlight);
 }
 
-// ---------------------------------------------------------------------------
-// showMenu — 0x151, §8.5. The 96-byte two-row window.
-// ---------------------------------------------------------------------------
+// showMenu — 0x151, WIRE-SPEC §8.5. The 96-byte two-row window, always exactly 96.
 //
-// Builder always ends at exactly 96 bytes, so L = 96 regardless of string lengths.
-//
-// DECLARED LENGTH 0x5A = 90, BUILT 94 (payload[2..95]) — AND THAT IS CORRECT. The panel
-// stops the transfer as soon as it holds the declared count: 6 + 12*7 = 90 exactly, so a
-// real panel answers DONE after PCI 0x2C and 13 frames leave. Through the bench self-ACK
-// emulator all 14 go out and the last PCI is 0x2D. Item2 is therefore limited to 26 usable
-// characters even though the builder accepts 30. Do not change either number without panel
-// testing; this screen has been rendering correctly for months.
+// DECLARED LENGTH 0x5A = 90, BUILT 94 — AND THAT IS CORRECT. The panel stops as soon as it
+// holds the declared count (6 + 12*7 = 90), so hardware DONEs after PCI 0x2C at 13 frames
+// while the self-ACK emulator runs to 14. row1 therefore has 26 usable characters even
+// though the builder accepts 30. Change neither number without panel testing.
 Result CarminatDisplay::showMenu(const char* header, const char* row0, const char* row1,
                                  uint8_t scrollIndicator) {
   const Ascii h(header);
@@ -317,19 +293,17 @@ Result CarminatDisplay::showMenu(const char* header, const char* row0, const cha
 // ---------------------------------------------------------------------------
 #if AFFA_ENABLE_POPUP
 
-// The transient overlay ("VOL 28"). Same wire family as setText with mode 0x74 instead of
-// 0x77, and here the declared length IS correct.
+// The transient overlay ("VOL 28"): setText's wire family with mode 0x74, and here the
+// declared length IS correct.
 //
-// Observed property: the popup is a NON-DESTRUCTIVE OVERLAY. The screen underneath keeps
-// being redrawn while it is up — it blinks *under* the popup — and the popup stays until
-// it auto-reverts or hidePopup() closes it. That is why RenderSlot::Popup never coalesces
-// against RenderSlot::Text.
+// THE POPUP IS A NON-DESTRUCTIVE OVERLAY — the screen underneath keeps being redrawn while
+// it is up, and it stays until it auto-reverts or hidePopup() closes it. Hence
+// RenderSlot::Popup never coalescing against RenderSlot::Text.
 Result CarminatDisplay::showPopupText(const char* text, uint8_t icon, uint8_t srcIcon,
                                       uint8_t fmt) {
   const Ascii t(text);
 
-  // A minimum of 8 cells keeps the captured "VOL 28" byte-identical (declared 0x0E);
-  // beyond that the caller may probe how wide the panel actually renders.
+  // 8 cells minimum keeps the captured "VOL 28" byte-identical (declared 0x0E).
   uint8_t cells = static_cast<uint8_t>(t.len);
   if (cells < kPopupCellsMin) cells = kPopupCellsMin;
   if (cells > kPopupCellsMax) cells = kPopupCellsMax;
@@ -352,7 +326,6 @@ Result CarminatDisplay::showPopupText(const char* text, uint8_t icon, uint8_t sr
 }
 
 // 02 54 03 — the close-window command, independently observed FROM the OEM head unit.
-// L = 3 chunks to exactly the one frame legacy hand-rolled, so the wire is unchanged.
 Result CarminatDisplay::hidePopup() {
   const uint8_t d[3] = {0x02, kCmdClose, 0x03};
   return submit(kIdSetText, d, sizeof(d), RenderSlot::Popup);
@@ -377,11 +350,9 @@ Result CarminatDisplay::hidePopup() { return Result::NotSupported; }
 // The same 0x21 screen command as showMenu with mode 0x05: the panel takes the whole glass
 // and renders later menu/volume screens as popups over it.
 //
-// This is the most strongly corroborated builder in the library — the OEM head unit's own
-// "Please insert navigation CD" screen appears in the capture as
-// `0x151 { 10 60 21 05 FF 00 00 40 }` followed by consecutive frames to PCI 0x2D, with
-// matching header bytes, frame count and 0x0D line separators. Here the declared 0x60 = 96
-// is correct and all 14 frames go out.
+// The most strongly corroborated builder in the library: the OEM head unit's own "Please
+// insert navigation CD" screen is in the capture with matching header, frame count and
+// 0x0D separators. Declared 0x60 = 96 is correct here and all 14 frames go out.
 Result CarminatDisplay::showFullscreenText(const char* l1, const char* l2, const char* l3) {
   const Ascii a(l1);
   const Ascii b(l2);
@@ -397,12 +368,11 @@ Result CarminatDisplay::showFullscreenText(const char* l1, const char* l2, const
   p[5] = 0x00;
   p[6] = 0x00;
   p[7] = 0x40;
-  // content[6..31] stay zero. The text block is SPACE-filled first so unused cells render
-  // blank rather than as garbage.
+  // SPACE-filled so unused cells render blank rather than as garbage.
   for (size_t k = 2 + 32; k < sizeof(p); ++k) p[k] = 0x20;
 
-  // Writing starts at content offset 34, i.e. two leading spaces at 32..33 — as captured.
-  size_t q = 2 + 34;
+  size_t q = 2 + 34;             // two leading spaces at content 32..33 — as captured
+
   const auto putLine = [&](const Ascii& s) {
     if (s.len == 0) return;    // an empty line is skipped ENTIRELY: no separator either
     for (size_t i = 0; i < s.len && q < 2 + 95; ++i) p[q++] = static_cast<uint8_t>(s.buf[i]);
@@ -501,24 +471,16 @@ Result CarminatDisplay::showConfirmBox(const char* caption, const char* row0,
 //   10 0B 76 <prefix> <offset> t0 t1 t2      (frame 0, eight raw bytes)
 //   21 t3 t4 t5 t6 t7 00 00                  (continuation, 5 bytes + 2 filler)
 //
-// The legacy delay(5) between the six raw sends is GONE — it had no wire meaning and the
-// TX FSM paces the frames. One message per row (rather than one message carrying all
-// three) is deliberate: with three separate messages nothing guarantees a row's two
-// frames stay adjacent if an Urgent message lands between rows, but a row is never itself
-// split, and that is the property that matters.
-//
-// They must NOT coalesce against each other: all three share funcId 0x151 and
-// RenderSlot::InfoPopup, so with coalescing on, rows 1 and 2 would each replace row 0 and
-// only the last would ever be drawn. The cost is three queue slots.
+// One message PER ROW, and they must NOT coalesce against each other: all three share
+// funcId 0x151 and RenderSlot::InfoPopup, so with coalescing on, rows 1 and 2 would each
+// replace row 0 and only the last would ever be drawn. The cost is three queue slots.
 Result CarminatDisplay::showInfoMenu(const char* row0, const char* row1, const char* row2,
                                      uint8_t offset0, uint8_t offset1, uint8_t offset2,
                                      uint8_t infoPrefix) {
   const auto sendRow = [&](uint8_t offset, const char* text) {
     const Ascii t(text);
 
-    // SPACE-padded to 8. The extracted code wrote `char padded[8] = {' '}`, which
-    // initialises element 0 only and leaves 1..7 zero — so a short row went out
-    // NUL-padded, where the OEM capture is space-padded. We emit the OEM form.
+    // SPACE-padded to 8, which is the OEM capture's form. NOT NUL-padded like setText.
     char cell[kInfoCells];
     for (uint8_t i = 0; i < kInfoCells; ++i) cell[i] = (i < t.len) ? t.buf[i] : ' ';
 
@@ -534,8 +496,8 @@ Result CarminatDisplay::showInfoMenu(const char* row0, const char* row1, const c
     return submit(kIdSetText, d, n, RenderSlot::InfoPopup, /*coalesce=*/false);
   };
 
-  // Every row is attempted; the FIRST failure is what the caller gets back, because a
-  // partially drawn settings list is a failure the caller has to know about.
+  // Every row is attempted; the FIRST failure is returned — a partially drawn list is a
+  // failure the caller has to know about.
   const Result a = sendRow(offset0, row0);
   const Result b = sendRow(offset1, row1);
   const Result c = sendRow(offset2, row2);
