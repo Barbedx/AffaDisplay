@@ -45,7 +45,6 @@ constexpr const char* kMdnsName     = "affabench";
 constexpr uint32_t    kStaJoinMs    = 15000;
 
 constexpr const char* kText      = "AFFA2 UPDATE LIST - RUNNING TEXT DEMO";
-constexpr const char* kLinkClock = "1000";
 
 affa::Esp32CanLink          g_hw;
 ArduinoClock                g_clock;
@@ -54,10 +53,29 @@ PsychicHttpServer           g_server;
 
 bool g_canUp = false;
 
-// The link clock: re-armed on sync loss AND on a failed DELIVERY. setTime() returns an
-// acceptance verdict, and a render that completes Timeout was never seen by the panel.
-bool           g_clockPending = true;
-affa::TxTicket g_clockTicket  = affa::kNoTicket;
+// THERE IS NO CLOCK IN THIS FAMILY. The Carminat examples set 10:00 on every sync as a
+// link light; UpdateList has no setTime wire operation — supports(Feature::Time) is false
+// and the call returns NotSupported. The idea does not port, and the copy of it that was
+// here retried NotSupported on every loop pass for ever.
+
+// ---------------------------------------------------------------------------
+// Frame ring — Layer 0
+// ---------------------------------------------------------------------------
+// EVERY diagnosis on this bench has come down to reading the wire; leaving this out of the
+// first cut cost an hour of guessing. 48 frames, direction stamped, pushed from the tap.
+struct Rec { uint32_t ms; uint8_t dir; uint16_t id; uint8_t d[8]; };
+constexpr uint8_t kRing = 48;
+Rec g_ring[kRing];
+uint8_t g_head = 0;
+
+void onTap(const affa::Frame& f, affa::Direction dir, void*) {
+  Rec& r = g_ring[g_head];
+  r.ms   = millis();
+  r.dir  = (dir == affa::Direction::Tx) ? 2 : 1;
+  r.id   = static_cast<uint16_t>(f.id);
+  for (uint8_t i = 0; i < 8; ++i) r.d[i] = f.data[i];
+  g_head = static_cast<uint8_t>((g_head + 1) % kRing);
+}
 
 // Commands run on the LOOP task, never on the HTTP task, so the library only ever sees one
 // caller and needs no locking. The HTTP handler posts and waits for the flag to clear.
@@ -69,22 +87,6 @@ struct Cmd {
   char          reply[96] = {0};
 } g_cmd;
 
-void onSync(affa::SyncState, void*) {
-  if (!g_display.synced()) g_clockPending = true;
-}
-
-void onComplete(affa::TxTicket t, affa::Result r, void*) {
-  if (t == affa::kNoTicket || t != g_clockTicket) return;
-  g_clockTicket = affa::kNoTicket;
-  if (r != affa::Result::Ok) g_clockPending = true;
-}
-
-void clockTick() {
-  if (!g_clockPending || !g_display.synced()) return;
-  if (g_display.setTime(kLinkClock) != affa::Result::Ok) return;
-  g_clockTicket  = g_display.lastEnqueued();     // read it IMMEDIATELY
-  g_clockPending = false;
-}
 
 const char* resultName(affa::Result r) {
   switch (r) {
@@ -181,6 +183,26 @@ void routes() {
   g_server.on("/api/time", HTTP_GET, [](PsychicRequest* r) {
     return post(r, "time", qs(r, "hhmm", "1000").c_str(), 0);
   });
+  g_server.on("/api/frames", HTTP_GET, [](PsychicRequest* r) {
+    String out = "{\"f\":[";
+    const uint8_t head = g_head;
+    bool first = true;
+    for (uint8_t i = 0; i < kRing; ++i) {
+      const Rec& e = g_ring[(head + i) % kRing];
+      if (e.id == 0) continue;
+      char b[96];
+      snprintf(b, sizeof(b),
+               "%s[%lu,%u,%u,\"%02X%02X%02X%02X%02X%02X%02X%02X\"]",
+               first ? "" : ",", static_cast<unsigned long>(e.ms),
+               static_cast<unsigned>(e.dir), static_cast<unsigned>(e.id),
+               e.d[0], e.d[1], e.d[2], e.d[3], e.d[4], e.d[5], e.d[6], e.d[7]);
+      out += b;
+      first = false;
+    }
+    out += "]}";
+    return r->reply(200, "application/json", out.c_str());
+  });
+
   g_server.on("/api/reboot", HTTP_GET, [](PsychicRequest* r) {
     r->reply(200, "application/json", "{\"reboot\":true}");
     delay(200);
@@ -245,8 +267,7 @@ void setup() {
   g_canUp = g_hw.begin(kPins, kBitrate, /*forceRecoveryMs=*/250);
   if (!g_canUp) Serial.println("[can ] begin() failed — network is still up for OTA");
 
-  g_display.onSync(&onSync, nullptr);
-  g_display.onComplete(&onComplete, nullptr);
+  g_display.onFrame(&onTap, nullptr);
   g_display.begin();
 
   // MANDATORY. `0x1B1 04 52 02 FF FF` (WIRE-SPEC §9.3). Without it the panel acknowledges
@@ -263,7 +284,6 @@ void loop() {
   // poll() is also the KEEP-ALIVE. UpdateList drops the link if the 0x3DF heartbeat stops,
   // so blocking here does not merely delay a render — it disconnects the display.
   g_display.poll();
-  clockTick();
   runCmd();
   ElegantOTA.loop();
 }
