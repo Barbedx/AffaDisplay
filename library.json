@@ -1,6 +1,6 @@
 {
   "name": "AffaDisplay",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Non-blocking ESP32 driver for Renault AFFA2/AFFA3 OEM dash panels (Carminat, UpdateList) over CAN. Pull-port CAN seam, state-machine transmit, wall-clock sync watchdog, zero dynamic allocation after begin(), host-testable without hardware. DEPENDENCIES ARE NEEDED BY ONE FILE ONLY: esp32_can and can_common are used exclusively by src/link/Esp32CanLink.cpp, whose whole body is behind AFFA_ENABLE_ESP32CAN_LINK. PlatformIO cannot declare a conditional dependency, so both are listed unconditionally and will be installed even when you do not need them. To build without them: set -D AFFA_ENABLE_ESP32CAN_LINK=0 and supply your own ICanLink (three methods: begin/send/poll). Neither library is then compiled into your image -- measured on tools/footprint/gate_probe, an ESP32-C3 build is byte-identical (263278 B flash / 18596 B RAM) with the two dependencies declared, not declared, or declared and lib_ignore'd. Add 'lib_ignore = ESP32_CAN, can_common' to keep them out of the build graph as well; the only way to stop them being downloaded at all is to vendor this library under lib/ and delete the two entries below. esp32_can is pinned to commit c329e6be6931e86f82e38e0f982c9ed951c45cca and can_common to 0.4.0 because docs/ESP32CAN-CONTRACT.md is a file:line reading of exactly those two revisions; bumping either without re-verifying that document silently invalidates it (its rule 21).",
   "keywords": [
     "can",
