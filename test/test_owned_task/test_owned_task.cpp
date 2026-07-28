@@ -516,6 +516,73 @@ void test_a_held_job_survives_a_resync_and_registers_itself_again() {
   TEST_ASSERT_TRUE_MESSAGE(sawText, "and the held render landed after it");
 }
 
+void test_a_flapping_link_does_not_spend_the_retry_budget() {
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  bringUpSync(d, link, clk);
+  link.setAutoAck(true);
+  ASSERT_RESULT(Ok, d.setText("WARM", 255));
+  affatest::pumpUntilIdle(d);
+  affatest::drain(link);
+
+  static int completions = 0;
+  static Result lastResult = Result::Ok;
+  completions = 0;
+  d.onComplete([](TxTicket, Result r, void*) { ++completions; lastResult = r; }, nullptr);
+
+  // autoAck OFF, so the job sits in WaitAck and the controller can drop out from under it —
+  // which is the path this test is about. With it on, the render would complete before the
+  // link ever had a chance to flap.
+  link.setAutoAck(false);
+  ASSERT_RESULT(Ok, d.setText("FLAP", 255));
+
+  // The controller drops off the bus and comes back, over and over — 8% of the time not
+  // RUNNING was the measured rig behaviour. More cycles than AFFA_TX_MAX_RETRIES, so if a
+  // link fault spent an attempt this render would be given up as LinkDown, which is what it
+  // did before: 45 renders reported failed in twelve minutes with nothing wrong with them.
+  for (int i = 0; i < AFFA_TX_MAX_RETRIES + 2; ++i) {
+    link.setLive(true);
+    advanceAlive(d, link, clk, 700);      // long enough to clear the backoff and transmit
+    link.setLive(false);
+    advanceAlive(d, link, clk, 100);      // ...and then the controller goes away again
+  }
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, completions, "a link fault is not the render's fault");
+
+  // And when the link finally stays up and the panel answers, it lands.
+  link.setLive(true);
+  link.setAutoAck(true);
+  advanceAlive(d, link, clk, AFFA_TX_RETRY_MAX_MS + AFFA_TX_DIRTY_QUIET_MS + 500);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, completions, "and then it is delivered");
+  ASSERT_RESULT(Ok, lastResult);
+  d.onComplete(nullptr, nullptr);
+}
+
+void test_a_link_that_never_returns_still_gives_up() {
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  bringUpSync(d, link, clk);
+  link.setAutoAck(true);
+  ASSERT_RESULT(Ok, d.setText("WARM", 255));
+  affatest::pumpUntilIdle(d);
+
+  static int completions = 0;
+  static Result lastResult = Result::Ok;
+  completions = 0;
+  d.onComplete([](TxTicket, Result r, void*) { ++completions; lastResult = r; }, nullptr);
+
+  ASSERT_RESULT(Ok, d.setText("GONE", 255));
+  link.setLive(false);
+
+  // Not spending a retry must not mean waiting for ever: the hold window is what bounds
+  // this path, and it is deliberately NOT re-armed by a link fault.
+  advanceAlive(d, link, clk, AFFA_TX_HOLD_MS + 1000);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, completions, "the hold window still ends it");
+  ASSERT_RESULT(LinkDown, lastResult);
+  d.onComplete(nullptr, nullptr);
+}
+
 void test_a_held_job_is_given_up_rather_than_waiting_for_ever() {
   LoopbackLink<> link;
   FakeClock clk;
@@ -652,6 +719,8 @@ int main(int, char**) {
   RUN_TEST(test_a_timeout_is_retried_before_the_application_hears_about_it);
   RUN_TEST(test_retries_are_bounded_and_the_last_failure_is_reported);
   RUN_TEST(test_a_rejection_by_the_panel_is_never_retried);
+  RUN_TEST(test_a_flapping_link_does_not_spend_the_retry_budget);
+  RUN_TEST(test_a_link_that_never_returns_still_gives_up);
   RUN_TEST(test_a_held_job_survives_a_resync_and_registers_itself_again);
   RUN_TEST(test_a_held_job_is_given_up_rather_than_waiting_for_ever);
   RUN_TEST(test_request_table_round_trip_frees_the_slot);

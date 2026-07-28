@@ -336,12 +336,19 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   void creditAck(bool done);
   // Ends the head job: retries it if the failure was transient and it has attempts left,
   // otherwise removes it and reports. THE ONLY PLACE a job leaves the queue on completion.
-  void finishJob(Result r);
+  //
+  // `allowRetry = false` is the give-up path and it is load-bearing: the hold window's own
+  // expiry reports LinkDown, and LinkDown is exactly the result the retry branch treats as
+  // "not the render's fault, do not spend an attempt". Routing the give-up through the
+  // normal path therefore re-armed the job for ever — the hold that could never end.
+  void finishJob(Result r, bool allowRetry = true);
   // true if `r` is worth another attempt at all — transient, not permanent, not deliberate.
   static bool retryable(Result r);
   // Re-arm the head job for another attempt. Backoff doubles per try; a job whose bytes had
   // already started going out additionally owes the panel AFFA_TX_DIRTY_QUIET_MS of silence.
-  void armRetry(TxJob& job, uint32_t now, bool torn);
+  // `extendHold` is false for a link fault, which spends no attempt and must therefore stay
+  // bounded by the hold window it started with.
+  void armRetry(TxJob& job, uint32_t now, bool torn, bool extendHold = true);
   // Is the link in a state where the head job may be started at all?
   bool linkReady() const;
   // Drops every job in the queue, started or not, reporting `r` for each payload ticket.

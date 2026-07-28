@@ -638,7 +638,7 @@ bool AffaDisplayBase::retryable(Result r) {
   return r == Result::Timeout || r == Result::LinkDown;
 }
 
-void AffaDisplayBase::armRetry(TxJob& job, uint32_t now, bool torn) {
+void AffaDisplayBase::armRetry(TxJob& job, uint32_t now, bool torn, bool extendHold) {
   // Doubling, capped. `tries` has already been incremented, so the first backoff is
   // AFFA_TX_RETRY_MS exactly.
   uint32_t back = AFFA_TX_RETRY_MS;
@@ -655,9 +655,11 @@ void AffaDisplayBase::armRetry(TxJob& job, uint32_t now, bool torn) {
   job.frameIndex = 0;      // MANDATORY: a stale continuation counter would make the retry's
   job.started    = false;  // first frame start at 0x2n instead of its own byte 0
   job.abandon    = false;
-  // The hold window is re-armed too: a job that is actively being retried is not a job that
-  // has been sitting unwanted, and it should not be cancelled out from under the retry.
-  job.holdUntilMs = now + AFFA_TX_HOLD_MS;
+  // The hold window is re-armed for a job that actually got a hearing and failed — it is
+  // being actively worked, not sitting unwanted. It is deliberately NOT re-armed for a link
+  // fault: that path does not spend a retry either, so the hold window is the only thing
+  // bounding it, and extending it would make "wait for a usable link" mean "for ever".
+  if (extendHold) job.holdUntilMs = now + AFFA_TX_HOLD_MS;
 }
 
 // Passive mode never handshakes, so "ready" there is only "is there a controller".
@@ -704,7 +706,7 @@ void AffaDisplayBase::pumpTx() {
     if (expired(now, _queue[0].holdUntilMs)) {
       AFFA_LOGW(kTag, "held %d ms without a usable link, giving up",
                 static_cast<int>(AFFA_TX_HOLD_MS));
-      finishJob(_link.isLive() ? Result::NoSync : Result::LinkDown);
+      finishJob(_link.isLive() ? Result::NoSync : Result::LinkDown, /*allowRetry=*/false);
     }
     return;
   }
@@ -796,7 +798,7 @@ void AffaDisplayBase::creditAck(bool done) {
   _tx = TxState::SendingFrame;
 }
 
-void AffaDisplayBase::finishJob(Result r) {
+void AffaDisplayBase::finishJob(Result r, bool allowRetry) {
   if (_qCount == 0) { _tx = TxState::Idle; return; }
 
   // ---- retry, before anything is torn down --------------------------------
@@ -804,12 +806,24 @@ void AffaDisplayBase::finishJob(Result r) {
   // one verdict per ticket: the value that finally landed, or the failure that survived
   // AFFA_TX_MAX_RETRIES attempts. Before 0.3.0 every one of these reached onComplete and
   // the consumer owned the loop — see docs/API.md §3.1 for what that cost.
-  if (AFFA_TX_MAX_RETRIES > 0 && retryable(r) && _queue[0].tries < AFFA_TX_MAX_RETRIES) {
+  // A LINK FAULT DOES NOT SPEND AN ATTEMPT. LinkDown means the controller was not usable at
+  // that instant — bus-off, mid-recovery, TX gated for an OTA — and the job never got a
+  // hearing. Counting it as a try lets a flapping bus exhaust the budget in seconds and
+  // report a failure for a message the panel was never asked about. Measured on the rig:
+  // 134 controller flaps in twelve minutes, 8% of the time not RUNNING, and 45 renders
+  // given up as LinkDown that had nothing wrong with them.
+  //
+  // It is bounded by the HOLD window instead, which is the right bound: "wait for a usable
+  // link, but not for ever" is exactly what holdUntilMs already means, and unlike the retry
+  // counter it is not extended each time round.
+  const bool linkFault = (r == Result::LinkDown);
+  if (allowRetry && AFFA_TX_MAX_RETRIES > 0 && retryable(r) &&
+      (linkFault || _queue[0].tries < AFFA_TX_MAX_RETRIES)) {
     TxJob& j = _queue[0];
     const bool torn = (j.sent > 0);     // bytes were already on the wire: the panel is
                                         // holding a partial and wants silence, not a retry
-    ++j.tries;
-    armRetry(j, _clock.millis(), torn);
+    if (!linkFault) ++j.tries;
+    armRetry(j, _clock.millis(), torn, /*extendHold=*/!linkFault);
     _tx             = TxState::Idle;
     _selfAckPending = SelfAck::None;
     AFFA_LOGD(kTag, "retry %u/%d for 0x%03X after %u%s",
