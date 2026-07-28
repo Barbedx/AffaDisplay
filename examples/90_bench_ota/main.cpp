@@ -724,10 +724,28 @@ affa::TxTicket g_lastEnqTicket = affa::kNoTicket;
 affa::Result   g_lastDelRes    = affa::Result::Ok;
 affa::TxTicket g_lastDelTicket = affa::kNoTicket;
 
+// The link-clock retry state; the reasoning is at clockTick() below.
+bool           g_clockPending = true;
+affa::TxTicket g_clockTicket  = affa::kNoTicket;
+
 void onComplete(affa::TxTicket t, affa::Result r, void*) {
   g_lastDelRes    = r;
   g_lastDelTicket = t;
   if (r == affa::Result::Aborted) ++g_staleDropped;
+
+  // The link clock is only "set" once the PANEL says so. Anything else — Timeout because
+  // it was not acknowledging yet, Cancelled because sync went away — re-arms it.
+  if (t != affa::kNoTicket && t == g_clockTicket) {
+    g_clockTicket = affa::kNoTicket;
+    if (r != affa::Result::Ok) {
+      g_clockPending = true;
+      logmsg(2, "bench", "link clock not delivered (%d) — will retry",
+           static_cast<int>(r));
+    } else {
+      logmsg(3, "bench", "link clock delivered");
+    }
+  }
+
   selfTestComplete(t, r, millis());
 }
 
@@ -740,8 +758,14 @@ void onComplete(affa::TxTicket t, affa::Result r, void*) {
 //
 // Re-armed on every sync LOSS rather than done once at boot, because the question it
 // answers is "is the link up *now*", not "did it ever come up".
+//
+// AND RE-ARMED ON A FAILED DELIVERY, which is the whole lesson here. The first version
+// cleared the flag when the render was ENQUEUED; a render that then completed Timeout —
+// because the panel was not acknowledging yet — was never retried, so the clock sat frozen
+// on the glass while the link came good underneath it. An acceptance verdict is not a
+// delivery verdict (docs/API.md §3), and a link indicator must key off the one that means
+// the panel actually saw it.
 constexpr const char* kLinkClock = "1000";
-bool g_clockPending = true;
 
 void onSyncChanged(affa::SyncState s, void*) {
   logmsg(3, "bench", "sync 0x%02X synced=%d registered=%d", static_cast<unsigned>(s),
@@ -757,8 +781,12 @@ void clockTick() {
   // the 0x70 probes with it and FUNCSREG latches on the clock rather than on whatever the
   // application happened to draw first.
   if (g_display.setTime(kLinkClock) != affa::Result::Ok) return;   // retry next pump
+  // Read it IMMEDIATELY — the next enqueue overwrites lastEnqueued(), including one a
+  // widget makes on our behalf.
+  g_clockTicket  = g_display.lastEnqueued();
   g_clockPending = false;
-  logmsg(3, "bench", "link clock set to %s", kLinkClock);
+  logmsg(3, "bench", "link clock enqueued as ticket %lu",
+       static_cast<unsigned long>(g_clockTicket));
 }
 
 // ---------------------------------------------------------------------------

@@ -64,11 +64,23 @@ affa::widget::Marquee g_r2{ affa::widget::MarqueeGeometry{kCols, kGap, kRow2Ms} 
 // handshake completed and registration latched — without a console, a serial cable or a
 // laptop. Re-armed on sync LOSS, not done once at boot, because the question it answers is
 // "is the link up now", not "did it ever come up".
+// RE-ARMED ON A FAILED DELIVERY AS WELL AS ON SYNC LOSS, and that half is the one worth
+// copying. Clearing the flag when the render is ENQUEUED looks right and is not: a render
+// that then completes Timeout — because the panel was not acknowledging yet — is never
+// retried, and the clock sits frozen on the glass while the link comes good underneath it.
+// An acceptance verdict is not a delivery verdict (docs/API.md §3).
 constexpr const char* kLinkClock = "1000";
-bool g_clockPending = true;
+bool           g_clockPending = true;
+affa::TxTicket g_clockTicket  = affa::kNoTicket;
 
 void onSync(affa::SyncState, void*) {
   if (!g_display.synced()) g_clockPending = true;
+}
+
+void onComplete(affa::TxTicket t, affa::Result r, void*) {
+  if (t == affa::kNoTicket || t != g_clockTicket) return;
+  g_clockTicket = affa::kNoTicket;
+  if (r != affa::Result::Ok) g_clockPending = true;    // the panel never saw it; try again
 }
 
 void clockTick() {
@@ -76,6 +88,8 @@ void clockTick() {
   // Lazy registration rides on this: as the first render after a resync it drags the 0x70
   // probes with it, so FUNCSREG latches on the clock rather than on the media screen.
   if (g_display.setTime(kLinkClock) != affa::Result::Ok) return;   // retry next pump
+  // Read it IMMEDIATELY: the next enqueue overwrites lastEnqueued().
+  g_clockTicket  = g_display.lastEnqueued();
   g_clockPending = false;
 }
 
@@ -144,6 +158,7 @@ void setup() {
   if (!g_link.begin(kPins, 500000)) { Serial.println("CAN did not come up"); return; }
 
   g_display.onSync(&onSync, nullptr);
+  g_display.onComplete(&onComplete, nullptr);
   g_display.begin();
 
   // The panel renders nothing while the display is powered off, and the symptom is a
