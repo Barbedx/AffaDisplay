@@ -192,6 +192,27 @@ void runCmd() {
       r = showMenuItem(n, i, i == static_cast<uint8_t>(g_cmd.b), g_cmd.s[i]);
   } else if (!strcmp(g_cmd.op, "power")) {
     r = g_display.setPower(g_cmd.a != 0);
+  } else if (!strcmp(g_cmd.op, "frame")) {
+    // A RAW frame, straight to the link — no ISO-TP, no SF_DL, no registration, no ACK
+    // matching. Needed because not everything on this bus is an AFFA message: the OEM
+    // cluster's time command is `3EF A6 <hh> <mm>` at DLC 3 with no PCI byte at all, so
+    // enqueue() would frame it and corrupt it. Runs on the loop task like every other
+    // command, so the one-task rule still holds.
+    affa::Frame f{};
+    f.id  = static_cast<uint32_t>(g_cmd.a);
+    f.len = static_cast<uint8_t>(g_cmd.b ? g_cmd.b : 8);
+    for (uint8_t i = 0; i < 8; ++i) f.data[i] = static_cast<uint8_t>(g_cmd.s[0][i]);
+    r = g_hw.send(f) ? affa::Result::Ok : affa::Result::SendFailed;
+  } else if (!strcmp(g_cmd.op, "time")) {
+    // The candidate from the OEM cluster capture: 0x3EF, DLC 3, `A6 <hours> <minutes>`,
+    // both plain binary. Unverified on our panel — that is what this endpoint is for.
+    affa::Frame f{};
+    f.id  = 0x3EF;
+    f.len = 3;
+    f.data[0] = 0xA6;
+    f.data[1] = static_cast<uint8_t>(g_cmd.a);
+    f.data[2] = static_cast<uint8_t>(g_cmd.b);
+    r = g_hw.send(f) ? affa::Result::Ok : affa::Result::SendFailed;
   }
 
   snprintf(g_cmd.reply, sizeof(g_cmd.reply), "{\"op\":\"%s\",\"result\":\"%s\"}",
@@ -240,6 +261,14 @@ button.alt{background:#357}#log{white-space:pre-wrap;font:12px ui-monospace;colo
 <input id=m0 maxlength=12 value="MENU 1"><input id=m1 maxlength=12 value="MENU 2"><input id=m2 maxlength=12 value="MENU 3">
 Selected row: <select id=ms><option value=0>1</option><option value=1>2</option><option value=2>3</option></select>
 <button onclick="go('menu','n=3&sel='+ms.value+'&i0='+e(m0.value)+'&i1='+e(m1.value)+'&i2='+e(m2.value))">Show menu</button></fieldset>
+<fieldset><legend>4 · CLOCK &nbsp;<small>3EF A6 hh mm — from an OEM cluster capture, UNVERIFIED</small></legend>
+<input id=th type=number min=0 max=23 value=10 style="width:5em"> :
+<input id=tm type=number min=0 max=59 value=0 style="width:5em">
+<button onclick="go('time','h='+th.value+'&m='+tm.value)">Set clock</button></fieldset>
+<fieldset><legend>Raw frame &nbsp;<small>no ISO-TP framing at all</small></legend>
+<input id=rid value="1007" style="width:7em" title="CAN id, decimal"> id(dec)
+<input id=rhex value="A60C03" placeholder="hex bytes">
+<button class=alt onclick="go('frame','id='+rid.value+'&hex='+rhex.value)">Send raw frame</button></fieldset>
 <fieldset><legend>Display power</legend>
 <button class=alt onclick="go('power','on=1')">Power ON</button>
 <button class=alt onclick="go('power','on=0')">Power OFF</button></fieldset>
@@ -283,6 +312,31 @@ void routes() {
     return post(r, "power", nullptr, nullptr, nullptr, nullptr,
                 qs(r, "on", "1").toInt(), 0, 0);
   });
+  // /api/time?h=12&m=03  — the OEM cluster's clock command, 3EF A6 <hh> <mm>
+  g_server.on("/api/time", HTTP_GET, [](PsychicRequest* r) {
+    return post(r, "time", nullptr, nullptr, nullptr, nullptr,
+                qs(r, "h", "12").toInt(), qs(r, "m", "0").toInt(), 0);
+  });
+  // /api/frame?id=1007&dlc=3&hex=A60C03 — arbitrary RAW frame, no framing applied
+  g_server.on("/api/frame", HTTP_GET, [](PsychicRequest* r) {
+    const String hex = qs(r, "hex");
+    char raw[9] = {0};
+    uint8_t n = 0;
+    for (size_t i = 0; i + 1 < hex.length() && n < 8; i += 2) {
+      auto nib = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+      };
+      const int hi = nib(hex[i]), lo = nib(hex[i + 1]);
+      if (hi < 0 || lo < 0) break;
+      raw[n++] = static_cast<char>((hi << 4) | lo);
+    }
+    return post(r, "frame", raw, nullptr, nullptr, nullptr,
+                qs(r, "id", "1007").toInt(), qs(r, "dlc", "0").toInt() ? qs(r, "dlc").toInt() : n, 0);
+  });
+
   g_server.on("/api/reboot", HTTP_GET, [](PsychicRequest* r) {
     r->reply(200, "application/json", "{\"reboot\":true}");
     delay(200); ESP.restart(); return ESP_OK;

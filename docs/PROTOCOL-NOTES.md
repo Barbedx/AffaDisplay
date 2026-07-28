@@ -1247,3 +1247,75 @@ those and does not exist off-target.
 `examples/08_radio_mitm` implements tests #1 and #2 this way in about twenty lines,
 including the header pairing — enough to show the shape without pretending the remaining
 five are universal. The full seven is a copy of this table into a `classify()` of your own.
+
+---
+
+## 9. The instrument-cluster variant — a THIRD sync profile  [CAP, single sample]
+
+A capture supplied 2026-07-28 of an **OEM radio talking to a dashboard cluster** — not to
+either panel this library drives. One sample only, direction annotations are the capture
+owner's, and nothing here is bench-verified by us. It matters because it is a third point
+on the family curve and it settles the shape of `SyncProfile`.
+
+### 9.1 The sync bytes are a THIRD pair on an id we already know
+
+    3AF 2  59 00        radio alive
+    3AF 2  5A 01        radio sync request
+    3CF 1  69           cluster peer-alive — DLC 1
+    3BF 2  49 00        a fourth sync id, unmodelled
+
+`0x3AF` is **Carminat's** sync id, but the bytes are neither Carminat's `B9`/`BA` nor
+UpdateList's `79`/`7A`. The pattern holds though — `X9` alive, `XA` request — so this is a
+third `(aliveByte, requestByte)` pair, `0x59`/`0x5A`, on a familiar id.
+
+**This is the strongest evidence yet that `SyncProfile` was cut in the right place.** The
+ids, the two sync bytes and the filler are all data; a third family needs a new profile
+instance and not a line of new code. Note also `3CF` at **DLC 1** — the short-DLC case
+`handleSyncFrame()` guards against, observed in the wild.
+
+### 9.2 Registration is the same lazy 0x70 walk
+
+    3AF 8  50 29 00 23 00 00 00 69     radio: init request (cf. our 70 1A 11 00 00 00 00 01)
+    1C1 8  70 84 84 84 84 84 84 84     probe -> 5C1 74 ...
+    121 8  70 FF FF FF FF FF FF FF     probe -> 521 74 ...
+    1B1 8  70 FF FF FF FF FF FF FF     probe -> 5B1 74 ...
+
+Three functions rather than two, probed with `0x70` and acknowledged on `id | 0x400` —
+exactly the mechanism in §5. **The filler differs by SPEAKER, not by bus**: the cluster
+pads `0x84`, the radio pads `0xFF`. That corroborates the note in `proto/ScreenDecode.h`
+that filler is `0xA3` on our bench unit, `0x84` on an OEM cluster and `0xFF` on the OEM
+radio — and is why nothing in this library ever matches on a received filler byte.
+
+### 9.3 Display control carries a THIRD declared length
+
+    1B1 8  03 52 00 00 FF FF FF FF
+
+Command `0x52` again, but `SF_DL = 0x03` where UpdateList declares `0x04` for the same
+shape (§9.3 of WIRE-SPEC) and Carminat declares `0x03` for its own. Three families, three
+length bytes, all accepted by their own hardware. Do not unify them.
+
+### 9.4 The clock command — `0x3EF`, and it is NOT an AFFA message
+
+    3EF 3  A6 0C 03        annotated "Time", 12 hours 03 minutes
+
+Three bytes at DLC 3: `A6 <hours> <minutes>`, both plain binary. **There is no PCI byte and
+no SF_DL** — this is a raw frame, not the ISO-TP-ish transport everything else on this bus
+uses. Anything sending it through a normal `enqueue()` will frame it and corrupt it.
+
+That is interesting beyond the clock: `0x3EF` is evidence that the bus carries ordinary
+signalling alongside the AFFA transport, and that `ICanLink::send()` — raw, unframed — is a
+necessary escape hatch rather than an implementation detail.
+
+**Why anyone cares:** UpdateList has no `setTime` of its own (`supports(Feature::Time)` is
+false, §9 of WIRE-SPEC), and a head unit without a clock button has no other way to set it.
+`examples/15_updatelist_modes` exposes this as `/api/time?h=&m=`, built on a raw
+`ICanLink::send()`. **UNVERIFIED on our panel** — sent and accepted, effect on the glass not
+yet confirmed.
+
+### 9.5 Two periodic ids we do not model
+
+    2E8 3  91 00 00        ~10 Hz
+    3FF 2  92 01           ~2 Hz
+
+Unidentified. Listed so that a future capture has something to match against, and so nobody
+assumes a quiet AFFA bus is an idle one.
