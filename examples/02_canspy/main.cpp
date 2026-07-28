@@ -1,0 +1,925 @@
+// 02_canspy — is the ESP32 seeing CAN frames at all? Nothing else. No AffaDisplay.
+//
+// THIS EXAMPLE DELIBERATELY DOES NOT LINK THE LIBRARY. platformio.ini strips src/ out of
+// the build (`build_src_filter = -<*>`), so what runs here is the Arduino core, esp32_can,
+// and this file. If frames appear here, the wire and the transceiver are doing their job
+// and anything that still fails is ours. If they do not appear here, the answer is in the
+// driver's configuration — the bitrate first of all — and not in the protocol layer.
+//
+// WHAT IT ANSWERS, IN ORDER:
+//   1. ARE WE HEARING?  /api/frames is every frame the controller hands us, unfiltered.
+//      Extended ids and RTR frames included — AffaDisplay's own trampoline discards both
+//      before they are ever counted, so a bus carrying them looks silent from inside the
+//      library and busy from in here.
+//   2. AT WHAT SPEED?   /api/autospeed runs esp32_can's own beginAutoSpeed(), which puts
+//      the controller in TRUE listen-only (it calls _init() first, so the queues exist —
+//      this is the safe path AffaDisplay refuses, and the refusal is about the OTHER entry
+//      point) and sweeps 1M, 500k, 250k, 125k, 800k, 100k, 50k, 25k, 80k, 33k3, 20k,
+//      returning the first rate at which real traffic decodes. A wrong bitrate fails in
+//      BOTH directions and looks exactly like a dead bus.
+//   3. ARE WE ANSWERING? Two independent proofs. Receiving a valid frame at all means the
+//      controller acknowledged it — the ACK is generated in hardware, we cannot opt out.
+//      And /api/send transmits a frame: if txErr stays 0 afterwards, somebody out there
+//      acknowledged US.
+//
+// WiFi and ElegantOTA come up before the controller is touched, and the server is
+// configured with lru_purge_enable so a full socket table can never lock OTA out.
+//
+//   pio run -e ex02_canspy                build
+//   pio run -e ex02_canspy -t upload      first flash, over USB
+//   thereafter: http://<ip>/update        ElegantOTA
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <ESPmDNS.h>
+#include <Preferences.h>
+#include <PsychicHttp.h>
+#include <ElegantOTA.h>
+
+#include <esp32_can.h>
+#include <driver/twai.h>
+
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+
+namespace {
+
+// ESP32-C3 SuperMini on the bench rig: rx = GPIO4, tx = GPIO3. Swapping these produces a
+// silent bus with no error anywhere, so they are named, not positional.
+#ifndef CANSPY_PINS_MIRRORED
+#  define CANSPY_PINS_MIRRORED 0
+#endif
+#if CANSPY_PINS_MIRRORED
+constexpr gpio_num_t kRxPin = GPIO_NUM_3;
+constexpr gpio_num_t kTxPin = GPIO_NUM_4;
+#else
+constexpr gpio_num_t kRxPin = GPIO_NUM_4;
+constexpr gpio_num_t kTxPin = GPIO_NUM_3;
+#endif
+
+constexpr const char* kWifiNamespace = "megaopen";   // read-only: ssid / pass
+constexpr const char* kOwnNamespace  = "canspy";     // ours: the bitrate, and only that
+constexpr const char* kApSsid        = "CanSpy";
+constexpr const char* kApPass        = "canspy123";
+constexpr const char* kMdnsName      = "canspy";
+constexpr uint32_t    kStaJoinMs     = 15000;
+constexpr uint32_t    kDefaultRate   = 500000;
+
+PsychicHttpServer g_server;
+
+uint32_t g_rate       = kDefaultRate;
+bool     g_canUp      = false;
+bool     g_listen     = false;    // controller in TRUE listen-only: no ACK, no error frames
+uint32_t g_rebootAt   = 0;
+bool     g_otaRunning = false;
+
+// -1 = nothing requested, 0/1 = switch the controller into that mode from loop().
+// setListenOnlyMode() is disable()+enable(), which is only safe once _init() has created the
+// queues — i.e. after begin(). It must not run on the web server's task.
+volatile int8_t g_wantListen = -1;
+
+// Requested by an HTTP handler, performed in loop(): beginAutoSpeed() blocks for up to
+// ~7 s and must not be run on the web server's task.
+volatile bool g_wantAutoSpeed = false;
+uint32_t      g_autoResult    = 0;      // 0 = never run or nothing found
+bool          g_autoRan       = false;
+
+// ---------------------------------------------------------------------------
+// The frame ring — the entire point of this firmware
+// ---------------------------------------------------------------------------
+struct FrameRec {
+  uint32_t ms;
+  uint32_t id;
+  uint8_t  dir;      // 0 = RX, 1 = TX (ours)
+  uint8_t  len;
+  uint8_t  ext;
+  uint8_t  rtr;
+  uint8_t  d[8];
+};
+constexpr size_t kRing = 128;
+FrameRec     g_ring[kRing];
+size_t       g_head = 0;
+uint32_t     g_seq  = 0;
+portMUX_TYPE g_mux  = portMUX_INITIALIZER_UNLOCKED;
+
+uint32_t g_rxCount = 0;
+uint32_t g_txCount = 0;
+uint32_t g_lastRxMs = 0;
+
+void push(uint32_t id, const uint8_t* d, uint8_t len, uint8_t ext, uint8_t rtr, bool tx) {
+  portENTER_CRITICAL(&g_mux);
+  FrameRec& r = g_ring[g_head];
+  r.ms  = ::millis();
+  r.id  = id;
+  r.dir = tx ? 1 : 0;
+  r.len = len > 8 ? 8 : len;
+  r.ext = ext;
+  r.rtr = rtr;
+  memset(r.d, 0, 8);
+  if (d) memcpy(r.d, d, r.len);
+  g_head = (g_head + 1) % kRing;
+  ++g_seq;
+  if (tx) { ++g_txCount; } else { ++g_rxCount; g_lastRxMs = r.ms; }
+  portEXIT_CRITICAL(&g_mux);
+}
+
+// RUNS IN task_CAN (priority 15), on the critical path of every frame, behind a 16-entry
+// callbackQueue. Copy and return: no logging, no allocation, no blocking, no clock beyond
+// millis(). NOTHING IS FILTERED HERE — extended and RTR frames are recorded too, precisely
+// because the library's own callback throws them away.
+void onCanFrame(CAN_FRAME* f) {
+  if (!f) return;
+  push(f->id, f->data.uint8, f->length, f->extended ? 1 : 0, f->rtr ? 1 : 0, /*tx=*/false);
+}
+
+// ---------------------------------------------------------------------------
+// Log ring
+// ---------------------------------------------------------------------------
+struct LogRec { uint32_t ms; char msg[112]; };
+constexpr size_t kLogRing = 24;
+LogRec       g_log[kLogRing];
+size_t       g_logHead = 0;
+portMUX_TYPE g_logMux = portMUX_INITIALIZER_UNLOCKED;
+
+void logmsg(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+void logmsg(const char* fmt, ...) {
+  char buf[112];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+
+  portENTER_CRITICAL(&g_logMux);
+  LogRec& r = g_log[g_logHead];
+  r.ms = ::millis();
+  snprintf(r.msg, sizeof(r.msg), "%s", buf);
+  g_logHead = (g_logHead + 1) % kLogRing;
+  portEXIT_CRITICAL(&g_logMux);
+
+  if (Serial) Serial.printf("[%lu] %s\n", static_cast<unsigned long>(r.ms), buf);
+}
+
+// ---------------------------------------------------------------------------
+// CAN bring-up
+// ---------------------------------------------------------------------------
+bool canStart(uint32_t rate, bool listen) {
+  // Order is load-bearing: pins, then begin(), then the callback, then watchFor() LAST.
+  CAN0.setCANPins(kRxPin, kTxPin);
+  CAN0.begin(rate);                      // returns the REQUESTED rate even when it installed
+                                         // nothing, so it is not a health check — see below
+
+  // AFTER begin(), never before: setListenOnlyMode() is disable()+enable(), and that enable()
+  // starts tasks which block on queues only _init() creates. begin() has now run it.
+  if (listen) CAN0.setListenOnlyMode(true);
+
+  CAN0.setGeneralCallback(&onCanFrame);
+  CAN0.watchFor();                       // no argument = accept everything
+
+  twai_status_info_t st;
+  const bool ok = (twai_get_status_info(&st) == ESP_OK) && (st.state == TWAI_STATE_RUNNING);
+  logmsg("can %s at %lu bit/s, mode=%s (rx=GPIO%d tx=GPIO%d)",
+         ok ? "RUNNING" : "NOT RUNNING", static_cast<unsigned long>(rate),
+         listen ? "LISTEN-ONLY" : "normal",
+         static_cast<int>(kRxPin), static_cast<int>(kTxPin));
+  return ok;
+}
+
+// The A/B that matters: same boot, same wire, same bitrate — only our transmitter changes.
+void applyListen(bool on) {
+  logmsg("switching to %s ...", on ? "LISTEN-ONLY (we emit nothing at all)" : "normal");
+  CAN0.setListenOnlyMode(on);
+  CAN0.setGeneralCallback(&onCanFrame);   // survives in principle; re-armed to be certain
+  CAN0.watchFor();
+  g_listen = on;
+
+  Preferences p;
+  if (p.begin(kOwnNamespace, false)) { p.putUChar("listen", on ? 1 : 0); p.end(); }
+
+  twai_status_info_t st{};
+  twai_get_status_info(&st);
+  logmsg("now %s, drv.state=%u", on ? "LISTEN-ONLY" : "normal",
+         static_cast<unsigned>(st.state));
+}
+
+void runAutoSpeed() {
+  logmsg("autospeed: sweeping, up to ~7 s in true listen-only...");
+  const uint32_t found = CAN0.beginAutoSpeed();
+  g_autoRan    = true;
+  g_autoResult = found;
+
+  if (found) {
+    logmsg("autospeed: TRAFFIC FOUND at %lu bit/s", static_cast<unsigned long>(found));
+  } else {
+    logmsg("autospeed: no traffic decoded at ANY standard rate");
+  }
+
+  // beginAutoSpeed() reinstalls the driver, so re-arm what we care about either way.
+  CAN0.setGeneralCallback(&onCanFrame);
+  CAN0.watchFor();
+}
+
+// ---------------------------------------------------------------------------
+// The transmit self-test — settles "can we put bits on the wire" WITHOUT a second node
+// ---------------------------------------------------------------------------
+// TWAI_MODE_NO_ACK is the IDF's own self-test mode: the controller transmits and neither
+// sends nor requires an acknowledgment, so a frame succeeds with nobody else on the bus.
+// Combined with the SELF RECEPTION REQUEST bit, the controller receives its own
+// transmission back through the normal receive path.
+//
+// WHAT A PASS PROVES: the whole loop works — controller -> TX pin -> transceiver CTX ->
+// bus -> transceiver CRX -> RX pin -> controller. There is no way to get the frame back
+// without every one of those working.
+//
+// WHAT A FAIL PROVES: nothing left the controller, or nothing came back. It does NOT by
+// itself say which, and on a saturated bus it can also mean we simply never won
+// arbitration — which is why it retries and reports the attempt count.
+volatile bool g_wantSelfTest = false;
+bool     g_stRan  = false;
+bool     g_stPass = false;
+uint8_t  g_stTries = 0;
+uint32_t g_stGot   = 0;
+
+// ID 0x001, NOT some arbitrary spare. On CAN the LOWEST id wins arbitration, and the first
+// version of this test used 0x7AB — which loses to the panel's 0x3CF on every single bit
+// fight. On a bus the panel is saturating, that test can never transmit and its failure says
+// nothing at all. 0x001 outranks everything the panel sends.
+constexpr uint32_t kSelfTestId = 0x001;
+
+void runSelfTest() {
+  const bool wasListen = g_listen;
+  logmsg("selftest: entering NO_ACK + self-reception ...");
+
+  // Full driver restart into NO_ACK: error counters back to zero and the controller
+  // guaranteed RUNNING, so the test starts from a clean state rather than from whatever
+  // error-passive corner the bus had already pushed us into.
+  CAN0.setNoACKMode(true);
+  CAN0.setGeneralCallback(&onCanFrame);
+  CAN0.watchFor();
+
+  g_stRan  = true;
+  g_stPass = false;
+  g_stTries = 0;
+  const uint32_t before = g_rxCount;
+
+  for (uint8_t attempt = 1; attempt <= 5 && !g_stPass; ++attempt) {
+    g_stTries = attempt;
+
+    // A previous attempt may have left the controller bus-off or stopped, which is what
+    // ESP_ERR_INVALID_STATE reports. Reinstall before spending the attempt, otherwise every
+    // try after the first measures nothing but the state the first one left behind.
+    twai_status_info_t pre{};
+    if (twai_get_status_info(&pre) != ESP_OK || pre.state != TWAI_STATE_RUNNING) {
+      logmsg("selftest: controller state %u before try %u - reinstalling",
+             static_cast<unsigned>(pre.state), static_cast<unsigned>(attempt));
+      CAN0.setNoACKMode(true);
+      CAN0.setGeneralCallback(&onCanFrame);
+      CAN0.watchFor();
+    }
+
+    twai_message_t m{};
+    m.identifier       = kSelfTestId;
+    m.data_length_code = 8;
+    m.self             = 1;               // self reception request
+    m.extd             = 0;
+    m.rtr              = 0;
+    for (int i = 0; i < 8; ++i) m.data[i] = static_cast<uint8_t>(0xA0 + i);
+
+    const esp_err_t tx = twai_transmit(&m, pdMS_TO_TICKS(250));
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 300) {         // give the loopback time to land in the ring
+      if (g_rxCount != before) break;
+      delay(5);
+    }
+
+    // Did OUR id come back?
+    portENTER_CRITICAL(&g_mux);
+    const size_t head = g_head;
+    for (size_t i = 0; i < kRing; ++i) {
+      const FrameRec& r = g_ring[(head + kRing - 1 - i) % kRing];
+      if (r.id == kSelfTestId && r.dir == 0) { g_stPass = true; break; }
+    }
+    portEXIT_CRITICAL(&g_mux);
+
+    logmsg("selftest try %u: twai_transmit=%s, loopback=%s",
+           static_cast<unsigned>(attempt), esp_err_to_name(tx),
+           g_stPass ? "RECEIVED" : "nothing");
+  }
+
+  g_stGot = g_rxCount - before;
+
+  if (g_stPass)
+    logmsg("selftest PASS - our own frame came back: TX pin, CTX, bus, CRX, RX pin all work");
+  else
+    logmsg("selftest FAIL - no loopback after %u tries", static_cast<unsigned>(g_stTries));
+
+  // Restore whatever mode we were in.
+  CAN0.setListenOnlyMode(wasListen);
+  if (!wasListen) CAN0.setNoACKMode(false);
+  CAN0.setGeneralCallback(&onCanFrame);
+  CAN0.watchFor();
+  g_listen = wasListen;
+  logmsg("selftest: restored %s mode", wasListen ? "listen-only" : "normal");
+}
+
+// ---------------------------------------------------------------------------
+// The INTERNAL loopback — TWAI peripheral only, transceiver not in the path
+// ---------------------------------------------------------------------------
+// Points the controller's TX and RX at the SAME free GPIO. The pad is driven by the
+// peripheral's transmit output and read straight back by its receive input, so the frame
+// never leaves the chip. ESP-IDF supports exactly this for self-test.
+//
+// This is the clean split, and neither outcome is a guess:
+//   PASS -> the TWAI peripheral, the timing config, the driver install and the GPIO matrix
+//           are all correct. Whatever is wrong is outside the chip.
+//   FAIL -> the fault is inside the ESP32 or its configuration, i.e. ours, and no amount of
+//           looking at the bus will find it.
+//
+// GPIO6 by default: free on the C3 SuperMini and not one of the strapping pins (2, 8, 9).
+volatile int16_t g_wantLoop = -1;      // -1 idle, else the pin to test
+bool     g_lbRan  = false;
+bool     g_lbPass = false;
+int      g_lbPin  = -1;
+
+void runLoopback(int pin) {
+  const gpio_num_t p = static_cast<gpio_num_t>(pin);
+  g_lbRan  = true;
+  g_lbPass = false;
+  g_lbPin  = pin;
+  logmsg("loopback: TX and RX both on GPIO%d, transceiver NOT in the path", pin);
+
+  const uint32_t before = g_rxCount;
+
+  CAN0.disable();
+  CAN0.setCANPins(/*rx=*/p, /*tx=*/p);
+  CAN0.begin(g_rate);
+  CAN0.setNoACKMode(true);              // no second node exists, so no ACK may be required
+  CAN0.setGeneralCallback(&onCanFrame);
+  CAN0.watchFor();
+
+  for (uint8_t attempt = 1; attempt <= 3 && !g_lbPass; ++attempt) {
+    twai_status_info_t pre{};
+    if (twai_get_status_info(&pre) != ESP_OK || pre.state != TWAI_STATE_RUNNING) {
+      CAN0.setNoACKMode(true);
+      CAN0.setGeneralCallback(&onCanFrame);
+      CAN0.watchFor();
+    }
+
+    twai_message_t m{};
+    m.identifier       = kSelfTestId;
+    m.data_length_code = 8;
+    m.self             = 1;
+    for (int i = 0; i < 8; ++i) m.data[i] = static_cast<uint8_t>(0x50 + i);
+
+    const esp_err_t tx = twai_transmit(&m, pdMS_TO_TICKS(250));
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 300 && g_rxCount == before) delay(5);
+
+    portENTER_CRITICAL(&g_mux);
+    const size_t head = g_head;
+    for (size_t i = 0; i < kRing; ++i) {
+      const FrameRec& r = g_ring[(head + kRing - 1 - i) % kRing];
+      if (r.id == kSelfTestId && r.dir == 0) { g_lbPass = true; break; }
+    }
+    portEXIT_CRITICAL(&g_mux);
+
+    logmsg("loopback try %u: twai_transmit=%s, got=%s", static_cast<unsigned>(attempt),
+           esp_err_to_name(tx), g_lbPass ? "OUR FRAME BACK" : "nothing");
+  }
+
+  logmsg(g_lbPass ? "loopback PASS - the TWAI peripheral and its config are good"
+                  : "loopback FAIL - the fault is inside the ESP32 or its configuration");
+
+  // Back to the real pins and the real mode.
+  CAN0.disable();
+  CAN0.setCANPins(kRxPin, kTxPin);
+  CAN0.begin(g_rate);
+  if (g_listen) CAN0.setListenOnlyMode(true);
+  CAN0.setGeneralCallback(&onCanFrame);
+  CAN0.watchFor();
+  logmsg("loopback: restored rx=GPIO%d tx=GPIO%d, %s",
+         static_cast<int>(kRxPin), static_cast<int>(kTxPin),
+         g_listen ? "listen-only" : "normal");
+}
+
+// ---------------------------------------------------------------------------
+// The pin-level transmit test — drive CTX by hand, watch CRX
+// ---------------------------------------------------------------------------
+// TWAI released, GPIO3 driven directly, GPIO4 sampled. Hold CTX recessive (HIGH) and CRX
+// should show the panel's traffic — a mixture of highs and lows. Hold CTX dominant (LOW)
+// and, if our transmit path reaches the bus at all, we are jamming it: CRX must read solidly
+// LOW. It is the one thing every other test in this file leaves unproven.
+//
+// THE TRAP THIS AVOIDS, WHICH MADE THE OLD MegaOpen /api/can/selftest REPORT NONSENSE:
+// twai_driver_uninstall() does NOT hand the pads back to the GPIO matrix. Without the
+// gpio_reset_pin() calls below, digitalWrite() writes into a pad still owned by the TWAI
+// peripheral, the level never changes, and the test reports a broken transmit path on a
+// perfectly good board. That firmware bug is why "the TX path is broken" was believed once
+// before — do not remove those two lines.
+//
+// It jams the bus for a few milliseconds. That is the point, and it is over before anything
+// upstream notices.
+volatile bool g_wantPinTest = false;
+bool     g_ptRan = false;
+int      g_ptHighPct = -1;      // % of CRX samples reading 1 while CTX held RECESSIVE
+int      g_ptLowPct  = -1;      // ...and while CTX held DOMINANT. This is the verdict.
+
+int samplePct(gpio_num_t pin, uint32_t samples, uint32_t gapUs) {
+  uint32_t ones = 0;
+  for (uint32_t i = 0; i < samples; ++i) {
+    if (digitalRead(pin)) ++ones;
+    if (gapUs) delayMicroseconds(gapUs);
+  }
+  return static_cast<int>((ones * 100) / samples);
+}
+
+// THE DOMINANT PULSE MUST BE SHORT, AND THE FIRST VERSION OF THIS TEST GOT IT WRONG.
+// Holding TXD low for 10 ms trips the transceiver's TXD DOMINANT TIMEOUT — a protection
+// feature that disables the driver so one stuck node cannot wedge the bus. The bus then goes
+// idle and CRX reads HIGHER than before, which looks like "our transmit does nothing" when it
+// actually means "our transmit worked, and the transceiver defended itself against it".
+// Typical timeouts start around 300 us, so stay well inside that: 40 samples, 2 us apart.
+constexpr uint32_t kDomSamples = 40;
+constexpr uint32_t kDomGapUs   = 2;
+
+void runPinTest() {
+  g_ptRan = true;
+  logmsg("pintest: releasing TWAI and driving GPIO%d by hand", static_cast<int>(kTxPin));
+
+  CAN0.disable();
+
+  // THE TWO LINES THE OLD TEST WAS MISSING. Without them the pads stay owned by TWAI.
+  gpio_reset_pin(kTxPin);
+  gpio_reset_pin(kRxPin);
+
+  // INPUT_OUTPUT, not OUTPUT: it keeps the input buffer enabled so we can read the pin BACK
+  // and prove it actually reached the level we asked for. Without this readback the whole
+  // test is worthless — a pad still owned by TWAI ignores digitalWrite() silently, which is
+  // exactly how the old MegaOpen selftest concluded "txPath: broken" on a good board.
+  gpio_set_direction(kTxPin, GPIO_MODE_INPUT_OUTPUT);
+  pinMode(kRxPin, INPUT);
+
+  digitalWrite(kTxPin, HIGH);            // recessive: the bus belongs to whoever else talks
+  delay(2);
+  const int ctxHighReadback = digitalRead(kTxPin);
+  g_ptHighPct = samplePct(kRxPin, 400, 20);
+
+  // Ten short jabs rather than one long hold, and the WORST (lowest) reading wins: if even
+  // one 80 us pulse pulls the bus down, our transmit path reaches it.
+  int best = 100;
+  int ctxLowReadback = -1;
+  for (int rep = 0; rep < 10; ++rep) {
+    digitalWrite(kTxPin, LOW);
+    delayMicroseconds(5);
+    if (ctxLowReadback < 0) ctxLowReadback = digitalRead(kTxPin);
+    const int pct = samplePct(kRxPin, kDomSamples, kDomGapUs);
+    digitalWrite(kTxPin, HIGH);          // release well inside the dominant timeout
+    if (pct < best) best = pct;
+    delay(2);                            // let the transceiver and the bus settle
+  }
+  g_ptLowPct = best;
+
+  logmsg("pintest: CTX readback  -> asked HIGH read %d, asked LOW read %d",
+         ctxHighReadback, ctxLowReadback);
+  logmsg("pintest: CTX recessive -> CRX high %d%% of samples", g_ptHighPct);
+  logmsg("pintest: CTX DOMINANT  -> CRX high %d%% of samples", g_ptLowPct);
+
+  if (ctxHighReadback != 1 || ctxLowReadback != 0) {
+    logmsg("pintest INVALID - GPIO%d did not follow digitalWrite (pad not under GPIO "
+           "control, or something external is holding it). Verdict below means nothing.",
+           static_cast<int>(kTxPin));
+  } else if (g_ptLowPct <= 5) {
+    logmsg("pintest PASS - driving CTX low pulls the bus down: our transmit path reaches it");
+  } else {
+    logmsg("pintest FAIL - GPIO%d verified LOW, yet CRX still reads high %d%%: the level is "
+           "leaving the ESP32 and not coming back round through the transceiver",
+           static_cast<int>(kTxPin), g_ptLowPct);
+  }
+
+  // Hand the pads back to TWAI and rebuild the link.
+  gpio_reset_pin(kTxPin);
+  gpio_reset_pin(kRxPin);
+  CAN0.setCANPins(kRxPin, kTxPin);
+  CAN0.begin(g_rate);
+  if (g_listen) CAN0.setListenOnlyMode(true);
+  CAN0.setGeneralCallback(&onCanFrame);
+  CAN0.watchFor();
+  logmsg("pintest: TWAI restored, %s", g_listen ? "listen-only" : "normal");
+}
+
+// ---------------------------------------------------------------------------
+// JSON
+// ---------------------------------------------------------------------------
+char   g_out[8192];
+size_t g_outN = 0;
+size_t jroom()  { return sizeof(g_out) - 1 - g_outN; }
+void   jclear() { g_outN = 0; g_out[0] = 0; }
+
+void jf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+void jf(const char* fmt, ...) {
+  const size_t room = jroom();
+  if (room == 0) return;
+  va_list ap;
+  va_start(ap, fmt);
+  const int n = vsnprintf(g_out + g_outN, room + 1, fmt, ap);
+  va_end(ap);
+  if (n > 0) g_outN += (static_cast<size_t>(n) > room) ? room : static_cast<size_t>(n);
+}
+
+void jstr(const char* s) {
+  jf("\"");
+  for (; *s; ++s) {
+    if (*s == '"' || *s == '\\') jf("\\%c", *s);
+    else if (static_cast<uint8_t>(*s) < 0x20) jf("\\u%04x", *s);
+    else jf("%c", *s);
+  }
+  jf("\"");
+}
+
+void jStatus() {
+  twai_status_info_t st{};
+  const bool valid = (twai_get_status_info(&st) == ESP_OK);
+
+  jclear();
+  jf("{");
+  jf("\"uptimeMs\":%lu,", static_cast<unsigned long>(millis()));
+  jf("\"heapFree\":%lu,", static_cast<unsigned long>(ESP.getFreeHeap()));
+  jf("\"rate\":%lu,", static_cast<unsigned long>(g_rate));
+  jf("\"listenOnly\":%s,", g_listen ? "true" : "false");
+  jf("\"canUp\":%s,", g_canUp ? "true" : "false");
+  jf("\"pins\":{\"rx\":%d,\"tx\":%d},", static_cast<int>(kRxPin), static_cast<int>(kTxPin));
+
+  // THE VERDICT LINE. hearing is the only one that matters first.
+  jf("\"hearing\":%s,", g_rxCount ? "true" : "false");
+  jf("\"rx\":%lu,\"tx\":%lu,", static_cast<unsigned long>(g_rxCount),
+     static_cast<unsigned long>(g_txCount));
+  jf("\"sinceRxMs\":%ld,", g_lastRxMs ? static_cast<long>(millis() - g_lastRxMs) : -1L);
+
+  jf("\"autospeed\":{\"ran\":%s,\"found\":%lu,\"busy\":%s},",
+     g_autoRan ? "true" : "false", static_cast<unsigned long>(g_autoResult),
+     g_wantAutoSpeed ? "true" : "false");
+
+  jf("\"selftest\":{\"ran\":%s,\"pass\":%s,\"tries\":%u,\"framesSeen\":%lu,\"busy\":%s},",
+     g_stRan ? "true" : "false", g_stPass ? "true" : "false",
+     static_cast<unsigned>(g_stTries), static_cast<unsigned long>(g_stGot),
+     g_wantSelfTest ? "true" : "false");
+
+  jf("\"drv\":{\"valid\":%s,\"state\":%u,\"txErr\":%lu,\"rxErr\":%lu,\"busErr\":%lu,"
+     "\"arbLost\":%lu,\"rxMissed\":%lu,\"toTx\":%lu,\"toRx\":%lu},",
+     valid ? "true" : "false", static_cast<unsigned>(st.state),
+     static_cast<unsigned long>(st.tx_error_counter),
+     static_cast<unsigned long>(st.rx_error_counter),
+     static_cast<unsigned long>(st.bus_error_count),
+     static_cast<unsigned long>(st.arb_lost_count),
+     static_cast<unsigned long>(st.rx_missed_count),
+     static_cast<unsigned long>(st.msgs_to_tx),
+     static_cast<unsigned long>(st.msgs_to_rx));
+
+  jf("\"wifi\":{\"mode\":");
+  jstr(WiFi.isConnected() ? "sta" : "ap");
+  {
+    const String ip = WiFi.isConnected() ? WiFi.localIP().toString()
+                                         : WiFi.softAPIP().toString();
+    jf(",\"ip\":"); jstr(ip.c_str());
+  }
+  jf(",\"rssi\":%d}", WiFi.isConnected() ? static_cast<int>(WiFi.RSSI()) : 0);
+  jf("}");
+}
+
+void jFrames(long want) {
+  if (want <= 0) want = 48;
+  if (want > static_cast<long>(kRing)) want = kRing;
+
+  // STATIC, not a local: 2 kB does not belong on esp_http_server's task stack.
+  static FrameRec snap[kRing];
+  size_t   head;
+  uint32_t seq;
+  portENTER_CRITICAL(&g_mux);
+  memcpy(snap, g_ring, sizeof(snap));
+  head = g_head;
+  seq  = g_seq;
+  portEXIT_CRITICAL(&g_mux);
+
+  const size_t have = (seq < kRing) ? static_cast<size_t>(seq) : kRing;
+  const size_t n    = (static_cast<size_t>(want) < have) ? static_cast<size_t>(want) : have;
+
+  jclear();
+  jf("{\"total\":%lu,\"f\":[", static_cast<unsigned long>(seq));
+  for (size_t i = 0; i < n; ++i) {                       // oldest first: reads like a trace
+    const FrameRec& r = snap[(head + kRing - n + i) % kRing];
+    if (i) jf(",");
+    jf("[%lu,\"%s\",\"%0*lX\",%u,\"", static_cast<unsigned long>(r.ms),
+       r.dir ? "TX" : "RX", r.ext ? 8 : 3, static_cast<unsigned long>(r.id),
+       static_cast<unsigned>(r.len));
+    for (uint8_t b = 0; b < r.len; ++b)
+      jf("%s%02X", b ? " " : "", static_cast<unsigned>(r.d[b]));
+    jf("\",\"%s%s\"]", r.ext ? "ext" : "std", r.rtr ? ",rtr" : "");
+  }
+  jf("]}");
+}
+
+void jLog() {
+  static LogRec snap[kLogRing];
+  size_t head;
+  portENTER_CRITICAL(&g_logMux);
+  memcpy(snap, g_log, sizeof(snap));
+  head = g_logHead;
+  portEXIT_CRITICAL(&g_logMux);
+
+  jclear();
+  jf("{\"l\":[");
+  bool first = true;
+  for (size_t i = 0; i < kLogRing; ++i) {
+    const LogRec& r = snap[(head + i) % kLogRing];
+    if (!r.msg[0]) continue;
+    if (!first) jf(",");
+    first = false;
+    jf("[%lu,", static_cast<unsigned long>(r.ms));
+    jstr(r.msg);
+    jf("]");
+  }
+  jf("]}");
+}
+
+const char kPage[] PROGMEM = R"HTML(<!doctype html><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>CAN spy</title>
+<style>
+body{font:13px ui-monospace,Consolas,monospace;margin:0;padding:12px;background:#111;color:#ddd}
+h1{font:600 15px system-ui;margin:0 0 8px}
+#v{font:600 16px system-ui;padding:8px;border-radius:5px;margin:8px 0;background:#222}
+.ok{background:#143!important;color:#8f8}.bad{background:#411!important;color:#f99}
+button{font:inherit;padding:5px 9px;margin:2px;background:#243;color:#cfc;border:1px solid #486;border-radius:4px;cursor:pointer}
+button.w{background:#432;color:#fda;border-color:#754}
+a{color:#8cf}
+pre{background:#000;padding:8px;border-radius:4px;overflow:auto;max-height:34vh;margin:8px 0}
+label{margin-left:10px}
+</style>
+<h1>CAN spy — is the ESP32 seeing frames?</h1>
+<div id=v>…</div>
+<div>
+<button onclick=go('/api/listen?on=1')>LISTEN-ONLY (passive)</button>
+<button onclick=go('/api/listen?on=0')>normal (we ACK)</button>
+<button onclick=go("/api/pintest")>PIN TEST (drive CTX, watch CRX)</button>
+<button onclick=go("/api/looptest?pin=6")>INTERNAL LOOPBACK (no transceiver)</button>
+<button onclick=go("/api/selftest")>TX self-test on real pins</button>
+<button onclick=go('/api/send')>send test frame</button>
+<button onclick=go('/api/clear')>clear</button>
+<button onclick=go('/api/autospeed')>autospeed</button>
+</div>
+<div>
+<button class=w onclick=go('/api/rate?v=500000')>500k</button>
+<button class=w onclick=go('/api/rate?v=250000')>250k</button>
+<button class=w onclick=go('/api/rate?v=125000')>125k</button>
+<button class=w onclick=go('/api/rate?v=1000000')>1M</button>
+<button class=w onclick=go('/api/reboot')>reboot</button>
+<a href=/update>OTA</a>
+</div>
+<div><button onclick=tick()>refresh</button><label><input type=checkbox id=a checked> auto (2s)</label></div>
+<pre id=s></pre><pre id=f></pre><pre id=l></pre>
+<script>
+const $=i=>document.getElementById(i)
+async function go(u){try{await fetch(u)}catch(e){};setTimeout(tick,400)}
+async function tick(){
+ try{
+  const s=await (await fetch('/api/status')).json()
+  const v=$('v')
+  v.className=s.hearing?'ok':'bad'
+  v.textContent=(s.hearing?'HEARING — '+s.rx+' frames in':'NOT HEARING — 0 frames in')
+   +'   @'+s.rate+' bit/s   '+(s.listenOnly?'LISTEN-ONLY':'normal')+'   drv.state='+s.drv.state
+   +'  txErr='+s.drv.txErr+' rxErr='+s.drv.rxErr+' busErr='+s.drv.busErr
+   +(s.autospeed.ran?('   autospeed='+(s.autospeed.found||'nothing')):'')
+  $('s').textContent=JSON.stringify(s,null,1)
+  const f=await (await fetch('/api/frames?n=48')).json()
+  $('f').textContent='frames total '+f.total+'\n'+f.f.map(r=>r[0]+'  '+r[1]+' '+r[2]+' ['+r[3]+'] '+r[4]+'  '+r[5]).join('\n')
+  const g=await (await fetch('/api/log')).json()
+  $('l').textContent=g.l.map(r=>r[0]+'  '+r[1]).join('\n')
+ }catch(e){$('s').textContent='fetch failed: '+e}
+}
+setInterval(()=>{if($('a').checked)tick()},2000);tick()
+</script>)HTML";
+
+long pnum(PsychicRequest* r, const char* k, long dflt) {
+  if (!r->hasParam(k)) return dflt;
+  const String v = r->getParam(k)->value();
+  if (!v.length()) return dflt;
+  return strtol(v.c_str(), nullptr, 0);
+}
+
+esp_err_t replyJson(PsychicRequest* r) { return r->reply(200, "application/json", g_out); }
+
+void routes() {
+  g_server.on("/", HTTP_GET, [](PsychicRequest* r) {
+    return r->reply(200, "text/html", kPage);
+  });
+  g_server.on("/api/ping", HTTP_GET, [](PsychicRequest* r) {
+    return r->reply(200, "text/plain", "pong");
+  });
+  g_server.on("/api/status", HTTP_GET, [](PsychicRequest* r) {
+    jStatus(); return replyJson(r);
+  });
+  g_server.on("/api/frames", HTTP_GET, [](PsychicRequest* r) {
+    jFrames(pnum(r, "n", 48)); return replyJson(r);
+  });
+  g_server.on("/api/log", HTTP_GET, [](PsychicRequest* r) {
+    jLog(); return replyJson(r);
+  });
+
+  g_server.on("/api/clear", HTTP_GET, [](PsychicRequest* r) {
+    portENTER_CRITICAL(&g_mux);
+    g_head = 0; g_seq = 0; g_rxCount = 0; g_txCount = 0; g_lastRxMs = 0;
+    memset(g_ring, 0, sizeof(g_ring));
+    portEXIT_CRITICAL(&g_mux);
+    jclear(); jf("{\"cleared\":true}");
+    return replyJson(r);
+  });
+
+  // THE A/B TEST. Listen-only makes the controller electrically passive: no ACK bits, no
+  // error frames, nothing of ours on the wire. If frames decode here and not in normal mode,
+  // reception is fine and the trouble is on our transmit side.
+  g_server.on("/api/listen", HTTP_GET, [](PsychicRequest* r) {
+    g_wantListen = pnum(r, "on", 1) != 0 ? 1 : 0;
+    jclear(); jf("{\"queued\":true,\"listenOnly\":%s}", g_wantListen ? "true" : "false");
+    return replyJson(r);
+  });
+
+  g_server.on("/api/selftest", HTTP_GET, [](PsychicRequest* r) {
+    g_wantSelfTest = true;
+    jclear(); jf("{\"queued\":true}");
+    return replyJson(r);
+  });
+
+  g_server.on("/api/pintest", HTTP_GET, [](PsychicRequest* r) {
+    g_wantPinTest = true;
+    jclear(); jf("{\"queued\":true}");
+    return replyJson(r);
+  });
+
+  g_server.on("/api/looptest", HTTP_GET, [](PsychicRequest* r) {
+    g_wantLoop = static_cast<int16_t>(pnum(r, "pin", 6));
+    jclear(); jf("{\"queued\":true,\"pin\":%d}", static_cast<int>(g_wantLoop));
+    return replyJson(r);
+  });
+
+  // Requested here, performed in loop(): it blocks for seconds.
+  g_server.on("/api/autospeed", HTTP_GET, [](PsychicRequest* r) {
+    g_wantAutoSpeed = true;
+    jclear(); jf("{\"queued\":true}");
+    return replyJson(r);
+  });
+
+  // Persist and reboot rather than reinstalling the driver under a live callback.
+  g_server.on("/api/rate", HTTP_GET, [](PsychicRequest* r) {
+    const long v = pnum(r, "v", kDefaultRate);
+    Preferences p;
+    if (p.begin(kOwnNamespace, false)) { p.putULong("rate", static_cast<uint32_t>(v)); p.end(); }
+    jclear(); jf("{\"rate\":%ld,\"rebooting\":true}", v);
+    g_rebootAt = millis() + 400;
+    return replyJson(r);
+  });
+
+  // Transmit one frame. Defaults to the AFFA heartbeat so the panel sees something it knows.
+  // If txErr stays 0 afterwards, somebody acknowledged us — that is the "are we answering"
+  // half, and it needs another node on the bus to mean anything.
+  g_server.on("/api/send", HTTP_GET, [](PsychicRequest* r) {
+    CAN_FRAME f;
+    memset(&f, 0, sizeof(f));
+    f.id       = static_cast<uint32_t>(pnum(r, "id", 0x3AF));
+    f.extended = 0;
+    f.rtr      = 0;
+    f.length   = 8;
+    f.data.uint8[0] = static_cast<uint8_t>(pnum(r, "b0", 0xB9));
+    CAN0.sendFrame(f);
+    push(f.id, f.data.uint8, f.length, 0, 0, /*tx=*/true);
+
+    twai_status_info_t st{};
+    twai_get_status_info(&st);
+    jclear();
+    jf("{\"sent\":true,\"id\":\"%03lX\",\"txErrAfter\":%lu,\"state\":%u}",
+       static_cast<unsigned long>(f.id),
+       static_cast<unsigned long>(st.tx_error_counter),
+       static_cast<unsigned>(st.state));
+    return replyJson(r);
+  });
+
+  g_server.on("/api/reboot", HTTP_GET, [](PsychicRequest* r) {
+    jclear(); jf("{\"rebooting\":true}");
+    g_rebootAt = millis() + 300;
+    return replyJson(r);
+  });
+}
+
+void startNetwork() {
+  Preferences p;
+  String ssid, pass;
+  if (p.begin(kWifiNamespace, /*readOnly=*/true)) {
+    ssid = p.getString("ssid", "");
+    pass = p.getString("pass", "");
+    p.end();
+  }
+
+  WiFi.persistent(false);
+  WiFi.setSleep(true);
+
+  bool sta = false;
+  if (ssid.length()) {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid.c_str(), pass.c_str());
+    const uint32_t t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < kStaJoinMs) delay(100);
+    sta = (WiFi.status() == WL_CONNECTED);
+  }
+  if (!sta) { WiFi.mode(WIFI_AP); WiFi.softAP(kApSsid, kApPass); }
+  if (MDNS.begin(kMdnsName)) MDNS.addService("http", "tcp", 80);
+
+  const String ip = sta ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
+  Serial.printf("\n[wifi] %s ip=%s  http://%s/  OTA http://%s/update\n",
+                sta ? "STA" : "AP", ip.c_str(), ip.c_str(), ip.c_str());
+}
+
+void startHttp() {
+  // The lockout fix: without lru_purge_enable a full socket table is PERMANENT — httpd stops
+  // accepting and never resumes, ICMP and mDNS keep answering, and OTA is gone.
+  g_server.config.lru_purge_enable  = true;
+  g_server.config.max_open_sockets  = 7;
+  g_server.config.recv_wait_timeout = 3;
+  g_server.config.send_wait_timeout = 3;
+  g_server.config.max_uri_handlers  = 20;
+  g_server.config.stack_size        = 8192;
+
+  g_server.listen(80);
+  routes();
+
+  ElegantOTA.onStart([]() { g_otaRunning = true; logmsg("ota started"); });
+  ElegantOTA.onEnd([](bool ok) { logmsg("ota %s", ok ? "ok, rebooting" : "FAILED"); });
+  ElegantOTA.begin(&g_server);
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+void setup() {
+  Serial.begin(115200);
+  Serial.setTxTimeoutMs(0);
+  delay(300);
+  Serial.println("\n02_canspy — bare esp32_can, no AffaDisplay");
+
+  // NETWORK AND OTA FIRST. Everything after this may fail without costing us the board.
+  startNetwork();
+  startHttp();
+
+  {
+    Preferences p;
+    if (p.begin(kOwnNamespace, /*readOnly=*/true)) {
+      g_rate = p.getULong("rate", kDefaultRate);
+      p.end();
+    }
+  }
+  if (!g_rate) g_rate = kDefaultRate;
+
+  {
+    Preferences p;
+    if (p.begin(kOwnNamespace, /*readOnly=*/true)) {
+      g_listen = p.getUChar("listen", 0) != 0;
+      p.end();
+    }
+  }
+
+  g_canUp = canStart(g_rate, g_listen);
+}
+
+void loop() {
+  const uint32_t now = millis();
+
+  if (g_wantListen >= 0 && !g_otaRunning) {
+    const bool on = g_wantListen != 0;
+    g_wantListen = -1;
+    applyListen(on);
+  }
+
+  if (g_wantPinTest && !g_otaRunning) {
+    g_wantPinTest = false;
+    runPinTest();
+  }
+
+  if (g_wantLoop >= 0 && !g_otaRunning) {
+    const int pin = g_wantLoop;
+    g_wantLoop = -1;
+    runLoopback(pin);
+  }
+
+  if (g_wantSelfTest && !g_otaRunning) {
+    g_wantSelfTest = false;
+    runSelfTest();
+  }
+
+  if (g_wantAutoSpeed && !g_otaRunning) {
+    g_wantAutoSpeed = false;
+    runAutoSpeed();
+  }
+
+  ElegantOTA.loop();
+  if (g_rebootAt && static_cast<int32_t>(now - g_rebootAt) >= 0) ESP.restart();
+
+  delay(10);
+}
