@@ -731,9 +731,34 @@ void onComplete(affa::TxTicket t, affa::Result r, void*) {
   selfTestComplete(t, r, millis());
 }
 
+// ---------------------------------------------------------------------------
+// The clock as a link indicator
+// ---------------------------------------------------------------------------
+// THE ONE THING A CARMINAT DRAWS WITH THE DISPLAY POWERED OFF IS THE CLOCK. So setting it
+// on every fresh sync turns the glass itself into a link light: if the panel reads 10:00,
+// the handshake completed and registration latched — no console, no serial, no laptop.
+//
+// Re-armed on every sync LOSS rather than done once at boot, because the question it
+// answers is "is the link up *now*", not "did it ever come up".
+constexpr const char* kLinkClock = "1000";
+bool g_clockPending = true;
+
 void onSyncChanged(affa::SyncState s, void*) {
   logmsg(3, "bench", "sync 0x%02X synced=%d registered=%d", static_cast<unsigned>(s),
        g_display.synced() ? 1 : 0, g_display.registered() ? 1 : 0);
+  // Re-arm on the way down. Setting it from HERE would render from inside a callback that
+  // fires mid-poll(); it is legal, but the queue is in a better state one pump later.
+  if (!g_display.synced()) g_clockPending = true;
+}
+
+void clockTick() {
+  if (!g_clockPending || !g_display.synced()) return;
+  // Lazy registration rides on this: it is the first render after a resync, so it drags
+  // the 0x70 probes with it and FUNCSREG latches on the clock rather than on whatever the
+  // application happened to draw first.
+  if (g_display.setTime(kLinkClock) != affa::Result::Ok) return;   // retry next pump
+  g_clockPending = false;
+  logmsg(3, "bench", "link clock set to %s", kLinkClock);
 }
 
 // ---------------------------------------------------------------------------
@@ -1640,6 +1665,7 @@ void loop() {
   }
 
   // 3. Deadline-driven application work. No counters, no delays.
+  clockTick();          // first thing after a sync: put 10:00 on the glass
   counterTick(now);
   popupTick(now);
   nowPlayingTick(now);

@@ -59,6 +59,26 @@ constexpr uint16_t kTrackSec = 217;     // 3:37, so the bar visibly fills
 affa::widget::Marquee g_r1{ affa::widget::MarqueeGeometry{kCols, kGap, kRow1Ms} };
 affa::widget::Marquee g_r2{ affa::widget::MarqueeGeometry{kCols, kGap, kRow2Ms} };
 
+// THE ONE THING A CARMINAT DRAWS WITH THE DISPLAY POWERED OFF IS THE CLOCK. Setting it on
+// every fresh sync turns the glass into a link light: if the panel reads 10:00, the
+// handshake completed and registration latched — without a console, a serial cable or a
+// laptop. Re-armed on sync LOSS, not done once at boot, because the question it answers is
+// "is the link up now", not "did it ever come up".
+constexpr const char* kLinkClock = "1000";
+bool g_clockPending = true;
+
+void onSync(affa::SyncState, void*) {
+  if (!g_display.synced()) g_clockPending = true;
+}
+
+void clockTick() {
+  if (!g_clockPending || !g_display.synced()) return;
+  // Lazy registration rides on this: as the first render after a resync it drags the 0x70
+  // probes with it, so FUNCSREG latches on the clock rather than on the media screen.
+  if (g_display.setTime(kLinkClock) != affa::Result::Ok) return;   // retry next pump
+  g_clockPending = false;
+}
+
 uint32_t g_startMs = 0;
 uint32_t g_nextMs  = 0;
 char     g_lastHdr[40] = {0};
@@ -123,10 +143,12 @@ void setup() {
   delay(200);
   if (!g_link.begin(kPins, 500000)) { Serial.println("CAN did not come up"); return; }
 
+  g_display.onSync(&onSync, nullptr);
   g_display.begin();
 
   // The panel renders nothing while the display is powered off, and the symptom is a
-  // perfectly healthy link drawing to a dark screen.
+  // perfectly healthy link drawing to a dark screen. The clock above is the exception, and
+  // that is exactly why it makes a good link indicator.
   (void)g_display.setPower(true);
 
   const uint32_t now = ::millis();
@@ -141,5 +163,6 @@ void setup() {
 
 void loop() {
   g_display.poll();
+  clockTick();   // first thing after a sync: put 10:00 on the glass
   tick();
 }
