@@ -519,6 +519,7 @@ affa::widget::Marquee g_npArtist{ affa::widget::MarqueeGeometry{kNpCols, kNpGap,
 
 struct NowPlaying {
   bool     run      = false;
+  bool     full     = false;   // showFullscreenText (0x21 mode 0x05) instead of showMenu
   uint32_t startMs  = 0;
   uint32_t nextMs   = 0;
   uint32_t renders  = 0;
@@ -573,8 +574,13 @@ void nowPlayingTick(uint32_t now) {
     return;                                   // nothing moved; say nothing
   strcpy(g_np.lastHdr, hdr); strcpy(g_np.lastR0, r0); strcpy(g_np.lastR1, r1);
 
-  // kScrollNone: the arrows mean "more list items this way", and this is not a list.
-  const affa::Result r = g_display.showMenu(hdr, r0, r1, affa::carminat::kScrollNone);
+  // Two primitives, same content, so they can be compared on one panel:
+  //   showMenu            0x21 mode 0x01 — header + two ROWS with tags, 13 frames
+  //   showFullscreenText  0x21 mode 0x05 — three EQUAL lines, no tags, 14 frames
+  // Neither is closed between frames; each screen replaces the last.
+  const affa::Result r =
+      g_np.full ? g_display.showFullscreenText(hdr, r0, r1)
+                : g_display.showMenu(hdr, r0, r1, affa::carminat::kScrollNone);
   ++g_np.renders;
   if (r != affa::Result::Ok) ++g_np.rejected;
 }
@@ -1268,7 +1274,8 @@ void execCmd(const Cmd& c) {
     }
 
     case Op::NowPlaying: {
-      g_np.run = (c.a != 0);
+      g_np.run  = (c.a != 0);
+      g_np.full = (c.d != 0);
       if (g_np.run) {
         const uint32_t now = millis();
         g_np.startMs  = now;
@@ -1296,7 +1303,8 @@ void execCmd(const Cmd& c) {
              static_cast<unsigned long>(g_np.renders));
       }
       jclear();
-      jf("{\"run\":%s,\"renders\":%lu}", g_np.run ? "true" : "false",
+      jf("{\"run\":%s,\"full\":%s,\"renders\":%lu}", g_np.run ? "true" : "false",
+         g_np.full ? "true" : "false",
          static_cast<unsigned long>(g_np.renders));
       break;
     }
@@ -1508,6 +1516,7 @@ void routes() {
     c.a = pnum(r, "run", 1);
     c.b = pnum(r, "ms1", 0);          // 0 = keep the compiled default
     c.c = pnum(r, "ms2", 0);
+    c.d = pnum(r, "full", 0);         // 1 = showFullscreenText instead of showMenu
     pstr(r, "r1", c.s1, sizeof(c.s1));
     pstr(r, "r2", c.s2, sizeof(c.s2));
     return run(r, c);
