@@ -29,6 +29,76 @@ drives our own `ICanLink` over the IDF TWAI driver
 
 ---
 
+## 2026-07-28
+
+### A. `WIRE-SPEC.md` §8.6 `[CAP]` — fullscreen and popup are the wrong way round
+
+**This is a measurement, not a reading of the code.** Real Carminat, bench rig, with the
+media repaint stopped first so nothing else was drawing.
+
+```
+POST /api/display/fullscreen  l1=FS-ONE l2=FS-TWO l3=FS-THREE   -> delivered Ok
+POST /api/display/text        text=PLAINTXT                     -> delivered Ok
+```
+
+**The glass then read `PLAINTXT`.** No `hideFullscreenText()` was sent. §8.6 currently
+states the opposite, as a `[CAP]` confirmed capability:
+
+> **[CAP] THE FULLSCREEN SCREEN OWNS THE GLASS UNTIL IT IS CLOSED.** … With a fullscreen up,
+> a plain `setText()` was **delivered `Result::Ok`** — the panel acknowledged every frame —
+> and the glass did not change at all.
+
+On this panel every full-screen-class render — `showMenu`, `showFullscreenText`, `setText` —
+simply replaces the last one. `hideFullscreenText()` is not required in order to leave a
+fullscreen.
+
+**The popup is what behaves the way §8.6 describes**, tested in the same session:
+
+```
+fullscreen BASE-A1/A2/A3   -> Ok
+showPopupText POPUP-X      -> Ok        (no auto-hide)
+fullscreen BASE-B1/B2/B3   -> Ok
+```
+
+The owner read the glass: the popup was still on top, **and the base had updated to
+`BASE-B`** — visible at the line ends the overlay does not cover. So a popup survives a
+redraw of the screen underneath, the redraw still lands, and only `hidePopup()` clears it.
+
+Consequence for a consumer: a popup needs a lifetime managed by the application (we run a
+3 s deadline and then `hidePopup()`), and a fullscreen needs no teardown bookkeeping at all.
+We had implemented the reverse of both, on the strength of §8.6.
+
+Deliberately not proposing wording. The two halves want swapping and the `[CAP]` marker
+wants moving to the popup — but this is one panel, and rewriting a confirmed-capability note
+on a single report is how §8.6 got into this state. A second panel would settle it.
+
+### B. `docs/API.md` §4.4 — "no minimum call rate for correctness" is true of the wrong thing
+
+> There is no minimum call rate for **correctness** — only for latency and for keeping
+> `Stats::ringOverflow` at zero.
+
+True of the *transmitted frame sequence*, and the two frequency-independence tests prove
+exactly that. Not true of **delivery**: `AFFA_ACK_TIMEOUT_MS` and `AFFA_PEER_TIMEOUT_MS` are
+wall-clock deadlines evaluated inside `poll()`, so a late `poll()` does not delay a result,
+it *changes* it — `Ok` becomes `Timeout`, and peer expiry tears down `FUNCSREG` and cancels
+the queue.
+
+We read that sentence as licence to share the poll task, and paid for it three times in one
+day (numbers in `docs/CR-0.3.0-OWNED-TASK.md` §2). Suggest splitting it: the frames we emit
+are frequency-independent; whether a transfer completes is not.
+
+### C. Change request — the library should own the poll task
+
+Full design at **`docs/CR-0.3.0-OWNED-TASK.md`**, written at the owner's request for v0.3.0.
+
+Summary: make `AFFA_ENABLE_TASK` real, in a new `src/rtos/` layer that leaves `core/`
+FreeRTOS-free and host-testable; a command queue rather than a mutex, because callbacks are
+permitted to re-enter the library and a mutex deadlocks on that; and **key latency as the
+acceptance criterion** — `KeyCb` must keep firing synchronously inside `poll()` and must
+never be routed back to an application task through a queue.
+
+---
+
 ## 2026-07-27
 
 ### 1. OBSERVATION, NOT A BUG — a sustained window where the panel flow-controlled but never completed a transfer
