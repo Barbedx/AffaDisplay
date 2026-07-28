@@ -22,12 +22,18 @@
 // separators — so the lines share a budget rather than owning one. 18 cells each leaves
 // room for the separators and the two leading spaces the OEM capture starts with.
 //
-// DOES IT NEED CLOSING? hideFullscreenText() exists and sends `02 54 03`, the same three
-// bytes as hidePopup() on a different RenderSlot. This example never calls it: it just
-// re-sends the screen, and each new screen replaces the last. What is NOT established is
-// whether the panel returns to its previous content on its own, or whether you must close
-// it to get back — see the README next to this file for what was and was not confirmed on
-// a real panel.
+// IT DOES NEED CLOSING, AND THIS IS THE TRAP. Confirmed on a real Carminat 2026-07-28:
+//
+//   * BETWEEN FRAMES, no. Each fullscreen screen replaces the last, so the animation below
+//     runs with no close anywhere — closing and reopening would blank the glass every step.
+//   * TO GET BACK OUT, YES. With a fullscreen up, setText() was delivered Ok — the panel
+//     acknowledged every frame — and the glass did not change. The fullscreen owns the
+//     display until hideFullscreenText() takes it away.
+//
+// So a delivered Ok is NOT evidence that anything appeared. This is the same shape as the
+// display-power trap (a render to a powered-off panel also completes Ok and shows nothing):
+// the transport succeeded and the screen still did not change. Call hideFullscreenText()
+// before you go back to setText() or showMenu().
 
 #include <Arduino.h>
 #include <AffaDisplay.h>

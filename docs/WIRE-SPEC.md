@@ -987,6 +987,22 @@ Same `0x21` screen command as `showMenu` with mode byte `0x05` instead of `0x01`
 takes the whole screen and renders later menu/volume screens as popups over it.
 Reverse-engineered from the OEM "Please insert navigation CD" screen.
 
+> **[CAP] THE FULLSCREEN SCREEN OWNS THE GLASS UNTIL IT IS CLOSED.** Confirmed on a real
+> Carminat, 2026-07-28:
+>
+> * **Between fullscreen frames, no close is needed.** Each screen replaces the last, so a
+>   fullscreen can be animated at the rate the wire sustains — measured at ~190 ms per
+>   screen, 14 frames each, every one acknowledged.
+> * **To leave it, `hideFullscreenText()` is mandatory.** With a fullscreen up, a plain
+>   `setText()` was **delivered `Result::Ok`** — the panel acknowledged every frame — and
+>   the glass did not change at all.
+>
+> So on this screen **a delivered `Ok` is not evidence that anything appeared**. That is the
+> same shape as the display-power trap (§8.3: a render to a powered-off panel also completes
+> `Ok` and shows nothing) — the transport succeeded and the screen still did not move. It is
+> the reason `hideFullscreenText()` exists as its own call rather than being implied by the
+> next render.
+
 Payload is `uint8_t payload[2 + 96]`, so `L = 98` always.
 
 | Offset | Byte(s) | Meaning |
