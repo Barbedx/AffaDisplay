@@ -90,6 +90,19 @@ void tick() {
   if (!affa::expired(now, g_nextMs)) return;
   g_nextMs = now + 100;                       // 10 Hz ceiling; the marquees are slower
 
+  // RENDER AT THE RATE THE WIRE SUSTAINS, NOT THE RATE THE TEXT MOVES. showMenu is 96
+  // bytes — 13 frames, each waiting on a panel ACK — so a screen takes far longer to
+  // deliver than the marquee takes to step. Enqueueing anyway does not make the panel
+  // faster: RenderSlot::Menu coalescing supersedes the queued screen and the completion
+  // arrives as Result::Aborted, so almost nothing reaches the glass and it looks FROZEN.
+  // Measured on the bench without this line: 255 of 377 renders superseded, the row
+  // unchanged for eight seconds.
+  //
+  // Skipping a tick costs NOTHING because the marquee position is derived from the clock
+  // rather than accumulated — we sample it later and get the position the wall clock says,
+  // not a backlog. That property is the whole reason windowAt() takes `now`.
+  if (g_display.busy()) return;
+
   const uint16_t elapsed =
       static_cast<uint16_t>(((now - g_startMs) / 1000u) % (kTrackSec + 1u));
 
