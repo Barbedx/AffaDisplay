@@ -54,7 +54,17 @@
 #  define AFFA_PANEL_UPDATELIST 1
 #endif
 
-#if !AFFA_PANEL_CARMINAT && !AFFA_PANEL_UPDATELIST && !AFFA_PANEL_UPDATELIST_MENU
+// The dashboard cluster: a THIRD sync profile, transcribed from ONE capture and NEVER RUN
+// against hardware. It is NOT in AFFA_PANEL_DEFAULT_ALL and it is not on by any other
+// route — you have to ask for it, because everything it claims is inference from a single
+// sample (docs/PROTOCOL-NOTES.md §9). It renders no text at all: the capture contains no
+// text frame, so the encoding is unknown and supports(Feature::Text) is false.
+#ifndef AFFA_PANEL_CLUSTER
+#  define AFFA_PANEL_CLUSTER 0
+#endif
+
+#if !AFFA_PANEL_CARMINAT && !AFFA_PANEL_UPDATELIST && !AFFA_PANEL_UPDATELIST_MENU && \
+    !AFFA_PANEL_CLUSTER
 #  error "AffaDisplay: no panel selected. Add -D AFFA_PANEL_CARMINAT=1 (and/or _UPDATELIST / _UPDATELIST_MENU), or -D AFFA_PANEL_DEFAULT_ALL=1 for all three. Check your spelling: a typo'd AFFA_PANEL_* flag lands here."
 #endif
 

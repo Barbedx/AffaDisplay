@@ -83,17 +83,39 @@ affa::UpdateListDisplay  g_display(g_hw, g_clock);
 PsychicHttpServer        g_server;
 bool                     g_canUp = false;
 
-// Build and enqueue `10 1C 7F <icons> 55 <mode> <0x60|chan> <loc> old[8] 10 new[12] 00`.
+// THE ICON HEADER IS A DIFFERENTIAL AND IT IS NOT OPTIONAL TO GET RIGHT.
+//
+// The reference resends `1C 7F <icons> 55 <mode>` only when icons or mode CHANGED, and uses
+// the short `19 76` otherwise. This file originally sent the long form every time on the
+// reasoning that it is "always correct and three bytes dearer". Measured on a real panel,
+// that is WRONG: fullscreen text rendered a single row instead of three, because each
+// message carrying the icon header appears to start a NEW screen and discards the rows
+// addressed before it. The differential is load-bearing, not an optimisation.
+uint8_t g_lastIcons = 0xFF;   // deliberately not kIconsNone, so the first call sends long
+uint8_t g_lastMode  = 0x00;
+
+void resetIconState() { g_lastIcons = 0xFF; g_lastMode = 0x00; }
+
+// Build and enqueue either
+//   long : 10 1C 7F <icons> 55 <mode> <0x60|chan> <loc> old[8] 10 new[12] 00   (30 bytes)
+//   short: 10 19 76                  <0x60|chan> <loc> old[8] 10 new[12] 00   (27 bytes)
 affa::Result sendText(uint8_t icons, uint8_t mode, uint8_t chan, uint8_t loc,
                       const char* oldStr, const char* newStr) {
   uint8_t d[kPayload];
   uint8_t n = 0;
   d[n++] = 0x10;
-  d[n++] = 0x1C;
-  d[n++] = 0x7F;
-  d[n++] = icons;
-  d[n++] = kIconSep;
-  d[n++] = mode;
+  if (icons != g_lastIcons || mode != g_lastMode) {
+    d[n++] = 0x1C;
+    d[n++] = 0x7F;
+    d[n++] = icons;
+    d[n++] = kIconSep;
+    d[n++] = mode;
+    g_lastIcons = icons;
+    g_lastMode  = mode;
+  } else {
+    d[n++] = 0x19;
+    d[n++] = 0x76;
+  }
   d[n++] = static_cast<uint8_t>(0x60 | (chan & 7));
   d[n++] = loc;
   for (uint8_t i = 0; i < kOldCells; ++i)
@@ -123,6 +145,11 @@ affa::Result showFullscreen(const char* text) {
   uint8_t packets = static_cast<uint8_t>(len / 8 + ((len % 8) ? 1 : 0));
   if (packets == 0) packets = 1;
   if (packets > 7)  return affa::Result::TooLong;
+
+  // Force the FIRST chunk to carry the icon header and every later one to use the short
+  // form — which is what makes the rows accumulate into one screen rather than each
+  // replacing the last.
+  resetIconState();
 
   for (uint8_t i = 0; i < packets; ++i) {
     char chunk[kNewCells + 1];
@@ -203,6 +230,60 @@ void runCmd() {
     f.len = static_cast<uint8_t>(g_cmd.b ? g_cmd.b : 8);
     for (uint8_t i = 0; i < 8; ++i) f.data[i] = static_cast<uint8_t>(g_cmd.s[0][i]);
     r = g_hw.send(f) ? affa::Result::Ok : affa::Result::SendFailed;
+  } else if (!strcmp(g_cmd.op, "sweep")) {
+    // CLOCK BRUTE FORCE, made identifiable rather than blind. Each candidate sets a
+    // DIFFERENT hour equal to its own index, so whatever the panel ends up displaying
+    // names the encoding that worked — no need to watch during the sweep. Minutes are
+    // fixed at 34 so a half-working candidate (hour only) is still distinguishable.
+    //
+    // Candidates, in order:
+    //   1  3EF  A6 hh mm            the cluster capture, binary          (already failed)
+    //   2  3EF  A6 BCD(hh) BCD(mm)  same frame, BCD instead of binary
+    //   3  3EF  A6 mm hh            same frame, operands swapped
+    //   4  121  05 56 'h','h','m','m'  Carminat's setTime shape on the UpdateList text id
+    //   5  1B1  05 56 'h','h','m','m'  ditto on the control id
+    //   6  3EF  A6 hh mm 00 00 00 00   padded to DLC 8 rather than 3
+    //   7  3DF  A6 hh mm            our own sync id instead of 3EF
+    //   8  3EF  26 hh mm            command byte without the top bit
+    const uint8_t idx = static_cast<uint8_t>(g_cmd.a);
+    const uint8_t hh  = idx;                 // hour == candidate number
+    const uint8_t mm  = 34;
+    auto bcd = [](uint8_t v) -> uint8_t {
+      return static_cast<uint8_t>(((v / 10) << 4) | (v % 10));
+    };
+    affa::Frame f{};
+    bool useEnqueue = false;
+    uint8_t payload[8]; uint8_t plen = 0; uint16_t pid = 0;
+
+    switch (idx) {
+      case 1: f.id=0x3EF; f.len=3; f.data[0]=0xA6; f.data[1]=hh;      f.data[2]=mm;      break;
+      case 2: f.id=0x3EF; f.len=3; f.data[0]=0xA6; f.data[1]=bcd(hh); f.data[2]=bcd(mm); break;
+      case 3: f.id=0x3EF; f.len=3; f.data[0]=0xA6; f.data[1]=mm;      f.data[2]=hh;      break;
+      case 4: case 5: {
+        pid = (idx == 4) ? 0x121 : 0x1B1;
+        payload[plen++] = 0x05; payload[plen++] = 0x56;
+        payload[plen++] = static_cast<uint8_t>('0' + (hh / 10));
+        payload[plen++] = static_cast<uint8_t>('0' + (hh % 10));
+        payload[plen++] = static_cast<uint8_t>('0' + (mm / 10));
+        payload[plen++] = static_cast<uint8_t>('0' + (mm % 10));
+        useEnqueue = true;
+        break;
+      }
+      case 6: f.id=0x3EF; f.len=8; f.data[0]=0xA6; f.data[1]=hh; f.data[2]=mm; break;
+      case 7: f.id=0x3DF; f.len=3; f.data[0]=0xA6; f.data[1]=hh; f.data[2]=mm; break;
+      case 8: f.id=0x3EF; f.len=3; f.data[0]=0x26; f.data[1]=hh; f.data[2]=mm; break;
+      default: r = affa::Result::BadArgument; break;
+    }
+
+    if (r == affa::Result::Ok) {
+      if (useEnqueue) {
+        affa::TxOptions o; o.slot = affa::RenderSlot::None; o.coalesce = false;
+        r = g_display.enqueue(pid, payload, plen, o) == affa::kNoTicket
+                ? g_display.lastResult() : affa::Result::Ok;
+      } else {
+        r = g_hw.send(f) ? affa::Result::Ok : affa::Result::SendFailed;
+      }
+    }
   } else if (!strcmp(g_cmd.op, "time")) {
     // The candidate from the OEM cluster capture: 0x3EF, DLC 3, `A6 <hours> <minutes>`,
     // both plain binary. Unverified on our panel — that is what this endpoint is for.
@@ -316,6 +397,10 @@ void routes() {
   g_server.on("/api/time", HTTP_GET, [](PsychicRequest* r) {
     return post(r, "time", nullptr, nullptr, nullptr, nullptr,
                 qs(r, "h", "12").toInt(), qs(r, "m", "0").toInt(), 0);
+  });
+  // /api/sweep?n=1..8 — one clock candidate; the hour it sets IS its candidate number
+  g_server.on("/api/sweep", HTTP_GET, [](PsychicRequest* r) {
+    return post(r, "sweep", nullptr, nullptr, nullptr, nullptr, qs(r, "n", "1").toInt(), 0, 0);
   });
   // /api/frame?id=1007&dlc=3&hex=A60C03 — arbitrary RAW frame, no framing applied
   g_server.on("/api/frame", HTTP_GET, [](PsychicRequest* r) {

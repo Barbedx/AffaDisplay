@@ -70,6 +70,13 @@
 #  endif
 #endif
 
+#if AFFA_PANEL_CLUSTER
+#  if __has_include("cluster/ClusterDisplay.h")
+#    include "cluster/ClusterConstants.h"
+#    include "cluster/ClusterDisplay.h"
+#  endif
+#endif
+
 #if AFFA_PANEL_UPDATELIST
 #  if __has_include("updatelist/UpdateListDisplay.h")
 #    include "updatelist/UpdateListConstants.h"

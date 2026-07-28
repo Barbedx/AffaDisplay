@@ -1309,8 +1309,15 @@ necessary escape hatch rather than an implementation detail.
 **Why anyone cares:** UpdateList has no `setTime` of its own (`supports(Feature::Time)` is
 false, §9 of WIRE-SPEC), and a head unit without a clock button has no other way to set it.
 `examples/15_updatelist_modes` exposes this as `/api/time?h=&m=`, built on a raw
-`ICanLink::send()`. **UNVERIFIED on our panel** — sent and accepted, effect on the glass not
-yet confirmed.
+`ICanLink::send()`. **UNVERIFIED, and as of 2026-07-28 it did NOT set the clock** on the bench panel — the
+frame is accepted by the bus and the clock does not change. `examples/15_updatelist_modes`
+exposes it as `/api/time?h=&m=` and a `/api/sweep?n=1..8` of eight candidate encodings.
+
+**THE ORACLE, which makes brute force practical.** These panels BLINK the clock while it is
+unset and count up from power-on; a clock that has been set stops blinking. So you do not
+have to watch the moment a command lands — a steady display means something worked, and a
+blinking one means nothing has. The sweep exploits this by setting **hour == candidate
+number**, so whatever a stopped clock reads names the encoding that won.
 
 ### 9.5 Two periodic ids we do not model
 
