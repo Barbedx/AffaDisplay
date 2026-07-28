@@ -99,6 +99,7 @@ PsychicHttpServer     g_server;
 bool     g_canUp       = false;
 bool     g_bootQuiet   = false;   // booted with our transmitter gated shut
 bool     g_otaRunning  = false;
+uint32_t g_otaSince    = 0;      // when onStart fired; 0 when no update is in progress
 uint32_t g_rebootAt    = 0;
 
 // ---------------------------------------------------------------------------
@@ -414,6 +415,10 @@ void sequenceTick(uint32_t now) {
 //
 // It cannot become a boot loop: it does nothing in the first two minutes of uptime, nothing
 // while an OTA is in progress, and nothing when WiFi is not associated in the first place.
+// Generous: a slow upload over a weak link is normal, and cutting one short is worse than
+// waiting. Nothing depends on this being tight — it only has to be finite.
+constexpr uint32_t kOtaAbandonMs = 180000;
+
 constexpr uint32_t kProbeEveryMs = 60000;
 constexpr uint32_t kProbeGraceMs = 120000;
 constexpr uint8_t  kProbeFails   = 3;
@@ -876,6 +881,7 @@ void startHttp() {
   // only route back into this board.
   ElegantOTA.onStart([]() {
     g_otaRunning = true;
+    g_otaSince   = millis();
     g_autoRun    = false;
     if (g_canUp) g_link.setTxEnabled(false);
     logmsg("ota started - CAN TX gated, RX stalls on flash writes");
@@ -941,6 +947,22 @@ void loop() {
   // a blocking probe — costs a slow screen and nothing else: no timed-out ACK, no lost
   // registration, no missed key. That is the property that makes this hard to break.
   const uint32_t now = millis();
+
+  // AN UPDATE THAT NEVER ARRIVES MUST NOT LEAVE THE BOARD MUTED.
+  // GET /ota/start gates the transmitter and parks the sequence, and ElegantOTA's onEnd only
+  // fires if an upload actually happens. A start with no upload — an aborted flash, a
+  // dropped connection — therefore left the board with txGate shut and auto off for ever,
+  // with nothing to undo it but a reboot. Observed on the bench 2026-07-29. One timeout
+  // fixes it; there is no state to unwind.
+  if (g_otaRunning && affa::expired(now, g_otaSince + kOtaAbandonMs)) {
+    g_otaRunning = false;
+    g_otaSince   = 0;
+    if (g_canUp) g_link.setTxEnabled(true);
+    g_autoRun = true;
+    restart("ota started but never completed");
+    logmsg("ota abandoned after %lu s - TX gate reopened",
+           static_cast<unsigned long>(kOtaAbandonMs / 1000));
+  }
 
   sequenceTick(now);
   httpWatchdogTick(now);

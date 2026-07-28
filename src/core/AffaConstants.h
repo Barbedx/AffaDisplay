@@ -85,10 +85,20 @@ inline constexpr uint8_t kSyncRequestByte0 = 0x61;  // panel asks us to announce
 inline constexpr uint8_t kSyncRequestByte1 = 0x11;  // ... our panel's token. One OEM
                                                     // cluster says 0x23 and we would
                                                     // never answer it (Appendix C).
-inline constexpr uint8_t kSyncStartFlag    = 0x01;  // data[2] of the request; sets Start.
-                                                    // NEVER OBSERVED in any capture —
-                                                    // data[2] is the panel's filler.
-                                                    // Kept because [REF] tests for it.
+// data[2] of the sync request. OBSERVED ON THE BENCH PANEL 2026-07-29, which corrects what
+// this comment used to claim — "never observed, data[2] is the panel's filler". It is not
+// the filler: the filler is 0xA3 and it starts at data[3]. data[2] is a real field, and both
+// values have now been captured on the same panel:
+//
+//     3CF  61 11 00 A3 A3 A3 A3 A3    2026-07-26, after a completed handshake
+//     3CF  61 11 01 A3 A3 A3 A3 A3    2026-07-29, from power-on, never acknowledged
+//
+// Its MEANING is still unknown. All the library does with it is raise SyncState::Start,
+// which only makes the sync request go out again on the next poll — there is no
+// authentication step in this handshake as far as any capture shows. Do not infer one from
+// the byte alone; if it turns out to matter, it will be because a capture showed the panel
+// behaving differently, not because 0x01 looks significant.
+inline constexpr uint8_t kSyncStartFlag    = 0x01;
 inline constexpr uint8_t kSyncPeerAlive    = 0x69;  // ~1 Hz ping. data[0] is the ENTIRE
                                                     // test; nothing else may be read.
 
