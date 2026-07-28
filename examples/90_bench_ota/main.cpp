@@ -495,23 +495,27 @@ void popupTick(uint32_t now) {
 }
 
 // ---------------------------------------------------------------------------
-// Now playing — three rows, each moving on its own clock
+// Media screen — three rows, three clocks
 // ---------------------------------------------------------------------------
-//     SPOTIFY [####----] 0:12      header: source, progress, elapsed. Live, not scrolled.
-//     My favourite song - Fidel..  title,  300 ms/cell
-//     Michael Jackson              artist, 450 ms/cell
+//     [----] 0:13              progress bar + elapsed. Ticks once a second, never scrolls.
+//     solar mpanels            drifts 1 s per symbol
+//     solar escimo forever     drifts 2 s per symbol
 //
-// The two rows own SEPARATE widget::Marquee instances at different rates, so they slide
-// past each other instead of marching in lockstep. This is examples/11_now_playing living
-// inside the console, so it can be driven from the browser without giving up WiFi and OTA.
+// The two text rows own SEPARATE widget::Marquee instances at DIFFERENT rates, so row 1 has
+// moved twice by the time row 2 has moved once and they drift apart continuously. This is
+// examples/11_mediascreen living inside the console, so it can be driven from a browser
+// without the board giving up WiFi and OTA.
+//
+// The rates are runtime here, not constants: /api/mediascreen takes ms1 and ms2 so the
+// drift can be retuned against the glass without a reflash.
 constexpr uint8_t  kNpCols     = 24;   // the Carminat row is 26 usable; leave margin
 constexpr uint8_t  kNpGap      = 4;
-constexpr uint32_t kNpTitleMs  = 300;
-constexpr uint32_t kNpArtistMs = 450;  // deliberately not a multiple of the title rate
-constexpr uint16_t kNpTrackSec = 217;  // 3:37
+constexpr uint32_t kNpMs1      = 1000; // 1 s per symbol
+constexpr uint32_t kNpMs2      = 2000; // 2 s per symbol
+constexpr uint16_t kNpTrackSec = 217;  // 3:37, so the bar visibly fills
 
-affa::widget::Marquee g_npTitle { affa::widget::MarqueeGeometry{kNpCols, kNpGap, kNpTitleMs}  };
-affa::widget::Marquee g_npArtist{ affa::widget::MarqueeGeometry{kNpCols, kNpGap, kNpArtistMs} };
+affa::widget::Marquee g_npTitle { affa::widget::MarqueeGeometry{kNpCols, kNpGap, kNpMs1} };
+affa::widget::Marquee g_npArtist{ affa::widget::MarqueeGeometry{kNpCols, kNpGap, kNpMs2} };
 
 struct NowPlaying {
   bool     run      = false;
@@ -525,13 +529,13 @@ struct NowPlaying {
 } g_np;
 
 void npHeader(char* out, size_t n, uint16_t elapsed) {
-  constexpr uint8_t kBar = 8;
+  constexpr uint8_t kBar = 4;
   char bar[kBar + 1];
   const uint8_t filled = static_cast<uint8_t>(
       (static_cast<uint32_t>(elapsed) * kBar) / kNpTrackSec);
   for (uint8_t i = 0; i < kBar; ++i) bar[i] = (i < filled) ? '#' : '-';
   bar[kBar] = '\0';
-  snprintf(out, n, "SPOTIFY [%s] %u:%02u", bar,
+  snprintf(out, n, "[%s] %u:%02u", bar,
            static_cast<unsigned>(elapsed / 60), static_cast<unsigned>(elapsed % 60));
 }
 
@@ -1219,11 +1223,21 @@ void execCmd(const Cmd& c) {
         g_np.renders  = g_np.rejected = 0;
         g_np.lastHdr[0] = g_np.lastR0[0] = g_np.lastR1[0] = '\0';
         // Empty strings fall back to the demo track, so /api/nowplaying?run=1 alone works.
-        g_npTitle .setText(c.s1[0] ? c.s1 : "My favourite song - Fidel Castro", now);
-        g_npArtist.setText(c.s2[0] ? c.s2 : "Michael Jackson", now);
+        // The rates are rebuildable because MarqueeGeometry is injected at construction
+        // and sanitised there — so retuning the drift is one assignment, not a reflash.
+        if (c.b > 0 || c.c > 0) {
+          const uint32_t m1 = (c.b > 0) ? static_cast<uint32_t>(c.b) : kNpMs1;
+          const uint32_t m2 = (c.c > 0) ? static_cast<uint32_t>(c.c) : kNpMs2;
+          g_npTitle  = affa::widget::Marquee{affa::widget::MarqueeGeometry{kNpCols, kNpGap, m1}};
+          g_npArtist = affa::widget::Marquee{affa::widget::MarqueeGeometry{kNpCols, kNpGap, m2}};
+        }
+        g_npTitle .setText(c.s1[0] ? c.s1 : "solar mpanels", now);
+        g_npArtist.setText(c.s2[0] ? c.s2 : "solar escimo forever", now);
         g_npTitle .setActive(true, now);
         g_npArtist.setActive(true, now);
-        logmsg(3, "bench", "now playing start");
+        logmsg(3, "bench", "mediascreen start, %lu/%lu ms per symbol",
+             static_cast<unsigned long>(g_npTitle.geometry().stepMs),
+             static_cast<unsigned long>(g_npArtist.geometry().stepMs));
       } else {
         logmsg(3, "bench", "now playing stop after %lu renders",
              static_cast<unsigned long>(g_np.renders));
@@ -1435,12 +1449,14 @@ void routes() {
     c.b = pnum(r, "sec", 10);
     return run(r, c);
   });
-  // /api/nowplaying?run=1[&title=..&artist=..] — three rows, three clocks.
-  g_server.on("/api/nowplaying", HTTP_GET, [](PsychicRequest* r) {
+  // /api/mediascreen?run=1[&r1=..&r2=..&ms1=1000&ms2=2000] — three rows, three clocks.
+  g_server.on("/api/mediascreen", HTTP_GET, [](PsychicRequest* r) {
     Cmd c; c.op = Op::NowPlaying;
     c.a = pnum(r, "run", 1);
-    pstr(r, "title",  c.s1, sizeof(c.s1));
-    pstr(r, "artist", c.s2, sizeof(c.s2));
+    c.b = pnum(r, "ms1", 0);          // 0 = keep the compiled default
+    c.c = pnum(r, "ms2", 0);
+    pstr(r, "r1", c.s1, sizeof(c.s1));
+    pstr(r, "r2", c.s2, sizeof(c.s2));
     return run(r, c);
   });
   g_server.on("/api/txgate", HTTP_GET, [](PsychicRequest* r) {
