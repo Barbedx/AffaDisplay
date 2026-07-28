@@ -189,12 +189,27 @@ void clockLine(char* out, size_t n, uint32_t nowMs) {
            static_cast<unsigned long>(s % 60u));
 }
 
+// THE THREE COUNTERS ARE NOT "OK AND NOT OK", and conflating them cost an hour of a soak
+// run. A completion that is not Ok has two entirely different meanings:
+//
+//   Aborted / Cancelled — WE did that. A newer render of the same RenderSlot superseded a
+//     queued one (coalescing, working as designed), or a resync cancelled the queue. It is
+//     the library reporting our own decision back to us, and on a screen that repaints
+//     continuously it is NORMAL and expected.
+//   anything else — the PANEL or the LINK did that: Timeout, SendFailed, NoSync, LinkDown.
+//     One of these is a real fault and worth waking someone for.
+//
+// Counting both as "failed" makes a healthy repaint loop look broken, which is exactly the
+// kind of number that gets ignored and then hides the real one.
 struct Screen {
   bool     run       = true;
   uint32_t renders   = 0;
-  uint32_t refused   = 0;      // the command queue or the panel said no
-  uint32_t delivered = 0;      // completions that came back Ok
-  uint32_t failed    = 0;      // completions that came back anything else
+  uint32_t refused   = 0;      // kNoRequest at post: the command queue was full
+  uint32_t delivered = 0;      // completed Ok
+  uint32_t stale     = 0;      // completed Aborted/Cancelled — self-inflicted, expected
+  uint32_t failed    = 0;      // completed anything else — the panel or the link
+  affa::Result lastFail = affa::Result::Ok;
+  uint32_t lastFailMs = 0;
   char     lastL1[32] = {0};
   char     lastL2[32] = {0};
   char     lastL3[32] = {0};
@@ -266,7 +281,16 @@ void onSyncChanged(affa::SyncState s, void*) {
 }
 
 void onDone(affa::rtos::TxRequest req, affa::Result r, void*) {
-  if (r == affa::Result::Ok) ++g_screen.delivered; else ++g_screen.failed;
+  if (r == affa::Result::Ok) {
+    ++g_screen.delivered;
+  } else if (r == affa::Result::Aborted || r == affa::Result::Cancelled) {
+    ++g_screen.stale;                       // ours: coalescing or a resync. Not a fault.
+  } else {
+    ++g_screen.failed;
+    g_screen.lastFail   = r;
+    g_screen.lastFailMs = millis();
+    logmsg(2, "render", "completed %s", resultName(r));
+  }
 
   if (req != affa::rtos::kNoRequest && req == g_clockReq) {
     g_clockReq = affa::rtos::kNoRequest;
@@ -414,10 +438,12 @@ void jStatus() {
 
   // The three numbers that ARE the owned-task design.
   jf("\"task\":{\"running\":%s,\"iterations\":%lu,\"pollLateMaxUs\":%lu,"
+     "\"pollLateAtMs\":%lu,"
      "\"queueDropped\":%lu,\"foreignPolls\":%lu,\"cmdQueued\":%u,\"stackFree\":%lu,",
      s.running ? "true" : "false",
      static_cast<unsigned long>(s.iterations),
      static_cast<unsigned long>(s.pollLateMaxUs),
+     static_cast<unsigned long>(s.pollLateAtMs),
      static_cast<unsigned long>(s.queueDropped),
      static_cast<unsigned long>(s.foreignPolls),
      static_cast<unsigned>(s.cmdQueued),
@@ -442,13 +468,16 @@ void jStatus() {
      static_cast<unsigned long>(s.stats.rxErr),
      static_cast<unsigned long>(s.stats.txFailed));
 
-  jf("\"screen\":{\"run\":%s,\"renders\":%lu,\"delivered\":%lu,\"failed\":%lu,"
-     "\"refused\":%lu,",
+  jf("\"screen\":{\"run\":%s,\"renders\":%lu,\"delivered\":%lu,\"stale\":%lu,"
+     "\"failed\":%lu,\"refused\":%lu,\"lastFailMs\":%lu,",
      g_screen.run ? "true" : "false",
      static_cast<unsigned long>(g_screen.renders),
      static_cast<unsigned long>(g_screen.delivered),
+     static_cast<unsigned long>(g_screen.stale),
      static_cast<unsigned long>(g_screen.failed),
-     static_cast<unsigned long>(g_screen.refused));
+     static_cast<unsigned long>(g_screen.refused),
+     static_cast<unsigned long>(g_screen.lastFailMs));
+  jkv("lastFail", resultName(g_screen.lastFail)); jf(",");
   jkv("l1", g_screen.lastL1); jf(",");
   jkv("l2", g_screen.lastL2); jf(",");
   jkv("l3", g_screen.lastL3); jf("},");

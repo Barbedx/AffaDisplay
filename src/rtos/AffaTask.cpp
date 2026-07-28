@@ -65,6 +65,7 @@ bool AffaTask::start(AffaDisplayBase& d, const TaskOptions& opt) {
   _stop        = false;
   _iterations  = 0;
   _pollLateMaxUs = 0;
+  _pollLateAtMs  = 0;
   _dropped     = 0;
   _lastResult  = Result::Ok;
   _map.clear();
@@ -327,14 +328,14 @@ TxRequest AffaTask::resync()       { Command c; c.op = Op::Resync;       return 
 // ---------------------------------------------------------------------------
 
 void AffaTask::publish(uint32_t iterUs) {
-  if (iterUs > _pollLateMaxUs) _pollLateMaxUs = iterUs;
+  const uint32_t ms = nowMs();
+  if (iterUs > _pollLateMaxUs) { _pollLateMaxUs = iterUs; _pollLateAtMs = ms; }
 
   // 6.4 — a user callback that blocks cannot be prevented, only made visible. One line per
   // second at most: a callback that blocks every iteration would otherwise produce the log
   // storm that hides the first one.
   const uint32_t lateUs = static_cast<uint32_t>(AFFA_TASK_LATE_FACTOR) *
                           static_cast<uint32_t>(_opt.periodMs) * 1000u;
-  const uint32_t ms = nowMs();
   if (iterUs > lateUs && expired(ms, _lateLogMs)) {
     _lateLogMs = ms + 1000;
     AFFA_LOGW(kTag, "iteration took %lu us (period %u ms) — a callback is blocking the "
@@ -362,6 +363,7 @@ void AffaTask::publish(uint32_t iterUs) {
   s.stampMs        = ms;
   s.iterations     = _iterations;
   s.pollLateMaxUs  = _pollLateMaxUs;
+  s.pollLateAtMs   = _pollLateAtMs;
   s.queueDropped   = dropped;
   s.foreignPolls   = _d->foreignPolls();
   s.stackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
@@ -391,6 +393,7 @@ Status AffaTask::status() const {
 
 void AffaTask::resetPeaks() {
   _pollLateMaxUs = 0;
+  _pollLateAtMs  = 0;
   __atomic_store_n(&_dropped, 0u, __ATOMIC_RELAXED);
 }
 

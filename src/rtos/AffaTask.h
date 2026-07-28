@@ -76,6 +76,9 @@ struct Status {
   uint32_t  stampMs        = 0;   // when the owned task published this
   uint32_t  iterations     = 0;   // poll cycles since start()
   uint32_t  pollLateMaxUs  = 0;   // worst iteration seen — a blocking callback shows HERE
+  uint32_t  pollLateAtMs   = 0;   // ...and WHEN, which is what identifies the cause. A peak
+                                  // at t=0 is WiFi associating; a peak that keeps moving is
+                                  // a callback. Without the timestamp both look identical.
   uint32_t  queueDropped   = 0;   // commands refused because the queue was full
   uint32_t  foreignPolls   = 0;   // poll() called by a task that is not the owner
   uint32_t  stackFreeBytes = 0;   // uxTaskGetStackHighWaterMark, for sizing AFFA_TASK_STACK
@@ -175,6 +178,7 @@ class AffaTask {
   volatile uint32_t _dropped      = 0;
   uint32_t          _iterations   = 0;
   uint32_t          _pollLateMaxUs = 0;
+  uint32_t          _pollLateAtMs  = 0;
   uint32_t          _lateLogMs    = 0;
   Result            _lastResult   = Result::Ok;
 
