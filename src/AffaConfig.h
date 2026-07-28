@@ -140,6 +140,28 @@
 #  endif
 #endif
 
+// Reset the TWAI peripheral before installing the driver, in Esp32CanLink::begin().
+//
+// WHY THIS EXISTS. `ESP.restart()` does not reset peripherals. After a warm reboot — an OTA
+// update, a watchdog restart, /api/reboot — the TWAI block comes back part-configured from
+// the previous run and the driver installs on top of that state. Measured across one
+// evening of eight OTA flashes on the bench rig: controller flaps 7 -> 22 -> 134 -> 139,
+// bus errors 0 -> 143 -> 827, ending in a peripheral sitting in BUS_OFF and cycling for
+// ever while the panel beside it was perfectly healthy. A cold power cycle cleared it every
+// time; nothing in software did.
+//
+// periph_module_reset() is NOT a twai_* call and does not breach the driver prohibition in
+// Esp32CanLink.h — it is a clock/reset-control write, it happens BEFORE the driver exists,
+// in the one window where touching the peripheral is sanctioned, and it is exactly what a
+// cold boot does for free.
+//
+// Set to 0 if something else in your firmware owns the TWAI peripheral and may already have
+// installed a driver by the time you call begin(): resetting it under a live driver would
+// be the very failure this exists to prevent.
+#ifndef AFFA_ESP32CAN_PERIPH_RESET
+#  define AFFA_ESP32CAN_PERIPH_RESET 1
+#endif
+
 // src/rtos/ — the library creates and owns a FreeRTOS task that calls poll(), and the
 // application never calls poll() at all. Render calls then become legal FROM ANY TASK,
 // because they are copied into a command queue that the owned task drains. docs/API.md §4b.

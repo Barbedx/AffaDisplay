@@ -56,7 +56,22 @@ namespace {
 // ---------------------------------------------------------------------------
 // ESP32-C3 SuperMini on the bench rig: rx = GPIO4, tx = GPIO3. The named struct is what
 // stops the swap from becoming a silent bus with no error anywhere.
+//
+// -D AFFA_PINS_MIRRORED=1 tries the other orientation (rx = GPIO3, tx = GPIO4), which is
+// how MeganeCAN's board is soldered — the same module, the other way round. It is here as a
+// BUILD FLAG rather than an edit because it is the cheapest probe for one specific failure:
+// frames going out and none ever coming back. Note what it does NOT explain — if the RX pin
+// were wrong, nothing would acknowledge our transmissions and the controller's TX error
+// counter would climb to bus-off. So reach for this only after checking that txErr really
+// is climbing, not merely that rxFrames is zero.
+#ifndef AFFA_PINS_MIRRORED
+#  define AFFA_PINS_MIRRORED 0
+#endif
+#if AFFA_PINS_MIRRORED
+constexpr affa::CanPins kPins{ .rx = GPIO_NUM_3, .tx = GPIO_NUM_4 };
+#else
 constexpr affa::CanPins kPins{ .rx = GPIO_NUM_4, .tx = GPIO_NUM_3 };
+#endif
 constexpr uint32_t      kBitrate = 500000;
 
 // 250 ms, MEASURED — not 0 and not 2000. 0 leaves a bus-off in TWAI_STATE_STOPPED for ever
@@ -447,12 +462,34 @@ void popupTick(uint32_t now) {
 // The soak that produced this code hit the first case: the panel went away, our heartbeat
 // went unacknowledged on a two-node bus, the TX error counter ran to bus-off, and the
 // controller did not come back.
-constexpr uint32_t kDeadLinkMs = 60000;
+// TWO TRIGGERS, BECAUSE ONE OF THEM MISSED THE REAL FAILURE.
+//
+// The first version rebooted only after kDeadLinkMs of CONTINUOUS not-RUNNING. The rig then
+// produced a controller that flapped 139 times and spent 61 seconds of 290 off the bus,
+// with the glass frozen the whole time — and it never once stayed down for sixty seconds
+// together, so the watchdog sat there measuring the wrong thing while the display was dead.
+//
+// So: reboot if it is down continuously for kDeadLinkMs, OR if it has been down for
+// kDeadBudgetMs in TOTAL since boot and is down right now. The second is what catches a
+// flapper. Both require it to be down at the moment of the decision, so a controller that
+// had a bad patch and recovered is left alone.
+constexpr uint32_t kDeadLinkMs   = 60000;
+constexpr uint32_t kDeadBudgetMs = 30000;
+
+// AND IT GIVES UP AFTER THREE. A reboot reinstalls the driver, which is the only thing that
+// helps a peripheral stuck in its own bad state — and is worth exactly nothing against a
+// fault on the WIRE. Measured on this rig: with our transmitter gated off entirely, the
+// controller still logged ~1 480 bus errors per second and received zero frames. Nothing
+// the firmware does can fix that, and a board that reboots every thirty seconds for ever is
+// worse than one that sits there saying so: it churns flash, it loses its own log ring, and
+// it makes the console it is reachable through flap too.
+constexpr uint32_t kMaxReboots = 3;
 
 bool     g_watchdog   = true;
 bool     g_otaRunning = false;
 uint32_t g_deadSince  = 0;      // 0 = the controller was RUNNING last time we looked
 uint32_t g_reboots    = 0;      // survives nothing; it is here to be read before one
+bool     g_wdtGaveUp  = false;  // three reboots did not help: stop trying, say so
 
 // A FLAP IS NOT A FAILURE, AND COUNTING THEM IS THE ONLY WAY TO TELL.
 //
@@ -497,12 +534,29 @@ void linkWatchdogTick(uint32_t now) {
     return;
   }
 
-  if (!affa::expired(now, g_deadSince + kDeadLinkMs)) return;
+  // Down NOW, and either down a long time in one go or down too much in total.
+  const uint32_t thisOutage = now - g_deadSince;
+  const bool     stuck      = affa::expired(now, g_deadSince + kDeadLinkMs);
+  const bool     flapping   = (g_downMs + thisOutage) > kDeadBudgetMs;
+  if (!stuck && !flapping) return;
   if (!g_watchdog || g_otaRunning || g_rebootAt) return;
 
+  if (g_reboots >= kMaxReboots) {
+    if (!g_wdtGaveUp) {
+      g_wdtGaveUp = true;
+      logmsg(1, "wdt", "%lu reboots did not fix the link — giving up. The fault is not "
+             "ours: check termination, transceiver and the panel.",
+             static_cast<unsigned long>(g_reboots));
+    }
+    return;
+  }
+
   ++g_reboots;
-  logmsg(1, "wdt", "controller down %lu s — rebooting to reinstall the driver",
-         static_cast<unsigned long>((now - g_deadSince) / 1000));
+  logmsg(1, "wdt", "controller %s (%lu s now, %lu s total, %lu flaps) — rebooting",
+         stuck ? "stuck down" : "flapping",
+         static_cast<unsigned long>(thisOutage / 1000),
+         static_cast<unsigned long>((g_downMs + thisOutage) / 1000),
+         static_cast<unsigned long>(g_flaps));
   g_rebootAt = now + 300;                     // after this log line has a chance to be read
 }
 
@@ -578,9 +632,10 @@ void jStatus() {
        static_cast<unsigned long>(d.txErr),   static_cast<unsigned long>(d.rxErr),
        static_cast<unsigned long>(d.busErr),  static_cast<unsigned long>(d.arbLost),
        static_cast<unsigned long>(d.rxMissed));
-    jf("\"wdt\":{\"on\":%s,\"deadSince\":%lu,\"reboots\":%lu,\"flaps\":%lu,"
+    jf("\"wdt\":{\"on\":%s,\"gaveUp\":%s,\"deadSince\":%lu,\"reboots\":%lu,\"flaps\":%lu,"
        "\"downMs\":%lu},",
        g_watchdog ? "true" : "false",
+       g_wdtGaveUp ? "true" : "false",
        static_cast<unsigned long>(g_deadSince),
        static_cast<unsigned long>(g_reboots),
        static_cast<unsigned long>(g_flaps),

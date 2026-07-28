@@ -42,6 +42,20 @@
 #  undef AFFA_UNDEF_SOC_TWAI_CONTROLLER_NUM
 #endif
 
+// periph_module_reset() moved headers between IDF 4 and 5 and is a private API in 5.x. Both
+// spellings are tried and the knob turns itself off if neither exists, because a core we
+// have not seen must not become a build failure in the one file a consumer cannot patch.
+#if AFFA_ESP32CAN_PERIPH_RESET
+#  if __has_include(<esp_private/periph_ctrl.h>)
+#    include <esp_private/periph_ctrl.h>
+#  elif __has_include(<driver/periph_ctrl.h>)
+#    include <driver/periph_ctrl.h>
+#  else
+#    undef  AFFA_ESP32CAN_PERIPH_RESET
+#    define AFFA_ESP32CAN_PERIPH_RESET 0
+#  endif
+#endif
+
 #include "Esp32CanLink.h"
 #include "../util/AffaLog.h"
 
@@ -108,6 +122,22 @@ bool Esp32CanLink::begin(CanPins pins, uint32_t bitrate, uint32_t forceRecoveryM
   _rx.reset();
   _stats = Stats{};
   _rxFrames.store(0, std::memory_order_relaxed);
+
+  // MAKE A WARM BOOT LOOK LIKE A COLD ONE. ESP.restart() does not reset peripherals, so
+  // after an OTA update or a watchdog restart the TWAI block still holds the previous run's
+  // configuration and the driver installs on top of it. On the bench rig that degraded
+  // measurably with every warm reboot — flaps 7 -> 139, bus errors 0 -> 827 across eight
+  // flashes in one evening — and ended in a controller cycling through BUS_OFF for ever
+  // beside a healthy panel. Only a power cycle cleared it.
+  //
+  // This is the one moment it is safe: no driver is installed (the _began and s_self guards
+  // above have just proved it), and it is a reset-control write rather than a twai_* call,
+  // so the prohibition in the header is intact. AFFA_ESP32CAN_PERIPH_RESET=0 opts out for a
+  // firmware where something else owns the peripheral.
+#if AFFA_ESP32CAN_PERIPH_RESET
+  periph_module_reset(PERIPH_TWAI_MODULE);
+  AFFA_LOGI(kTag, "TWAI peripheral reset before install (warm boots do not do this)");
+#endif
 
   // BEFORE begin(), which is the one window in which touching the driver is sanctioned:
   // setForceRecovery only writes two members (esp32_can_builtin.cpp:88-92) and the
