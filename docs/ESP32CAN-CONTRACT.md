@@ -299,6 +299,48 @@ default recovery **does not restore service**. AffaDisplay's answer:
   because it is a policy decision about a shared bus, and because of the reinstall hazards
   in finding 4.
 
+`Esp32CanLink::begin(pins, bitrate, forceRecoveryMs, mode)` is the one path the prohibition
+permits, because `setForceRecovery()` is armed **before** `begin()` rather than after.
+
+**Why the forced path and not standard recovery, on a two-node bus.**
+`twai_initiate_recovery()` waits for 128 occurrences of 11 consecutive recessive bits —
+i.e. it needs *bus traffic* to complete. On a two-node bus there is none to wait for: once
+we stop ACKing, the panel goes quiet as well, and standard recovery never finishes. The
+forced path is a timed uninstall/reinstall and needs no traffic at all, which is why it is
+the only one that works here. Bench value **250 ms** — see the bench notes for why 0 and
+2000 are both wrong.
+
+### 3.1 Reading the controller during bring-up
+
+`Esp32CanLink::driverState()` is a pure `twai_get_status_info()` read, exposed for bring-up.
+Nothing in the library reacts to it.
+
+| Field | Meaning |
+|---|---|
+| `valid` | false means `twai_get_status_info()` itself failed — usually the driver is **not installed** (mid-recovery, or `begin()` never ran) |
+| `state` | `twai_state_t`: 0 stopped, 1 running, 2 bus-off, 3 recovering |
+| `msgsToRx` | frames queued **in the driver**, not yet taken by `esp32_can`. Climbing while `Stats::rxFrames` stays flat means the controller receives and `esp32_can` does not deliver; **both** at zero means nothing is arriving at the peripheral at all |
+| `txErr` / `rxErr` | the controller's TEC and REC. 128 is the bus-off threshold; ~128 on REC is error-passive |
+| `busErr` | bus error count — form, stuff, CRC. The one that moves when the wire is wrong |
+
+**A failing bus under forced recovery cycles, and one sample will mislead you.** The
+counters reset on every reinstall, so the sequence looks like: all zero → `rxErr` 129 →
+`busErr` climbing → `txErr` 128 → `state` 2 → `valid:false` → all zero → repeat. Sample
+over ~40 s before concluding anything.
+
+**To decide whether a fault is ours or external, stop transmitting and keep watching.**
+With our own TX gate shut (`setTxEnabled(false)`), `txFrames` freezes and we emit nothing:
+
+| With TX off | Verdict |
+|---|---|
+| `busErr` still climbing, `rxFrames` 0 | **external** — we are silent and cannot be the cause. Stop debugging firmware; suspect a stuck-dominant line, termination, or a bitrate mismatch |
+| `busErr` frozen, `rxErr` 0, `rxFrames` 0 | the bus is genuinely **silent** — the other node is unpowered or not transmitting |
+| `rxFrames` climbing | RX is fine; the problem is in our transmit path |
+
+Measured on the bench 2026-07-28: **~1550 bus errors/second with our transmitter disabled**,
+which settled a fault that had been mistaken for a firmware regression across several
+reflashes.
+
 ---
 
 ## 4. `setListenOnlyMode` / `setNoACKMode` / `enable` / `disable`: confirmed, it is a reinstall

@@ -17,65 +17,38 @@ struct CanPins { gpio_num_t rx; gpio_num_t tx; };
 
 // The only class in this library that knows a driver exists.
 //
-// PROHIBITION, not advice. After begin() returns, this class never touches the driver
-// again except send() and twai_get_status_info(). It must NEVER call setListenOnlyMode(),
-// setNoACKMode(), enable(), disable(), set_baudrate(), beginAutoSpeed(),
-// forceDriverRestart(), setDebuggingMode(true), a second watchFor(), a per-mailbox
-// callback on mailbox 0 or 1, or any state-mutating twai_* function (twai_start,
-// twai_stop, twai_driver_install/uninstall, twai_initiate_recovery,
-// twai_clear_transmit_queue, twai_reconfigure_alerts).
+// PROHIBITION, NOT ADVICE. After begin() returns, this class never touches the driver again
+// except send() and twai_get_status_info() — no mode setter, no second watchFor(), no
+// state-mutating twai_* call, and no bus-off recovery of its own. Every runtime mode setter
+// is disable()+enable() underneath, i.e. a driver reinstall on a live bus that from inside
+// the general callback deletes its own caller.
 //
-// Reason (esp32_can_builtin.cpp:450-462): every runtime mode setter is disable() +
-// assignment + enable() — twai_stop mid-frame, vTaskDelete of both RX tasks, uninstall,
-// install, two new tasks, twai_start. A driver reinstall on a live bus; from inside the
-// general callback it deletes its own caller.
-//
-// It also implements NO bus-off recovery of its own: the driver's watchdog owns bus-off,
-// and two initiators racing twai_initiate_recovery() is how a half-recovered peripheral
-// happens. Note the driver's DEFAULT recovery does not restore service — it leaves the
-// controller STOPPED with nothing calling twai_start() — so isLive() reports it, and
-// automatic restoration is the application passing forceRecoveryMs below.
-//
-// docs/ESP32CAN-CONTRACT.md has the file:line citation behind every sentence.
+// docs/ESP32CAN-CONTRACT.md is the contract: rules 1-21, with a file:line citation behind
+// every sentence. Read rule 4 before adding any call here.
 class Esp32CanLink final : public ICanLink {
  public:
   Esp32CanLink() = default;
 
-  // Exactly this sequence, exactly once:
-  //   CAN0.setCANPins(pins.rx, pins.tx);  // signature IS (rx, tx) —
-  //                                       // esp32_can_builtin.h:93. Never confuse it with
-  //                                       // TWAI_GENERAL_CONFIG_DEFAULT, which is (tx, rx, mode).
-  //   CAN0.begin(bitrate);
-  //   CAN0.setGeneralCallback(&trampoline);
-  //   CAN0.watchFor();                    // LAST: it opens the software filter, and with a
-  //                                       // filter set but no callback registered
-  //                                       // processFrame() fills a 64-deep rx_queue that
-  //                                       // nothing will ever drain.
+  // Runs one fixed sequence once — setCANPins(rx, tx), begin(), setGeneralCallback(),
+  // watchFor() LAST — and each step's ordering has a reason: CONTRACT rule 2, and rule 3
+  // for why the pin order is (rx, tx) and not the driver config's (tx, rx, mode).
   //
-  // Returns false if the driver did not end up RUNNING — the only way an application can
-  // learn it was never installed, since CAN0.begin() returns the requested bitrate even
-  // for a rate absent from valid_timings[], having installed nothing. Pass a rate the
-  // driver knows; 500000 for this bus.
+  // Returns false if the driver did not end up RUNNING. That is the ONLY way to learn it
+  // was never installed: CAN0.begin() returns the requested bitrate even for a rate absent
+  // from valid_timings[], having installed nothing. Pass a rate the driver knows — 500000.
+  // A second call returns false rather than reinstalling on a live bus.
   //
-  // A second call on an already-begun instance returns false and logs (it would be a live
-  // reinstall plus a queue leak plus a wipe of all 32 filter slots), and a second instance
-  // cannot steal the callback.
+  // forceRecoveryMs: 0 leaves bus-off recovery ending STOPPED and isLive() reporting the
+  // link down — bringing a shared bus back is the application's policy. Non-zero arms
+  // setForceRecovery() BEFORE begin(), the one path the prohibition permits. CONTRACT §3
+  // has why the forced path is the only one that completes on a two-node bus; the bench
+  // notes have why 250 and not 0 or 2000.
   //
-  // forceRecoveryMs: 0 leaves the driver's bus-off policy as it ships — recovery ends in
-  // TWAI_STATE_STOPPED and isLive() reports the link down. Whether to bring a shared bus
-  // back up by itself is the application's call. Non-zero arms CAN0.setForceRecovery(true,
-  // ms) BEFORE CAN0.begin() (the one path the prohibition permits), whose watchdog does a
-  // full uninstall/delay/reinstall ending RUNNING. Unlike twai_initiate_recovery() it
-  // needs no bus traffic, which matters on a two-node bus: once we stop ACKing, the panel
-  // goes quiet too and nothing generates the recessive bits standard recovery waits for.
-  // Bench value 2000; the bus is dead for that long.
-  //
-  // ListenOnly never emits a dominant bit — no ACKs, no error frames, no transmissions —
-  // so it cannot be driven bus-off or disturb anything. It answers the first question
-  // worth asking on a bench that will not talk: can we read this bus at all? Clean here
-  // and broken in Normal means our transmit side; broken here too means bitrate or wiring.
-  // Normal is the only mode in which the library can do its job: unacknowledged frames are
-  // retransmitted by the panel forever.
+  // ListenOnly emits no dominant bit at all, so it cannot be driven bus-off or disturb
+  // anything. It answers the first question worth asking on a bench that will not talk:
+  // can we read this bus AT ALL? Clean here and broken in Normal isolates the fault to our
+  // transmit side. Normal is the only mode the library can work in — an unacknowledged
+  // frame is retransmitted by the panel forever.
   enum class LinkMode : uint8_t { Normal, ListenOnly };
 
   bool begin(CanPins pins, uint32_t bitrate = 500000, uint32_t forceRecoveryMs = 0,
@@ -87,16 +60,14 @@ class Esp32CanLink final : public ICanLink {
   bool  isLive() const override;         // began, TX gate open, controller RUNNING
   Stats stats() const override;
 
-  // "Silent mode" is a SOFTWARE TX GATE: send() returns false. It is not a driver mode
-  // change — see the prohibition. With the gate shut the controller still ACKs other nodes,
-  // which on a two-node bus is required or the panel retransmits every frame forever.
+  // "Silent mode" is a SOFTWARE TX gate — send() returns false. NOT a driver mode change
+  // (the prohibition). The controller still ACKs other nodes, which a two-node bus requires.
   void setTxEnabled(bool on);
   bool txEnabled() const;
 
-  // Raw controller state, for bring-up. Stats::rxFrames counts what reached OUR callback;
-  // this counts what reached the DRIVER. msgsToRx climbing with rxFrames flat means the
-  // controller receives and esp32_can does not deliver; both at zero means nothing arrives
-  // at the peripheral. Nothing in the library reacts to it.
+  // Raw controller state, for bring-up; nothing in the library reacts to it. Field meanings,
+  // the recovery-cycle signature that makes a single sample misleading, and the TX-gate test
+  // that proves whether a fault is ours or external: CONTRACT §3.1.
   struct DriverState {
     bool     valid    = false;   // false: twai_get_status_info() itself failed
     uint8_t  state    = 0;       // twai_state_t: 0 stopped, 1 running, 2 bus-off, 3 recovering
@@ -109,18 +80,15 @@ class Esp32CanLink final : public ICanLink {
  private:
   friend struct Esp32CanTrampoline;   // defined in the .cpp, where CAN_FRAME exists
 
-  // Called from task_CAN (prio 15) via the driver's general callback. Pushes into the ring
-  // and returns: no logging, allocation, blocking, clock read or user code — the reason
-  // ICanLink is a pull port. The driver's CAN_FRAME* points at task_CAN's stack and dies on
-  // return, so the copy is mandatory.
+  // task_CAN (prio 15), via the general callback. Pushes into the ring and returns: no
+  // logging, allocation, blocking, clock read or user code — the reason ICanLink is a pull
+  // port. The driver's CAN_FRAME* dies on return, so the copy is mandatory. CONTRACT rule 6.
   void ingest(const Frame& f);
 
   AffaRing<Frame, AFFA_RX_RING_DEPTH> _rx;
 
-  // The only counter task_CAN touches, hence the only one that may not live in the plain
-  // Stats struct: stats() copies that struct field by field from the poll() task, which
-  // would race a `++` on another core. Relaxed suffices — it is a diagnostic and orders
-  // nothing. Folded into Stats::rxFrames by stats(), so the public shape is unchanged.
+  // The only counter task_CAN touches, so the only one that cannot live in plain Stats:
+  // stats() copies that struct from the poll() task and would race a `++`. Relaxed suffices.
   std::atomic<uint32_t> _rxFrames{0};
 
   Stats _stats{};                 // poll()-task only
