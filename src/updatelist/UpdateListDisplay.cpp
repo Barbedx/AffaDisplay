@@ -79,7 +79,11 @@ void UpdateListDisplay::setScrollActive(bool on) {
 }
 
 void UpdateListDisplay::renderWindow(uint16_t pos) {
-  char win[updatelist::kScrollWidth + 1];
+  // Sized for the WIDEST variant (the LCD's 12-cell field), not for kScrollWidth: a derived
+  // panel may have widened the geometry through setMarqueeGeometry(), and Marquee truncates
+  // to the buffer rather than overrunning it — so a short buffer here would silently crop
+  // the LCD back to eight characters.
+  char win[updatelist::kNewCells + 1];
   _marquee.window(pos, win, sizeof(win));
   // Virtual: the LCD variant substitutes its own encoding and inherits this marquee
   // unchanged. The Result is dropped on purpose — a scroll step that could not be queued

@@ -71,6 +71,15 @@ class UpdateListDisplay : public UpdateListBase {
   void onPoll() override;
   void onRadioText(bool isAux) override;
 
+#if AFFA_ENABLE_MARQUEE
+  // For a VARIANT whose glass is not this one. The 8-segment panel shows kScrollWidth = 8
+  // cells; the LCD's visible field is kNewCells = 12 (WIRE-SPEC §9.2), so scrolling an
+  // 8-wide window into it would leave four cells permanently blank. Call from the derived
+  // constructor, before anything renders — the geometry is sanitised in Marquee's own
+  // constructor, so a bad value is clamped rather than divided by.
+  void setMarqueeGeometry(const widget::MarqueeGeometry& g) { _marquee = widget::Marquee{g}; }
+#endif
+
   // Copy `cells` bytes of `src` into `dst`, padding the tail with NUL — not space. Every
   // capture and every golden vector in docs/WIRE-SPEC.md shows 0x00 there; do not "fix"
   // this to spaces.

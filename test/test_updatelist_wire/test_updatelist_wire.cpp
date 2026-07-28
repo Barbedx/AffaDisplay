@@ -245,6 +245,55 @@ void test_lcd_setText_is_five_frames(void) {
   expectFrames(r.link, kLcdMenu, 5, "LCD setText(\"MENU\") — 30 bytes, last PCI 0x24");
 }
 
+// The two panels show DIFFERENT NUMBERS OF CELLS, so they must not scroll the same window.
+// Both encodings carry an 8-cell "old" and a 12-cell "new" field and the panel renders
+// `new`; the segment glass is 8 characters wide, the LCD renders all 12. Inheriting the
+// segment's 8-wide marquee would leave four LCD cells permanently blank — visible on the
+// glass and invisible in a frame count, which is why it is asserted on the TEXT.
+void test_the_lcd_scrolls_a_wider_window_than_the_segment_panel(void) {
+  // 20 characters, so both windows are full and neither has wrapped yet at position 0.
+  const char* kLong = "ABCDEFGHIJKLMNOPQRST";
+
+  SegRig s;
+  s.up();
+  drain(s.link);
+  s.d.setScrollText(kLong);
+  s.d.setScrollActive(true);
+  s.d.poll();
+  pumpUntilIdle(s.d);
+  Frame sf0, sf1, sf2, sf3;
+  TEST_ASSERT_TRUE(s.link.takeSent(sf0));
+  TEST_ASSERT_TRUE(s.link.takeSent(sf1));
+  TEST_ASSERT_TRUE(s.link.takeSent(sf2));
+  TEST_ASSERT_TRUE(s.link.takeSent(sf3));
+  // Segment new text is payload[14..25]. Frame 0 carries payload[0..7] and each
+  // continuation seven more, so payload[14] is frame 1 (PCI 0x21) data[7].
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE('A', sf1.data[7], "segment new-text field starts at 'A'");
+  // Cell 8 is payload[22] = frame 3 (PCI 0x23) data[1]. The 8-wide window has run out, so
+  // this is the NUL padding — the very thing the LCD must NOT have.
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00, sf3.data[1],
+      "segment scrolls 8 cells, so cell 9 is padding");
+
+  LcdRig l;
+  l.up();
+  drain(l.link);
+  l.d.setScrollText(kLong);
+  l.d.setScrollActive(true);
+  l.d.poll();
+  pumpUntilIdle(l.d);
+  Frame lf0, lf1, lf2, lf3;
+  TEST_ASSERT_TRUE(l.link.takeSent(lf0));
+  TEST_ASSERT_TRUE(l.link.takeSent(lf1));
+  TEST_ASSERT_TRUE(l.link.takeSent(lf2));
+  TEST_ASSERT_TRUE(l.link.takeSent(lf3));
+  // LCD new text is payload[17..28]; payload[17] is frame 2 (PCI 0x22) data[3].
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE('A', lf2.data[3], "LCD new-text field starts at 'A'");
+  // Cell 8 is payload[25] = frame 3 (PCI 0x23) data[4]. THE ASSERTION THAT MATTERS: the
+  // LCD is still emitting real characters exactly where the segment panel had padding.
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE('I', lf3.data[4],
+      "LCD must fill all 12 cells — an 8-wide window would leave NUL here");
+}
+
 void test_the_two_encodings_declare_different_lengths(void) {
   // 0x19 covers data[2..26], 0x1C covers data[2..29]. It is NOT "0x19 + 3" by coincidence:
   // the two encodings carry different amounts of content, and both length bytes are right.
@@ -362,6 +411,7 @@ int main(int, char**) {
   RUN_TEST(test_segment_setText_channel_byte_follows_the_digit);
   RUN_TEST(test_segment_setText_pads_both_fields_with_NUL);
   RUN_TEST(test_lcd_setText_is_five_frames);
+  RUN_TEST(test_the_lcd_scrolls_a_wider_window_than_the_segment_panel);
   RUN_TEST(test_the_two_encodings_declare_different_lengths);
   RUN_TEST(test_a_malformed_key_frame_is_not_acknowledged);
   RUN_TEST(test_ams_banner_is_three_renders_100ms_apart);

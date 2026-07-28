@@ -18,7 +18,17 @@ namespace affa {
 
 class UpdateListMenuDisplay final : public UpdateListDisplay {
  public:
-  UpdateListMenuDisplay(ICanLink& link, IClock& clock) : UpdateListDisplay(link, clock) {}
+  UpdateListMenuDisplay(ICanLink& link, IClock& clock) : UpdateListDisplay(link, clock) {
+#if AFFA_ENABLE_MARQUEE
+    // THE LCD'S VISIBLE FIELD IS WIDER THAN THE SEGMENT PANEL'S. Both encodings carry an
+    // 8-cell "old" and a 12-cell "new" field, and the panel shows `new` — but the segment
+    // glass is 8 characters while this one renders all 12 (WIRE-SPEC §9.2). Inheriting the
+    // 8-wide window would scroll into a 12-cell field and leave four cells always blank.
+    setMarqueeGeometry(widget::MarqueeGeometry{updatelist::kNewCells,
+                                               updatelist::kScrollGap,
+                                               updatelist::kScrollStepMs});
+#endif
+  }
 
   // `digit` is IGNORED: the LCD encoding carries a fixed channel byte (0x60 | 0) rather
   // than the segment panel's 0x70 + digit. The parameter stays in the signature because
