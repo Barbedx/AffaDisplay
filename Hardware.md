@@ -77,3 +77,12 @@ perfectly. Firmware has no lever on that segment and no remaining unexplored lev
 it. Historically the loop worked after the rig repower on the morning of 07-29 (3395
 ACKed frames, SUCCESS on the glass) and died mid-run 26 minutes later; nothing in any
 firmware image correlates with either edge.
+
+## 2026-07-29 (evening)
+
+| time | image | why | what the link did afterwards |
+|---|---|---|---|
+| ~21:2x | *(no flash)* | board found OFF the network entirely (no ARP, no ping, ~50 min after last contact) | unexplained. The flashed pad-correlation build had the UNGUARDED ECC poller — a register read landing inside a driver-uninstall window is a panic, and a panic loop faster than the WiFi join looks exactly like this. Unproven; the 0.4.0 build closes that window (clock-gate check inside a critical section) |
+| ~21:44 | *(owner power-cycled the rig)* | the restore attempt | **fault present within 55 s of the cold boot**: rx 0, rxErr 129, busErr climbing. Third data point on "a quick power cycle does not clear it". The one repower that DID clear it (morning ~11:5x) followed a longer off period |
+| ~21:47 | `ex04_rows` @ fe3456c (0.4.0) | the release build: library-owned deaf recovery, honest listen-only counters, guarded ECC/pad instruments, SUCCESS + HELLO ABADON row texts | boots clean. ECC re-verdict on the fresh episode: `BIT RX @ ACK-SLOT` ×2205, `BIT TX @ SOF` tec→144. In LOM the panel storms the same ~500 ms macro-cycle (126× `69 00` + ~630× `61 11 01`) |
+| ~21:52 | *(no flash)* | `/api/listen?on=0` | **left ARMED: NORMAL, gate open, ACKing every frame.** The moment the loop returns, the next frame is ACKed, the panel drains its retransmit, the handshake completes, and the rows paint — no human step needed |
