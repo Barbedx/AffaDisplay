@@ -370,6 +370,24 @@
 #  define AFFA_SYNC_INTERVAL_MS 1000
 #endif
 
+// FLOOR BETWEEN TWO HELLO BURSTS, AND IT IS THE DIFFERENCE BETWEEN A HANDSHAKE AND A DEAD
+// BUS. The sync request is answered with SyncProfile::helloCount frames — three for
+// Carminat — and the answer used to go out once per REQUEST FRAME. That is correct only
+// while the panel asks occasionally. A panel that has not been acknowledged repeats
+// `61 11 01` back to back at line rate: measured 1472 frames/s on the bench 2026-07-29,
+// which turns three-frames-per-request into ~4400 transmit attempts per second on a bus
+// whose entire capacity is ~4200 and which is already 92 % full of the panel's own frames.
+//
+// The result is not a slow handshake, it is no handshake: the TWAI transmit queue is
+// permanently full, sendFrame() blocks the poll task, and every render behind it starves.
+// From the outside it looks exactly like a panel stuck in half-completed authorisation.
+//
+// The sync STATE is still updated on every request — only the frames are paced. 200 ms
+// keeps the answer well inside the panel's ~1 s expectation while costing 15 frames/s.
+#ifndef AFFA_HELLO_MIN_MS
+#  define AFFA_HELLO_MIN_MS 200
+#endif
+
 // Layer 1 FrameMatch table. sizeof(Sub) ~= 32 B, so 8 slots ~= 256 B and one linear scan
 // per frame per direction. subscribe() returns kNoSub once full — ignoring the return
 // value silently loses a subscription. 0 removes the table and the scan; Layers 0 and 2

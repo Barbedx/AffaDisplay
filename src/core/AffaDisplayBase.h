@@ -377,6 +377,9 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   uint32_t  _ackDeadlineMs  = 0;
   uint32_t  _nextSyncMs     = 0;
   uint32_t  _peerDeadlineMs = 0;
+  // Earliest millisecond at which another hello burst may go out. Paces the ANSWER to the
+  // sync request, which the panel can ask for 1500 times a second. See AFFA_HELLO_MIN_MS.
+  uint32_t  _nextHelloMs    = 0;
   SyncState _sync = SyncState::Failed;
   TxTicket  _nextTicket    = 1;
   TxTicket  _lastCompleted = kNoTicket;

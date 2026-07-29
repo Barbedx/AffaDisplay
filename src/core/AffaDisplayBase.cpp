@@ -280,12 +280,23 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
   if (f.len < 1) return true;
 
   if (f.data[0] == kSyncRequestByte0 && f.len >= 2 && f.data[1] == kSyncRequestByte1) {
-    for (uint8_t i = 0; i < _profile.helloCount; ++i) {
-      Frame h;
-      h.id  = _profile.syncId;
-      h.len = kPacketLength;
-      std::memcpy(h.data, _profile.hello[i], kPacketLength);
-      txFrame(h);
+    // THE ANSWER IS PACED, THE STATE IS NOT. An unacknowledged panel repeats this request
+    // back to back at line rate — 1472 frames/s measured on the bench — and answering each
+    // one with helloCount frames is ~4400 transmit attempts per second into a bus that
+    // holds ~4200 and is already 92 % occupied by the requests themselves. That fills the
+    // TWAI transmit queue permanently, blocks the poll task inside sendFrame(), and starves
+    // every render behind it, which is what a panel frozen in half-finished authorisation
+    // actually looks like from the outside. See AFFA_HELLO_MIN_MS.
+    const uint32_t now = _clock.millis();
+    if (expired(now, _nextHelloMs)) {
+      _nextHelloMs = now + AFFA_HELLO_MIN_MS;
+      for (uint8_t i = 0; i < _profile.helloCount; ++i) {
+        Frame h;
+        h.id  = _profile.syncId;
+        h.len = kPacketLength;
+        std::memcpy(h.data, _profile.hello[i], kPacketLength);
+        txFrame(h);
+      }
     }
     SyncState s = _sync & ~SyncState::Failed;
     // len >= 3 before touching data[2]: short DLCs are real on this channel (the OEM
