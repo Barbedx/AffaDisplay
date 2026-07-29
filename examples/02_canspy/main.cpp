@@ -68,6 +68,20 @@ constexpr uint32_t    kDefaultRate   = 500000;
 
 PsychicHttpServer g_server;
 
+// WHAT IS ACTUALLY RUNNING RIGHT NOW, or nullptr.
+//
+// Every test here is requested by an HTTP handler and performed in loop(), and loop() clears
+// the request flag BEFORE it starts work. So a "busy" field derived from the request flag
+// reads false for the entire duration of the test — which is fine for a 6 s test and useless
+// for the rate sweep, which can take ten minutes and would report itself finished on the very
+// first poll. Anything watching the board needs a flag that spans the WORK, not the request.
+volatile const char* g_running = nullptr;
+
+struct RunningScope {
+  explicit RunningScope(const char* what) { g_running = what; }
+  ~RunningScope() { g_running = nullptr; }
+};
+
 uint32_t g_rate       = kDefaultRate;
 bool     g_canUp      = false;
 bool     g_listen     = false;    // controller in TRUE listen-only: no ACK, no error frames
@@ -137,7 +151,11 @@ void onCanFrame(CAN_FRAME* f) {
 // Log ring
 // ---------------------------------------------------------------------------
 struct LogRec { uint32_t ms; char msg[112]; };
-constexpr size_t kLogRing = 24;
+// 24 was too small for its own sake: the rate sweep emits a header, ten result rows, up to
+// ten "panel came back" notes and a verdict — around thirty lines — so the ring evicted the
+// early rows, and the winning row is as likely to be early as late. A test that overwrites
+// its own answer before anyone reads it is worse than no test.
+constexpr size_t kLogRing = 64;
 LogRec       g_log[kLogRing];
 size_t       g_logHead = 0;
 portMUX_TYPE g_logMux = portMUX_INITIALIZER_UNLOCKED;
@@ -708,6 +726,7 @@ bool waitForPanel(uint32_t maxMs) {
 }
 
 void runRateSweep() {
+  RunningScope scope("ratesweep");
   g_rsRan  = true;
   g_rsBest = -1;
   logmsg("rate sweep: %u REAL bitrates, NORMAL mode, 1.2 s each - we ACK on every one",
@@ -879,6 +898,7 @@ uint32_t jamWindow(uint32_t windowMs, bool jam, int* crxHighPct, int* txLowPct) 
 }
 
 void runJam() {
+  RunningScope scope("jam");
   g_jamRan = true;
   if (g_rate != 500000)
     logmsg("jam: rate is %lu but this test installs 500k - results are meaningless",
@@ -1016,6 +1036,7 @@ uint32_t sweepWindow(gpio_num_t pin, uint32_t windowMs, bool jam) {
 }
 
 void runJamSweep() {
+  RunningScope scope("jamsweep");
   g_jsRan   = true;
   g_jsFound = -1;
   logmsg("jam sweep: %u candidate pins, 800 ms each, decoder live on GPIO%d",
@@ -1085,7 +1106,8 @@ void runJamSweep() {
 // ---------------------------------------------------------------------------
 // JSON
 // ---------------------------------------------------------------------------
-char   g_out[8192];
+// Sized for the worst case, which is jLog() serialising a full 64-entry ring.
+char   g_out[12288];
 size_t g_outN = 0;
 size_t jroom()  { return sizeof(g_out) - 1 - g_outN; }
 void   jclear() { g_outN = 0; g_out[0] = 0; }
@@ -1144,6 +1166,10 @@ void jStatus() {
      g_jamRan ? "true" : "false", static_cast<unsigned long>(g_jamBase),
      static_cast<unsigned long>(g_jamJam), static_cast<unsigned long>(g_jamRec),
      g_jamCrxIdle, g_jamCrxDom, g_jamTxLowPct, g_wantJam ? "true" : "false");
+
+  jf("\"running\":");
+  if (g_running) jstr(const_cast<const char*>(g_running)); else jf("null");
+  jf(",");
 
   jf("\"ratesweep\":{\"ran\":%s,\"bestRate\":%lu,\"bestRx\":%lu,\"busy\":%s},",
      g_rsRan ? "true" : "false",
