@@ -618,6 +618,194 @@ void runTimingSweep() {
 }
 
 // ---------------------------------------------------------------------------
+// The BITRATE sweep — the experiment runTimingSweep() only looked like it ran
+// ---------------------------------------------------------------------------
+// Read the timing table above and multiply it out: brp * (1 + tseg_1 + tseg_2) is 160 in
+// EVERY row. All eight configurations are exactly 500000 bit/s. That sweep varied the sample
+// point and never once varied the bitrate, so "8 configs swept, all identical" does not rule
+// out what it appears to rule out.
+//
+// And a small bitrate error is the best fit we have for the symptom. Reception is immune to
+// it: a receiver hard-syncs on the start bit and re-syncs on every recessive-to-dominant edge
+// after it, so a fraction of a percent never accumulates. Our ACK is not immune. It is a
+// single dominant bit we place from our OWN clock, 60-odd bit times after the last edge we
+// could have re-synced on, and if our clock is off it lands beside the panel's ACK slot
+// instead of inside it. That destroys the frame we were acknowledging — which is exactly what
+// we see the instant NORMAL mode is enabled, and exactly why listen-only stays spotless.
+//
+// So walk the ACHIEVABLE rates around 500k in NORMAL mode and count what decodes. The
+// detector needs no interpretation: at every wrong rate the count stays 0, as it is today. At
+// the right one our ACK lands, the panel stops retransmitting, and frames appear.
+//
+// The rates are not free choices. Only brp * tq = 80 MHz / rate with an integer brp is
+// reachable, brp is kept even because odd values are rejected on some targets, and the C3
+// caps tseg_1 at 16 and tseg_2 at 8. That yields roughly 1-4% steps across +-7%.
+struct RateCase {
+  uint32_t rate;                 // what this row actually runs at
+  uint32_t brp;
+  uint8_t  t1, t2, sjw;
+};
+const RateCase kRates[] = {
+  {571429, 14,  7, 2, 2},
+  {555556, 12,  9, 2, 2},
+  {533333, 10, 11, 3, 3},
+  {519481, 14,  8, 2, 2},
+  {512821, 12,  9, 3, 3},
+  {500000, 10, 12, 3, 3},        // the reference: what every previous sweep row also was
+  {493827, 18,  6, 2, 2},
+  {476190, 12, 10, 3, 3},
+  {470588, 10, 13, 3, 3},
+  {454545, 16,  8, 2, 2},
+};
+constexpr size_t kRateCount = sizeof(kRates) / sizeof(kRates[0]);
+
+volatile bool g_wantRateSweep = false;
+bool     g_rsRan  = false;
+int      g_rsBest = -1;
+uint32_t g_rsGot[kRateCount] = {0};
+
+// SHUT UP AND LET IT COME BACK.
+//
+// Every NORMAL-mode row leaves the bus in an error storm, and a panel that has been shouted
+// at long enough stops transmitting. If the next row starts against a silent panel it scores
+// zero no matter how right its bitrate is — so one bad row poisons every row after it, and
+// the correct answer is indistinguishable from the wrong ones. That is a false negative the
+// original timing sweep had no protection against either.
+//
+// So between rows: emit NOTHING — listen-only, which cannot even ACK — and wait for the panel
+// to start talking again on its own. Returns false if it never does, and then the rows that
+// follow are not to be trusted.
+bool waitForPanel(uint32_t maxMs) {
+  twai_general_config_t g =
+      TWAI_GENERAL_CONFIG_DEFAULT(kTxPin, kRxPin, TWAI_MODE_LISTEN_ONLY);
+  g.rx_queue_len = 32;
+  g.tx_queue_len = 1;
+  twai_timing_config_t t = TWAI_TIMING_CONFIG_500KBITS();
+  twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+  if (twai_driver_install(&g, &t, &f) != ESP_OK) return false;
+  if (twai_start() != ESP_OK) { twai_driver_uninstall(); return false; }
+
+  bool alive = false;
+  const uint32_t t0 = millis();
+  while (millis() - t0 < maxMs && !alive) {
+    twai_message_t m;
+    if (twai_receive(&m, pdMS_TO_TICKS(200)) == ESP_OK) alive = true;
+  }
+  const uint32_t waited = millis() - t0;
+
+  twai_stop();
+  twai_driver_uninstall();
+  delay(20);
+
+  if (!alive)
+    logmsg("  ... panel STILL SILENT after %lu ms of us saying nothing",
+           static_cast<unsigned long>(waited));
+  else if (waited > 400)
+    logmsg("  ... panel came back after %lu ms of silence",
+           static_cast<unsigned long>(waited));
+  return alive;
+}
+
+void runRateSweep() {
+  g_rsRan  = true;
+  g_rsBest = -1;
+  logmsg("rate sweep: %u REAL bitrates, NORMAL mode, 1.2 s each - we ACK on every one",
+         static_cast<unsigned>(kRateCount));
+
+  CAN0.disable();
+  delay(50);
+
+  for (size_t i = 0; i < kRateCount; ++i) {
+    const RateCase& c = kRates[i];
+    g_rsGot[i] = 0;
+
+    // A row is only worth running against a panel that is actually talking. Up to a minute
+    // of complete silence from us first, which is also long enough for it to reset itself.
+    if (!waitForPanel(60000)) {
+      logmsg("  %6lu  SKIPPED - panel silent, this row would measure nothing",
+             static_cast<unsigned long>(c.rate));
+      continue;
+    }
+
+    twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(kTxPin, kRxPin, TWAI_MODE_NORMAL);
+    g.rx_queue_len = 64;
+    g.tx_queue_len = 4;
+    twai_timing_config_t t{};
+    t.brp             = c.brp;
+    t.tseg_1          = c.t1;
+    t.tseg_2          = c.t2;
+    t.sjw             = c.sjw;
+    t.triple_sampling = false;
+    twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+    if (twai_driver_install(&g, &t, &f) != ESP_OK) {
+      logmsg("  %6lu  INSTALL REFUSED (brp/tseg invalid on this chip)",
+             static_cast<unsigned long>(c.rate));
+      continue;
+    }
+    if (twai_start() != ESP_OK) {
+      logmsg("  %6lu  start failed", static_cast<unsigned long>(c.rate));
+      twai_driver_uninstall();
+      continue;
+    }
+
+    // Remember the last payload: if our ACK ever lands, the panel stops repeating its stuck
+    // sync request and the DATA changes. That is a stronger signal than the count alone.
+    uint8_t  last[8] = {0};
+    uint8_t  lastLen = 0;
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 1200) {
+      twai_message_t m;
+      if (twai_receive(&m, pdMS_TO_TICKS(20)) == ESP_OK) {
+        ++g_rsGot[i];
+        lastLen = m.data_length_code > 8 ? 8 : m.data_length_code;
+        memcpy(last, m.data, lastLen);
+      }
+    }
+
+    twai_status_info_t st{};
+    twai_get_status_info(&st);
+    if (g_rsGot[i]) {
+      logmsg("  %6lu  rx=%lu  state=%u txErr=%lu busErr=%lu  last=%02X %02X %02X  <<< DECODES",
+             static_cast<unsigned long>(c.rate), static_cast<unsigned long>(g_rsGot[i]),
+             static_cast<unsigned>(st.state), static_cast<unsigned long>(st.tx_error_counter),
+             static_cast<unsigned long>(st.bus_error_count),
+             last[0], last[1], last[2]);
+    } else {
+      logmsg("  %6lu  rx=0  state=%u txErr=%lu rxErr=%lu busErr=%lu",
+             static_cast<unsigned long>(c.rate), static_cast<unsigned>(st.state),
+             static_cast<unsigned long>(st.tx_error_counter),
+             static_cast<unsigned long>(st.rx_error_counter),
+             static_cast<unsigned long>(st.bus_error_count));
+    }
+
+    twai_stop();
+    twai_driver_uninstall();
+    delay(50);
+
+    if (g_rsGot[i] && (g_rsBest < 0 || g_rsGot[i] > g_rsGot[g_rsBest]))
+      g_rsBest = static_cast<int>(i);
+  }
+
+  if (g_rsBest >= 0)
+    logmsg("rate sweep: %lu bit/s DECODES IN NORMAL MODE (%lu frames) - that is the panel's "
+           "actual rate, and 500000 was never it",
+           static_cast<unsigned long>(kRates[g_rsBest].rate),
+           static_cast<unsigned long>(g_rsGot[g_rsBest]));
+  else
+    logmsg("rate sweep: no rate decoded a single frame while we were allowed to ACK. "
+           "The fault is not the bitrate.");
+
+  CAN0.setCANPins(kRxPin, kTxPin);
+  CAN0.begin(g_rate);
+  if (g_listen) CAN0.setListenOnlyMode(true);
+  CAN0.setGeneralCallback(&onCanFrame);
+  CAN0.watchFor();
+  logmsg("rate sweep: restored %s", g_listen ? "listen-only" : "normal");
+}
+
+// ---------------------------------------------------------------------------
 // The jam test — does OUR dominant actually reach the bus?
 // ---------------------------------------------------------------------------
 // This is the question the handoff left open, and /api/pintest cannot answer it. Pintest
@@ -957,6 +1145,12 @@ void jStatus() {
      static_cast<unsigned long>(g_jamJam), static_cast<unsigned long>(g_jamRec),
      g_jamCrxIdle, g_jamCrxDom, g_jamTxLowPct, g_wantJam ? "true" : "false");
 
+  jf("\"ratesweep\":{\"ran\":%s,\"bestRate\":%lu,\"bestRx\":%lu,\"busy\":%s},",
+     g_rsRan ? "true" : "false",
+     static_cast<unsigned long>(g_rsBest >= 0 ? kRates[g_rsBest].rate : 0),
+     static_cast<unsigned long>(g_rsBest >= 0 ? g_rsGot[g_rsBest] : 0),
+     g_wantRateSweep ? "true" : "false");
+
   jf("\"jamsweep\":{\"ran\":%s,\"found\":%d,\"base\":%lu,\"busy\":%s},",
      g_jsRan ? "true" : "false", g_jsFound, static_cast<unsigned long>(g_jsBase),
      g_wantJamSweep ? "true" : "false");
@@ -1057,6 +1251,7 @@ label{margin-left:10px}
 <div>
 <button onclick=go('/api/listen?on=1')>LISTEN-ONLY (passive)</button>
 <button onclick=go('/api/listen?on=0')>normal (we ACK)</button>
+<button onclick=go("/api/ratesweep")>RATE SWEEP (real bitrates, we ACK)</button>
 <button onclick=go("/api/jam")>JAM TEST (decoder live - does our dominant reach the bus?)</button>
 <button onclick=go("/api/pintest")>PIN TEST (drive CTX, watch CRX)</button>
 <button onclick=go("/api/looptest?pin=6")>INTERNAL LOOPBACK (no transceiver)</button>
@@ -1197,6 +1392,12 @@ void routes() {
   // Six seconds of measurement; the answer lands in /api/log and /api/status.
   g_server.on("/api/jam", HTTP_GET, [](PsychicRequest* r) {
     g_wantJam = true;
+    jclear(); jf("{\"queued\":true}");
+    return replyJson(r);
+  });
+
+  g_server.on("/api/ratesweep", HTTP_GET, [](PsychicRequest* r) {
+    g_wantRateSweep = true;
     jclear(); jf("{\"queued\":true}");
     return replyJson(r);
   });
@@ -1390,6 +1591,11 @@ void loop() {
   if (g_wantJam && !g_otaRunning) {
     g_wantJam = false;
     runJam();
+  }
+
+  if (g_wantRateSweep && !g_otaRunning) {
+    g_wantRateSweep = false;
+    runRateSweep();
   }
 
   if (g_wantJamSweep && !g_otaRunning) {
