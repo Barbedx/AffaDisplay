@@ -72,6 +72,16 @@ class RowScreen {
   void setScroll(uint8_t row, uint32_t stepMs);
   uint32_t scroll(uint8_t row) const;
 
+  // Which way the row travels. Unlike setScroll() this is FREE and LOSSLESS — it does not
+  // blank the row and does not move the text; see Marquee::setDirection(). A console can
+  // toggle it as fast as a person can click.
+  //
+  // It also survives a setScroll(), which is the only reason RowScreen tracks it at all: a
+  // cadence change rebuilds the underlying Marquee, and a reversed row that silently
+  // un-reversed itself when you changed its speed would be a genuinely baffling console.
+  void setDirection(uint8_t row, Marquee::Direction d, uint32_t now);
+  Marquee::Direction direction(uint8_t row) const;
+
   // Publish a row's text. Returns true if the content actually changed.
   //
   // The scroll position carries across the change (see the header comment), and re-publishing
@@ -111,6 +121,9 @@ class RowScreen {
   RowScreenGeometry _geom;
   Marquee  _row[kRows];
   uint32_t _stepMs[kRows]  = {0, 0, 0};
+  Marquee::Direction _dir[kRows] = {Marquee::Direction::Forward,
+                                    Marquee::Direction::Forward,
+                                    Marquee::Direction::Forward};
   char     _painted[kRows][kCell] = {{0}, {0}, {0}};
   bool     _valid = false;          // has painted() ever latched? false forces one repaint
 };

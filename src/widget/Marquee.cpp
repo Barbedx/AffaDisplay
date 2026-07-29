@@ -75,10 +75,25 @@ void Marquee::setActive(bool on, uint32_t now) {
   _active  = on;
 }
 
+void Marquee::setDirection(Direction d, uint32_t now) {
+  if (d == _dir) return;
+  // Freeze where the eye currently sees it, THEN turn round. See the header for why the
+  // cheap version — flip the sign, keep the epoch — teleports the row.
+  _base    = windowAt(now);
+  _epochMs = now;
+  _dir     = d;
+}
+
 uint16_t Marquee::windowAt(uint32_t now) const {
   if (_len == 0) return 0;
   const uint32_t steps = (now - _epochMs) / _geom.stepMs;
-  return static_cast<uint16_t>((static_cast<uint32_t>(_base) + steps) % _len);
+  if (_dir == Direction::Forward)
+    return static_cast<uint16_t>((static_cast<uint32_t>(_base) + steps) % _len);
+  // Reverse. `_len - steps % _len` rather than `_base - steps`: these are unsigned, and the
+  // subtraction is done in a range that cannot wrap below zero. The extra `% _len` on the
+  // outside is what handles steps % _len == 0, where the first term is exactly _len.
+  const uint32_t back = static_cast<uint32_t>(_len) - (steps % _len);
+  return static_cast<uint16_t>((static_cast<uint32_t>(_base) + back) % _len);
 }
 
 void Marquee::window(uint16_t pos, char* out, uint8_t outSize) const {

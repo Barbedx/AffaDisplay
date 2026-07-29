@@ -38,10 +38,23 @@ void RowScreen::setScroll(uint8_t row, uint32_t stepMs) {
   // the honest way to change its cadence, and it blanks the row; see the header.
   _stepMs[row] = stepMs;
   _row[row]    = Marquee{geomFor(_geom, stepMs)};
+  // Re-apply the direction the caller set. A fresh Marquee is Forward, and a row that quietly
+  // un-reversed itself because you changed its speed is a console nobody can reason about.
+  // `now` is irrelevant: the rebuilt row has no text, so setDirection() has nothing to
+  // re-base and only records the flag.
+  _row[row].setDirection(_dir[row], 0);
   _valid       = false;           // the row's content is gone; force a repaint
 }
 
 uint32_t RowScreen::scroll(uint8_t row) const { return _stepMs[clampRow(row)]; }
+
+void RowScreen::setDirection(uint8_t row, Marquee::Direction d, uint32_t now) {
+  row = clampRow(row);
+  _dir[row] = d;
+  _row[row].setDirection(d, now);
+}
+
+Marquee::Direction RowScreen::direction(uint8_t row) const { return _dir[clampRow(row)]; }
 
 bool RowScreen::setText(uint8_t row, const char* text, uint32_t now) {
   // Phase::Keep, and this single argument is the reason this class exists. See the header.

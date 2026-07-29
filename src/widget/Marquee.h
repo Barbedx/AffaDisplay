@@ -56,6 +56,18 @@ class Marquee {
   // when the replacement is shorter.
   enum class Phase : uint8_t { Reset, Keep };
 
+  // Which way the window travels over the text. Forward is the default and is what a
+  // marquee normally means: the text appears to move LEFT, because the window moves right
+  // through it. Reverse walks the window back, so the text drifts right.
+  //
+  // NOT PART OF MarqueeGeometry, and that is the point: geometry is sanitised once and then
+  // immutable, because a zero width appearing halfway through a run is a class of bug worth
+  // designing out. Direction has no invalid value and is meant to be changed live — a
+  // console toggling it, an application reversing a row on a key press — so it is a setter
+  // that RE-BASES rather than a construction parameter that would mean rebuilding the row
+  // and losing its text.
+  enum class Direction : uint8_t { Forward, Reverse };
+
   // The text to scroll. Transliterated and cleaned with affa::normalizeTitle(), then given
   // `gap` blank cells so the wrap reads as a pause rather than a collision. nullptr, or a
   // string that normalises to nothing, switches the marquee off.
@@ -70,6 +82,14 @@ class Marquee {
   // a free-running clock would have reached. The pause does not advance the marquee.
   void setActive(bool on, uint32_t now);
   bool active() const { return _active; }
+
+  // Reverse the travel WITHOUT MOVING THE TEXT. The window showing at `now` is frozen as the
+  // new base and the epoch restarts there, so the row continues from exactly where the eye
+  // last saw it and simply walks the other way. Computing it any other way — flipping the
+  // sign and keeping the old epoch — makes the row JUMP by however long it had been
+  // scrolling, which on a row that has been running for an hour is an arbitrary position.
+  void      setDirection(Direction d, uint32_t now);
+  Direction direction() const { return _dir; }
 
   // Window position at `now`, in characters from the start of the text. 0 when empty.
   uint16_t windowAt(uint32_t now) const;
@@ -93,6 +113,7 @@ class Marquee {
   uint16_t _base    = 0;                 // window position in effect at _epochMs
   uint32_t _epochMs = 0;
   bool     _active  = false;
+  Direction _dir    = Direction::Forward;
 };
 
 }  // namespace widget
