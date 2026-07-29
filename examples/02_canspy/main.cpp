@@ -82,6 +82,7 @@ struct RunningScope {
   ~RunningScope() { g_running = nullptr; }
 };
 
+char     g_rxProbe[96] = "not run";
 uint32_t g_rate       = kDefaultRate;
 bool     g_canUp      = false;
 bool     g_listen     = false;    // controller in TRUE listen-only: no ACK, no error frames
@@ -1229,6 +1230,8 @@ void jStatus() {
      static_cast<unsigned long>(g_jamJam), static_cast<unsigned long>(g_jamRec),
      g_jamCrxIdle, g_jamCrxDom, g_jamTxLowPct, g_wantJam ? "true" : "false");
 
+  jf("\"rxProbe\":"); jstr(g_rxProbe); jf(",");
+
   jf("\"running\":");
   if (g_running) jstr(const_cast<const char*>(g_running)); else jf("null");
   jf(",");
@@ -1631,6 +1634,51 @@ void setup() {
     }
   }
   if (!g_rate) g_rate = kDefaultRate;
+
+  // THE PROBE THAT SEPARATES "BUS HELD DOMINANT" FROM "NOTHING IS DRIVING RXD".
+  //
+  // Both look identical everywhere else: no frames, no errors, and CRX reading low. They mean
+  // opposite things, and only one of them is a bus problem.
+  //
+  // Run it HERE, before the driver is installed, because that is the one moment the pin is
+  // ours for free — after canStart() it belongs to TWAI, and taking it back means a teardown,
+  // which deadlocks on exactly the silent bus this probe exists to explain.
+  //
+  //   pull-up 1, pull-down 0  -> FLOATING. Nothing is driving CRX at all: the transceiver is
+  //                             unpowered or its receiver output is not reaching GPIO4.
+  //                             There is no "bus" to speak of and no frame can ever arrive.
+  //   pull-up 0, pull-down 0  -> driven LOW. Something really is holding the bus dominant.
+  //   pull-up 1, pull-down 1  -> driven HIGH. Bus idle and recessive, i.e. simply quiet.
+  {
+    // FIRST, TAKE OURSELVES OUT OF THE PICTURE. Until the driver installs, GPIO3 sits in its
+    // power-on default — floating — and a floating TXD is not guaranteed recessive. If it
+    // drifts low the transceiver drives the bus dominant and WE are the jam, which would make
+    // the probe below blame the bus for our own pin. Hold it hard high first.
+    gpio_reset_pin(kTxPin);
+    pinMode(kTxPin, OUTPUT);
+    digitalWrite(kTxPin, HIGH);          // recessive, and actively so
+    delay(20);
+
+    gpio_reset_pin(kRxPin);
+    pinMode(kRxPin, INPUT_PULLUP);
+    delay(5);
+    const int withPullUp = digitalRead(kRxPin);
+    pinMode(kRxPin, INPUT_PULLDOWN);
+    delay(5);
+    const int withPullDown = digitalRead(kRxPin);
+    pinMode(kRxPin, INPUT);
+    gpio_reset_pin(kRxPin);
+
+    const char* verdict =
+        (withPullUp == 1 && withPullDown == 0) ? "FLOATING - nothing drives CRX"
+      : (withPullUp == 0 && withPullDown == 0) ? "driven LOW - bus really is held dominant"
+      : (withPullUp == 1 && withPullDown == 1) ? "driven HIGH - bus idle and recessive"
+                                               : "inconsistent";
+    gpio_reset_pin(kTxPin);              // hand GPIO3 back for canStart()
+    snprintf(g_rxProbe, sizeof(g_rxProbe), "CTX forced recessive; pullup=%d pulldown=%d : %s",
+             withPullUp, withPullDown, verdict);
+    Serial.printf("[rxprobe] %s\n", g_rxProbe);
+  }
 
   {
     Preferences p;
