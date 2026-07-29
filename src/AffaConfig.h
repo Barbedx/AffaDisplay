@@ -463,6 +463,17 @@
 #  define AFFA_HELLO_MIN_MS 200
 #endif
 
+// FLOOR BETWEEN TWO PING REPLIES, for a profile with SyncProfile::replyToPing set. The
+// healthy panel pings `69` at ~1 Hz and each ping is answered with one immediate B9 — two
+// heartbeats a second in total, which is exactly what MeganeCAN put on the wire. But an
+// UNACKNOWLEDGED panel retransmits that same ping at line rate — 126 copies in 32 ms
+// measured on the bench — and a reply per copy is the same storm AFFA_HELLO_MIN_MS exists
+// to prevent. The PeerAlive STATE is still credited on every ping; only the reply frame is
+// paced. 250 keeps the reply comfortably inside the panel's ~1 s expectation.
+#ifndef AFFA_PING_REPLY_MIN_MS
+#  define AFFA_PING_REPLY_MIN_MS 250
+#endif
+
 // Layer 1 FrameMatch table. sizeof(Sub) ~= 32 B, so 8 slots ~= 256 B and one linear scan
 // per frame per direction. subscribe() returns kNoSub once full — ignoring the return
 // value silently loses a subscription. 0 removes the table and the scan; Layers 0 and 2

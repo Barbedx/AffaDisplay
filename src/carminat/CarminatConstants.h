@@ -68,9 +68,15 @@ inline constexpr uint8_t kHello[3][8] = {
 // filler bytes that merely happen to be zero; UpdateList's `7A 01` carries a genuine
 // argument. The two look symmetrical on the wire and are not. [CAP]
 //
-//   syncId, syncReplyId, replyFlag, alive, request, requestArg, filler, hello, helloCount
+// replyToPing is TRUE for this family: the MeganeCAN Carminat driver — the one proven on a
+// real panel — answers every `69` ping with an immediate B9 from inside its 0x69 handler,
+// and this profile reproduces that wire behaviour (paced; see AFFA_PING_REPLY_MIN_MS).
+// The other families keep the paced-only heartbeat. docs/PROTOCOL.md §3.6.
+//
+//   syncId, syncReplyId, replyFlag, alive, request, requestArg, filler, hello, helloCount,
+//   replyToPing
 inline constexpr SyncProfile kSync = {
-    kIdSync, kIdSyncReply, 0x0400, 0xB9, 0xBA, 0x00, kFiller, kHello, 3};
+    kIdSync, kIdSyncReply, 0x0400, 0xB9, 0xBA, 0x00, kFiller, kHello, 3, true};
 
 // ORDER IS ON THE WIRE: the first send after a resync walks this table in declaration
 // order and puts a 1-byte 0x70 on each id before the payload. [CAP]

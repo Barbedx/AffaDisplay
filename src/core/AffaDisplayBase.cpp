@@ -27,6 +27,8 @@ bool AffaDisplayBase::begin() {
   _nextSyncMs     = now;                 // the first heartbeat leaves on the first poll()
   _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
   _ackDeadlineMs  = now;
+  _nextHelloMs    = now;                 // pacing floors, not schedules: a re-begin() must
+  _nextPongMs     = now;                 // not inherit a stale deadline across a clock wrap
   _lastCompleted  = kNoTicket;
   _lastEnqueued   = kNoTicket;
   _lastResult     = Result::Ok;
@@ -363,11 +365,25 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
     // PeerAlive is a transient the watchdog consumes on the next heartbeat, not a state
     // an application cares about, so it is set directly and fires no event: it toggles
     // at the panel's ~1 Hz ping rate and would be pure noise on the event sink.
-    //
-    // The legacy code called tick() from here, which emitted an extra heartbeat per ping
-    // and re-armed the watchdog from the PEER rather than from the loop. Both are gone:
-    // exactly one heartbeat leaves per AFFA_SYNC_INTERVAL_MS, paced by pumpSync().
     _sync |= SyncState::PeerAlive;
+
+    // ANSWER THE PING, where the profile says the family does. The legacy Carminat driver
+    // called tick() from exactly this branch, so its B9 followed the panel's 69 within
+    // milliseconds — a pong, on the wire, whether or not the panel reads it as one. That
+    // driver is the one proven against a real panel, and this is the LAST wire-visible
+    // difference between it and this library (MegaOpen/docs/DISPLAY-INIT-SPEC.md §5).
+    //
+    // What deliberately does NOT come back from the legacy path: the watchdog stays armed
+    // from OUR loop (pumpSync consumes PeerAlive), and no BA rides along. Only the alive
+    // frame, and only at AFFA_PING_REPLY_MIN_MS — an unacknowledged panel repeats this
+    // ping at line rate, and a reply per copy would be the hello storm's twin.
+    if (_profile.replyToPing) {
+      const uint32_t now = _clock.millis();
+      if (expired(now, _nextPongMs)) {
+        _nextPongMs = now + AFFA_PING_REPLY_MIN_MS;
+        sendAlive();
+      }
+    }
     return true;
   }
 
@@ -561,6 +577,17 @@ void AffaDisplayBase::pumpLink() {
 // Sync FSM — ONE copy, parameterised by SyncProfile
 // ---------------------------------------------------------------------------
 
+void AffaDisplayBase::sendAlive() {
+  Frame alive;
+  alive.id      = _profile.syncId;
+  alive.len     = kPacketLength;
+  alive.data[0] = _profile.aliveByte;
+  alive.data[1] = 0x00;                   // a literal 0x00 in BOTH families, NOT the
+                                          // filler: UpdateList sends 79 00 81 81 …
+  for (uint8_t i = 2; i < kPacketLength; ++i) alive.data[i] = _profile.filler;
+  txFrame(alive);
+}
+
 void AffaDisplayBase::pumpSync() {
   if (_passive) return;                   // the radio owns the handshake
 
@@ -571,14 +598,16 @@ void AffaDisplayBase::pumpSync() {
   // not produce a catch-up burst of ten heartbeats.
   _nextSyncMs = now + AFFA_SYNC_INTERVAL_MS;
 
-  Frame alive;
-  alive.id      = _profile.syncId;
-  alive.len     = kPacketLength;
-  alive.data[0] = _profile.aliveByte;
-  alive.data[1] = 0x00;                   // a literal 0x00 in BOTH families, NOT the
-                                          // filler: UpdateList sends 79 00 81 81 …
-  for (uint8_t i = 2; i < kPacketLength; ++i) alive.data[i] = _profile.filler;
-  txFrame(alive);
+  // THE PACING FLOORS MUST NOT GO WRAP-STALE. Each is re-armed only by the event it gates
+  // (a hello burst, a pong), so 2^31 ms without that event flips expired()'s signed
+  // half-window compare and the floor reads "not yet" for the NEXT ~25 days — the feature
+  // silently off, nothing in any counter to show it. Dragging an already-expired floor up
+  // to `now` once per tick changes no pacing decision — expired it was and expired it
+  // stays — but it caps the staleness at one tick, which keeps the compare valid for ever.
+  if (expired(now, _nextHelloMs)) _nextHelloMs = now;
+  if (expired(now, _nextPongMs))  _nextPongMs  = now;
+
+  sendAlive();
 
   if (hasFlag(_sync, SyncState::Failed) || hasFlag(_sync, SyncState::Start)) {
     Frame req;
@@ -1320,7 +1349,23 @@ void AffaDisplayBase::setPollOwner(void* owner, TaskIdFn fn) {
 uint32_t AffaDisplayBase::foreignPolls() const { return _foreignPolls; }
 bool     AffaDisplayBase::begun() const { return _begun; }
 
-void AffaDisplayBase::setPassive(bool on) { _passive = on; }
+void AffaDisplayBase::setPassive(bool on) {
+  if (_passive && !on) {
+    // LEAVING passive after an arbitrary quiet period. Every sync deadline froze the
+    // moment passive was entered — pumpSync() early-outs on the flag, so nothing re-armed
+    // them — and after 2^31 ms of that, expired()'s signed compare reads every one of
+    // them as "not yet" for the NEXT ~25 days: no heartbeat, no hello, no pong, and a
+    // takeover that silently is not one. Re-arm the lot from the current clock, exactly
+    // as begin() would, so the first active poll() opens with a heartbeat and the peer
+    // gets a full window before it can be declared lost.
+    const uint32_t now = _clock.millis();
+    _nextSyncMs     = now;
+    _nextHelloMs    = now;
+    _nextPongMs     = now;
+    _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
+  }
+  _passive = on;
+}
 bool AffaDisplayBase::passive() const { return _passive; }
 void AffaDisplayBase::setSelfAck(bool on) { _selfAck = on; }
 

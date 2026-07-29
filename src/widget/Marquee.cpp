@@ -86,6 +86,11 @@ void Marquee::setDirection(Direction d, uint32_t now) {
 
 uint16_t Marquee::windowAt(uint32_t now) const {
   if (_len == 0) return 0;
+  // A text that FITS in the window has nowhere to scroll TO: every step of the loop shows
+  // the same characters somewhere else in the window, which reads as jitter, not motion.
+  // Hold position 0 — window() renders it once and blank-fills. See window() for the
+  // rendering half of this rule; the two must agree or a "static" short row drifts.
+  if (_len <= _geom.width) return 0;
   const uint32_t steps = (now - _epochMs) / _geom.stepMs;
   if (_dir == Direction::Forward)
     return static_cast<uint16_t>((static_cast<uint32_t>(_base) + steps) % _len);
@@ -102,6 +107,28 @@ void Marquee::window(uint16_t pos, char* out, uint8_t outSize) const {
 
   uint8_t n = _geom.width;
   if (n > outSize - 1) n = static_cast<uint8_t>(outSize - 1);
+
+  // The modulo below implements a LOOP — a window into a text longer than itself, whose
+  // tail wraps to its head. Applied to a text SHORTER than the window it paints the word
+  // once per _len cells: "SUCCESS" in a 20-cell window rendered "SUCCESS      SUCCESS",
+  // which no caller means and which broke RowScreen's "shows the first width characters"
+  // contract for static short rows. A fitting text is rendered once, blank-filled, and
+  // `pos` is deliberately ignored — windowAt() pins it to 0 for the same case, and
+  // ignoring it here as well makes the render immune to a stale base slipping through.
+  //
+  // THE BOUNDARY IS _len (TEXT PLUS GAP), NOT THE BARE TEXT, ON PURPOSE. A text in the
+  // band (width-gap, width] — every character visible, but text+gap longer than the
+  // window — keeps the pre-0.4.1 sliding loop when a scroll speed is set. Tightening the
+  // boundary to the bare text would freeze every fitting title on the 8-cell segment
+  // panel (width 8, gap 8, where text+gap can never fit) and change wire sequences that
+  // test_updatelist_wire pins. Static-when-everything-is-visible is RowScreen's scroll=0
+  // job; this guard only removes the nonsense render, not the application's motion.
+  if (_len <= _geom.width) {
+    for (uint8_t i = 0; i < n; ++i) out[i] = (i < _len) ? _text[i] : ' ';
+    out[n] = '\0';
+    return;
+  }
+
   for (uint8_t i = 0; i < n; ++i) out[i] = _text[(pos + i) % _len];
   out[n] = '\0';
 }

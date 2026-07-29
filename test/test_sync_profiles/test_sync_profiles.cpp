@@ -117,7 +117,11 @@ void test_request_is_emitted_only_while_failed_or_start(void) {
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, t.alive, "one heartbeat");
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, t.request, "the request goes out while FAILED");
 
-  // Synced, START clear -> alive only, for as many seconds as you like.
+  // Synced, START clear -> alive frames only, for as many seconds as you like. TWO per
+  // ping-second since 0.4.1: the paced heartbeat plus the pong the ping provokes
+  // (SyncProfile::replyToPing — MeganeCAN's two-heartbeats-a-second wire). The subject of
+  // this test is the REQUEST staying at zero; the alive count is pinned so a pacing
+  // regression in either half cannot hide.
   r.link.inject(affatest::panelSyncRequest());
   r.d.poll();
   drain(r.link);
@@ -127,7 +131,7 @@ void test_request_is_emitted_only_while_failed_or_start(void) {
     r.d.poll();
   }
   t = tally(r.link, 0x3AF, 0xB9, 0xBA);
-  TEST_ASSERT_EQUAL_INT_MESSAGE(3, t.alive, "one heartbeat per second");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(6, t.alive, "one paced heartbeat + one pong, per second");
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "no request once the link is up");
 }
 
@@ -257,7 +261,84 @@ void test_a_stalled_loop_does_not_produce_a_catch_up_burst(void) {
   r.link.inject(affatest::panelPeerAlive());
   r.d.poll();
   SyncTally t = tally(r.link, 0x3AF, 0xB9, 0xBA);
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, t.alive, "one heartbeat, not ten");
+  // Two frames, not eleven: the single paced heartbeat the stall owes, plus the pong the
+  // injected ping provokes (0.4.1). The catch-up burst this test guards against would
+  // show as ten paced frames; the pong is a reply, not a catch-up.
+  TEST_ASSERT_EQUAL_INT_MESSAGE(2, t.alive, "one paced heartbeat + the ping's pong, not ten");
+}
+
+// ---------------------------------------------------------------------------
+// The pong — SyncProfile::replyToPing, Carminat only (0.4.1)
+// ---------------------------------------------------------------------------
+
+void test_carminat_answers_a_ping_between_heartbeats(void) {
+  // The proven driver's B9 follows the panel's 69 within milliseconds. Mid-interval —
+  // paced heartbeat not due for another 600 ms — the ping must still be answered NOW,
+  // with a frame byte-identical to the heartbeat, and nothing else.
+  CarRig r;
+  r.d.begin();
+  r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+  drain(r.link);
+
+  r.clk.advance(400);
+  r.link.inject(affatest::panelPeerAlive());
+  r.d.poll();
+  SyncTally t = tally(r.link, 0x3AF, 0xB9, 0xBA);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, t.alive, "the pong leaves NOW, not on the next tick");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "a pong is an alive frame, nothing rides along");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.other, "and it is byte-identical to the heartbeat");
+}
+
+void test_the_pong_is_paced_against_a_ping_storm(void) {
+  // An unacknowledged panel repeats `69` at line rate — 126 copies in 32 ms measured on
+  // the bench. One pong per copy would be the hello storm's twin. The state is credited
+  // per ping; the FRAME is floored at AFFA_PING_REPLY_MIN_MS.
+  CarRig r;
+  r.d.begin();
+  r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+  drain(r.link);
+
+  r.clk.advance(1);                              // clear of the paced tick
+  for (int i = 0; i < 126; ++i) r.link.inject(affatest::panelPeerAlive());
+  r.d.poll();                                    // pumpRx drains the whole burst
+  SyncTally t = tally(r.link, 0x3AF, 0xB9, 0xBA);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, t.alive, "126 pings in one burst: ONE pong");
+  TEST_ASSERT_TRUE(r.d.synced());
+}
+
+void test_updatelist_does_not_pong(void) {
+  // The pong is a Carminat reproduction of MeganeCAN's wire; the AFFA2 family keeps the
+  // paced-only heartbeat. Pinned in the profiles AND on the wire, so flipping one flag
+  // cannot pass unnoticed.
+  TEST_ASSERT_TRUE_MESSAGE(carminat::kSync.replyToPing, "Carminat pongs");
+  TEST_ASSERT_FALSE_MESSAGE(updatelist::kSync.replyToPing, "UpdateList does not");
+
+  UlRig r;
+  r.d.begin();
+  r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+  drain(r.link);
+
+  r.clk.advance(400);
+  r.link.inject(affatest::panelPeerAlive());
+  r.d.poll();
+  SyncTally t = tally(r.link, 0x3DF, 0x79, 0x7A);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.alive, "a ping between ticks leaves the wire silent");
+}
+
+void test_passive_never_pongs(void) {
+  // A real radio owns the handshake. Passive injects data and answers NOTHING — pings
+  // included, or we and the radio would double-answer every ping on a vehicle bus.
+  CarRig r;
+  r.d.begin();
+  r.d.setPassive(true);
+  r.clk.advance(400);
+  r.link.inject(affatest::panelPeerAlive());
+  r.d.poll();
+  Frame f;
+  TEST_ASSERT_FALSE_MESSAGE(r.link.takeSent(f), "passive transmits nothing, pong included");
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +437,10 @@ int main(int, char**) {
   RUN_TEST(test_a_foreign_cluster_token_is_not_answered);
   RUN_TEST(test_updatelist_heartbeat_is_paced_by_the_clock);
   RUN_TEST(test_a_stalled_loop_does_not_produce_a_catch_up_burst);
+  RUN_TEST(test_carminat_answers_a_ping_between_heartbeats);
+  RUN_TEST(test_the_pong_is_paced_against_a_ping_storm);
+  RUN_TEST(test_updatelist_does_not_pong);
+  RUN_TEST(test_passive_never_pongs);
   RUN_TEST(test_peer_deadline_holds_at_4999ms);
   RUN_TEST(test_peer_deadline_fires_at_5001ms_and_drops_funcsreg);
   RUN_TEST(test_peer_loss_is_not_a_poll_count);

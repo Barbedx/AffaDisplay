@@ -93,6 +93,11 @@ constexpr uint32_t kForceRecoveryMs = 250;
 // is no honest way around it.
 constexpr uint32_t kWarmUpMs = 750;
 
+// What the panel's own clock is set to once the glass is warm, four ASCII digits "HHMM".
+// A fixed value on purpose: this board has no RTC and no NTP by the time the sequence
+// runs, and the goal state is verifiable — the glass must read SUCCESS and 10:00.
+constexpr const char* kClockHHMM = "1000";
+
 // ---------------------------------------------------------------------------
 // Screen geometry and cadence — the one set of numbers worth understanding
 // ---------------------------------------------------------------------------
@@ -356,6 +361,16 @@ bool     g_popupUp     = false;
 uint32_t g_popupNextMs = 0;
 uint32_t g_popupUntil  = 0;
 uint32_t g_popupCount  = 0;
+
+// The clock is HALF THE GOAL STATE ("SUCCESS and 10:00"), so it is a LATCHED goal with a
+// paced re-issue, not a fire-and-forget step. The rows survive any failed render because
+// pumpScreen() republishes them every iteration; the clock needs the same property by
+// hand, or one Timeout right after warm-up loses it until an unrelated sync loss happens
+// to replay the whole sequence.
+bool     g_clockOk      = false;   // its render completed Ok; cleared by restart()
+uint32_t g_clockReq     = 0;       // the setTime render in flight, 0 when none
+uint32_t g_clockRetryAt = 0;       // earliest re-issue after a failure
+constexpr uint32_t kClockRetryMs = 5000;
 
 // ---------------------------------------------------------------------------
 // LISTEN BEFORE YOU SPEAK
@@ -624,8 +639,10 @@ uint32_t g_timeouts    = 0;
 uint32_t g_syncLosses  = 0;
 uint32_t g_nextSoakMs  = kSoakReportMs;
 
-// The two scrolling rows' content. Row 2 is generated, because it carries the clock.
-char g_text0[AFFA_TEXT_MAX] = "SUCCESS - AFFADISPLAY 0.4.0";
+// Row 0 is the goal state and it HOLDS STILL: setup() gives it scroll 0, so the word is
+// readable from across the room the moment the first paint lands, rather than sliding
+// past. Row 1 scrolls to prove the link is alive. Row 2 is generated — the uptime clock.
+char g_text0[AFFA_TEXT_MAX] = "SUCCESS";
 char g_text1[AFFA_TEXT_MAX] = "HELLO ABADON - WELCOME FROM HELL";
 
 // ---------------------------------------------------------------------------
@@ -648,10 +665,16 @@ void buildClockRow(uint32_t upMs, char* out, size_t n) {
 
 void restart(const char* why) {
   logmsg("sequence restart: %s", why);
-  g_step       = Step::WaitPanel;
-  g_inFlight   = 0;
-  g_powerIsOn  = false;
-  g_popupUp    = false;
+  g_step         = Step::WaitPanel;
+  g_inFlight     = 0;
+  g_powerIsOn    = false;
+  g_popupUp      = false;
+  g_clockOk      = false;       // the panel may have lost power; the clock goes out again
+  g_clockReq     = 0;
+  g_clockRetryAt = ::millis();  // NOT 0: expired(now, 0) is FALSE for the entire second
+                                // half of the millis() range (signed compare), which
+                                // would park the retry for ~25 days after a sync loss on
+                                // a long soak. Stamping "due now" is wrap-proof.
   g_rows.invalidate();          // whatever was on the glass, assume it is gone
 }
 
@@ -920,10 +943,11 @@ a{color:#8ab}
 <button onclick=go('/api/txgate?on=0')>TX gate SHUT (go silent)</button>
 <button onclick=go('/api/txgate?on=1')>TX gate open</button>
 <button onclick=go('/api/trace')>re-arm trace</button>
-<div class=row>The board boots SILENT and only speaks once it has heard the panel. If
-reception stops while it is talking, the trace below <b>freezes</b> and it goes quiet again
-&mdash; so the last frames before the bus died stay readable. Identical frames are collapsed
-into one row with a repeat count.</div>
+<div class=row>The board boots ARMED &mdash; NORMAL mode, gate open, ACKing and answering
+from the panel's very first frame, because the seconds after power-on are the only window
+in which a fresh panel is polite. If reception stops while it is talking, the trace below
+<b>freezes</b> so the last frames before the bus died stay readable. Identical frames are
+collapsed into one row with a repeat count.</div>
 <pre id=f>...</pre>
 </fieldset>
 
@@ -1013,7 +1037,7 @@ void routes() {
     snprintf(b, sizeof(b),
              "uptimeMs   %lu\n"
              "step       %s\n"
-             "           power %s   popup %s (#%lu)   inFlight %lu   txGate %s\n"
+             "           power %s   popup %s (#%lu)   inFlight %lu   txGate %s   clock %s\n"
              "heard      rx %lu   tx %lu   lastRx %lu ms ago%s\n"
              "mode       %s\n"
              "gate       %s   deafEvents %lu   trace %s\n"
@@ -1034,6 +1058,7 @@ void routes() {
              g_powerIsOn ? "on" : "off",
              g_popupUp ? "up" : "down", static_cast<unsigned long>(g_popupCount),
              static_cast<unsigned long>(g_inFlight), g_gateOpen ? "open" : "SHUT",
+             g_clockOk ? "SET 10:00" : "not set",
              static_cast<unsigned long>(rxSeen), static_cast<unsigned long>(txSeen),
              static_cast<unsigned long>(rxSeen ? nowMs - lastRx : 0),
              rxSeen ? "" : "   <-- WE HAVE NEVER HEARD THE PANEL",
@@ -1558,7 +1583,7 @@ void setup() {
   g_gateOpen   = true;
   g_gateOpenMs = 0;
 
-  g_rows.setScroll(0, kSpeedFast);
+  g_rows.setScroll(0, 0);            // static: SUCCESS holds still and stays readable
   g_rows.setScroll(1, kSpeedMedium);
   g_rows.setScroll(2, kSpeedSlow);
 
@@ -1579,9 +1604,9 @@ void setup() {
   logmsg("CAN was up %lu ms before WiFi finished - that is the whole change",
          static_cast<unsigned long>(millis()));
 
-  logmsg("up: rows %lu/%lu/%lu ms, popup every %lus for %lus",
-         static_cast<unsigned long>(kSpeedFast), static_cast<unsigned long>(kSpeedMedium),
-         static_cast<unsigned long>(kSpeedSlow),
+  logmsg("up: rows static/%lu/%lu ms, clock %s, popup every %lus for %lus",
+         static_cast<unsigned long>(kSpeedMedium),
+         static_cast<unsigned long>(kSpeedSlow), kClockHHMM,
          static_cast<unsigned long>(kPopupEveryMs / 1000),
          static_cast<unsigned long>(kPopupHoldMs / 1000));
 }
@@ -1606,11 +1631,26 @@ void loop() {
   const affa::rtos::Status st = g_task.status();
 
   // ---- one place where a render's fate is accounted for -------------------
+  // `wasInFlight` is sampled BEFORE pollRender(), which zeroes g_inFlight on completion —
+  // it is the only way to still know WHOSE completion this was.
   affa::Result res = affa::Result::Ok;
+  const uint32_t wasInFlight = g_inFlight;
   switch (pollRender(res)) {
+    case 1:
+      if (g_clockReq && wasInFlight == g_clockReq) {
+        g_clockOk  = true;
+        g_clockReq = 0;
+        logmsg("panel clock reads %c%c:%c%c",
+               kClockHHMM[0], kClockHHMM[1], kClockHHMM[2], kClockHHMM[3]);
+      }
+      break;
     case 2:
       ++g_renderFails;
       logmsg("render failed: %s", resultName(res));
+      if (g_clockReq && wasInFlight == g_clockReq) {
+        g_clockReq     = 0;                       // Live re-issues it after the pause
+        g_clockRetryAt = now + kClockRetryMs;
+      }
       // LinkDown and Cancelled mean the world under us changed; anything else is a single
       // screen we can simply draw again. Force the redraw either way.
       g_rows.invalidate();
@@ -1622,6 +1662,10 @@ void loop() {
                static_cast<unsigned long>(g_inFlight),
                static_cast<unsigned long>(kRenderTimeoutMs));
         g_inFlight = 0;
+        if (g_clockReq && wasInFlight == g_clockReq) {
+          g_clockReq     = 0;
+          g_clockRetryAt = now + kClockRetryMs;
+        }
         g_rows.invalidate();
       }
       break;
@@ -1672,9 +1716,10 @@ void loop() {
       }
       if (!affa::expired(now, g_deadline)) break;
       logmsg("glass warm - going live");
-      g_popupNextMs = now + kPopupEveryMs;
-      g_nextSoakMs  = now + kSoakReportMs;
-      g_step        = Step::Live;
+      g_popupNextMs  = now + kPopupEveryMs;
+      g_nextSoakMs   = now + kSoakReportMs;
+      g_clockRetryAt = now;      // clock due immediately; wrap-proof on the boot path too
+      g_step         = Step::Live;
       break;
 
     case Step::Live:
@@ -1689,6 +1734,17 @@ void loop() {
         break;
       }
       if (!g_powerIsOn) break;                  // nothing to draw on a dark panel
+      // The clock goes out FIRST — before the rows ever take the render slot — and keeps
+      // being re-issued (paced by kClockRetryMs) until one attempt completes Ok. The
+      // completion accounting above is what latches g_clockOk and what schedules the
+      // retry after a failure or an abandonment.
+      if (!g_clockOk && !g_clockReq && !g_inFlight && affa::expired(now, g_clockRetryAt)) {
+        if (issue(g_task.setTime(kClockHHMM), now, "setTime")) {
+          g_clockReq     = g_inFlight;
+          g_clockRetryAt = now + kClockRetryMs;
+        }
+        break;
+      }
       pumpScreen(now);
       break;
   }

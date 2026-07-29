@@ -346,6 +346,9 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   bool handleSyncFrame(const Frame& f);
   bool handleAckFrame(const Frame& f);
   void sendGenericAck(uint16_t id);      // the 0x74 reply on id|replyFlag
+  void sendAlive();                      // the B9/79 heartbeat frame — ONE builder, so the
+                                         // paced tick and the reply-to-ping path cannot
+                                         // drift apart byte-wise
   bool isOurTxId(uint16_t id) const;
   bool knownFunc(uint16_t id) const;
 
@@ -402,6 +405,9 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // Earliest millisecond at which another hello burst may go out. Paces the ANSWER to the
   // sync request, which the panel can ask for 1500 times a second. See AFFA_HELLO_MIN_MS.
   uint32_t  _nextHelloMs    = 0;
+  // Earliest millisecond at which another reply-to-ping heartbeat may go out — same shape,
+  // same reason: the storm repeats `69` at line rate too. See AFFA_PING_REPLY_MIN_MS.
+  uint32_t  _nextPongMs     = 0;
   SyncState _sync = SyncState::Failed;
   TxTicket  _nextTicket    = 1;
   TxTicket  _lastCompleted = kNoTicket;

@@ -183,9 +183,22 @@ void test_the_width_is_the_injected_one(void) {
   Marquee wide(geom(20, 0, 100));
   wide.setText("ABCDEFGH", 0);
   wide.window(0, buf, sizeof(buf));
-  // 20 cells over an 8-character string wraps twice and a bit.
-  TEST_ASSERT_EQUAL_STRING_MESSAGE("ABCDEFGHABCDEFGHABCD", buf,
-                                   "a window wider than the text wraps rather than pads");
+  // A text that FITS the window renders ONCE, blank-filled — 0.4.1. The previous contract
+  // wrapped it modulo the text ("ABCDEFGHABCDEFGHABCD"), which painted the word 2.5 times
+  // on the glass and broke RowScreen's "a static row shows the first width characters".
+  // The wrap is a LOOP device and a loop needs something hidden to reveal; it applies only
+  // when the text is longer than the window.
+  TEST_ASSERT_EQUAL_STRING_MESSAGE("ABCDEFGH            ", buf,
+                                   "a window wider than the text pads rather than wraps");
+
+  // And a fitting text has no phase: whatever position the clock arithmetic would give,
+  // the window is pinned to 0 and renders identically.
+  wide.setActive(true, 0);
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(0, wide.windowAt(100000),
+                                   "a fitting text holds position 0 for ever");
+  wide.window(7, buf, sizeof(buf));   // even a stale pos must not rotate the render
+  TEST_ASSERT_EQUAL_STRING_MESSAGE("ABCDEFGH            ", buf,
+                                   "window() ignores pos for a fitting text");
 }
 
 void test_the_step_rate_is_the_injected_one(void) {

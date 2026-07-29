@@ -25,6 +25,20 @@ struct SyncProfile {
   uint8_t  helloCount;    // Carminat 3 (the second and third are IDENTICAL — two sendCan
                           // calls in the legacy source, and present in the capture),
                           // UpdateList 1
+  bool replyToPing = false;   // ANSWER the panel's `69` ping with an immediate heartbeat,
+                          // in addition to the paced one. MeganeCAN's Carminat driver —
+                          // the implementation proven against a real panel — calls tick()
+                          // from its 0x69 handler (CarminatDisplay.cpp:346), so its B9
+                          // follows the ping within milliseconds and reads as a REPLY on
+                          // the wire; a paced-only B9 merely transmits nearby. Nobody has
+                          // a spec for the panel, so whether it TREATS B9 as an answer is
+                          // unknown — this flag exists so the Carminat profile can be
+                          // wire-identical to the driver that worked, without dragging
+                          // the legacy tick()'s other two defects back in (the extra BA
+                          // and the watchdog re-armed from the peer; both stay gone).
+                          // Paced by AFFA_PING_REPLY_MIN_MS: a storming panel repeats 69
+                          // at line rate, and one pong per ping is the 4400-frames/s trap
+                          // all over again. Carminat true, UpdateList/Cluster false.
 };
 
 } // namespace affa

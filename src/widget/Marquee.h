@@ -99,6 +99,8 @@ class Marquee {
 
   // Copy the `width` characters starting at `pos` into `out`, NUL-terminated. `outSize`
   // includes the NUL; a buffer smaller than width+1 is truncated rather than overrun.
+  // A text (incl. gap) that FITS the window is rendered once, blank-filled, with `pos`
+  // ignored — the modulo wrap is a loop device and applies only to longer texts (0.4.1).
   void window(uint16_t pos, char* out, uint8_t outSize) const;
 
   // 0 disables the marquee entirely — there is nothing to scroll and nothing to draw.

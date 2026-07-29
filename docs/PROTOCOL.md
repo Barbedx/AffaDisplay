@@ -265,6 +265,23 @@ latched on those ACKs and on nothing else.
 - **On expiry:** state is *assigned* `FAILED` — which clears `PEER_ALIVE`, `START` **and
   `FUNCSREG` together**. Registration must be redone before the next render. `[IMPL]`
 
+#### The ping is ANSWERED on Carminat, and the reply is a second heartbeat
+
+The proven Carminat driver calls its 1 Hz tick from inside the `0x69` handler
+(`CarminatDisplay.cpp:346`), so on the wire its `B9` follows the panel's `69` within
+milliseconds — a pong, whatever the panel makes of it — and a healthy link carries **two**
+heartbeats per second, one paced and one per ping. `[IMPL]`
+
+Whether the panel *requires* the reply is unknown (nobody has a spec for the panel; the
+2026-07-28 registration stall is the suspected symptom of its absence, unproven). This
+library reproduces the behaviour for the Carminat profile only (`SyncProfile::replyToPing`),
+with the reply paced by `AFFA_PING_REPLY_MIN_MS` — an unacknowledged panel repeats `69` at
+line rate (126 copies in 32 ms `[CAP]`), and one reply per copy would be §8's hello storm
+again. What is deliberately NOT reproduced from the legacy handler: the watchdog stays
+re-armed from our own loop, and no `BA` accompanies the reply. `[DERIVED]` — no capture yet
+shows the panel reacting differently; measure on the bench before believing more than
+"wire-identical to the driver that worked".
+
 ---
 
 ## 4. Transport — ISO-TP shaped, but it is not ISO 15765-2
