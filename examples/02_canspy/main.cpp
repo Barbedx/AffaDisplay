@@ -1013,15 +1013,23 @@ uint32_t g_jsBase = 0;
 uint32_t g_jsGot[kSweepCount] = {0};
 
 // The same window as jamWindow(), against an arbitrary pin.
-uint32_t sweepWindow(gpio_num_t pin, uint32_t windowMs, bool jam) {
-  uint32_t frames = 0;
+// txLowPct carries the same guard jamWindow() has, and it matters MORE here. This sweep
+// exists to find which pin reaches the bus; a pad that never went low reports "no effect",
+// which is indistinguishable from "this pin is not the transmit path". Get that wrong on
+// every row and the sweep confidently answers "no pin can disturb the bus" having driven
+// nothing at all. Some candidates are strapping pins that may be held externally, so this is
+// not a theoretical worry.
+uint32_t sweepWindow(gpio_num_t pin, uint32_t windowMs, bool jam, int* txLowPct) {
+  uint32_t frames = 0, pulses = 0, low = 0;
   const uint32_t t0 = millis();
   while (millis() - t0 < windowMs) {
     const uint32_t c0 = millis();
     while (millis() - c0 < 50) {
       if (jam) {
         gpio_set_level(pin, 0);
-        delayMicroseconds(100);
+        delayMicroseconds(20);
+        low += gpio_get_level(pin) ? 0u : 1u; ++pulses;
+        delayMicroseconds(80);
         gpio_set_level(pin, 1);
         delayMicroseconds(100);
       } else {
@@ -1032,6 +1040,7 @@ uint32_t sweepWindow(gpio_num_t pin, uint32_t windowMs, bool jam) {
     }
     delay(1);
   }
+  if (txLowPct) *txLowPct = pulses ? static_cast<int>((low * 100) / pulses) : -1;
   return frames;
 }
 
@@ -1056,7 +1065,7 @@ void runJamSweep() {
     logmsg("jam sweep: decoder would not install - aborted");
     twai_driver_uninstall();
   } else {
-    g_jsBase = sweepWindow(kRxPin, 800, false);       // pin unused when jam is false
+    g_jsBase = sweepWindow(kRxPin, 800, false, nullptr);   // pin unused when jam is false
     logmsg("jam sweep: baseline %lu frames/800ms", static_cast<unsigned long>(g_jsBase));
 
     if (g_jsBase < 100) {
@@ -1069,14 +1078,18 @@ void runJamSweep() {
         gpio_set_level(p, 1);
         delay(2);
 
-        g_jsGot[i] = sweepWindow(p, 800, true);
+        int txLow = -1;
+        g_jsGot[i] = sweepWindow(p, 800, true, &txLow);
 
         gpio_set_level(p, 1);
         gpio_reset_pin(p);
 
-        const bool hit = (g_jsGot[i] * 4 < g_jsBase);
+        const bool drove = (txLow >= 95);
+        const bool hit   = drove && (g_jsGot[i] * 4 < g_jsBase);
         logmsg("  GPIO%-2d  %4lu frames  %s", static_cast<int>(p),
-               static_cast<unsigned long>(g_jsGot[i]), hit ? "<<< JAMS THE BUS" : "no effect");
+               static_cast<unsigned long>(g_jsGot[i]),
+               !drove ? "PAD DID NOT GO LOW - row proves nothing"
+                      : (hit ? "<<< JAMS THE BUS" : "no effect"));
         if (hit && g_jsFound < 0) g_jsFound = static_cast<int>(p);
         delay(20);
       }
