@@ -127,6 +127,21 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   uint8_t   queued()     const;   // jobs waiting behind the active one
   Stats     stats()      const;   // forwarded from the link
 
+  // ---- link recovery ------------------------------------------------------
+  // COUNTED, NEVER SAMPLED. A controller that goes bus-off and comes back looks, in any
+  // single sample, exactly like one that is dead — and exactly like one that is healthy,
+  // depending on when you looked. Neither snapshot is the truth. What matters is how often
+  // it leaves RUNNING and how long it stays out, so those are the numbers kept.
+  struct LinkHealth {
+    uint32_t recoveries = 0;   // ICanLink::recover() calls that ended with the link up
+    uint32_t failures   = 0;   // ...and that did not
+    uint32_t flaps      = 0;   // times the link has left the live state since begin()
+    uint32_t downMs     = 0;   // total time not live, summed over completed outages
+    uint32_t downSince  = 0;   // start of the outage in progress; 0 when live
+    uint32_t nextTryMs  = 0;   // when the next recover() is due; 0 when live
+  };
+  LinkHealth linkHealth() const;
+
   // ---- capability ---------------------------------------------------------
   bool supports(Feature f) const override = 0;   // each panel answers for itself
 
@@ -307,7 +322,14 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   };
 #endif
 
-  void pumpRx();            // ALWAYS first in poll(); delivers keys
+  // ALWAYS first in poll(), ahead even of pumpRx(): a controller that is down delivers no
+  // frames, so there is nothing for pumpRx() to lose by being second, and every millisecond
+  // spent polling a dead controller before asking it to come back is wasted.
+  //
+  // NEVER GIVES UP AND NEVER REBOOTS. See AffaConfig.h "Link recovery" for why the backoff
+  // caps instead.
+  void pumpLink();
+  void pumpRx();            // delivers keys; second only to pumpLink()
 #if AFFA_ENABLE_ISOTP_RX
   void pumpText(const Frame& f);   // reassemble + decode inbound text, from pumpRx()
 #endif
@@ -397,6 +419,12 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   uint32_t  _lastOverflow = 0;  // last ICanLink ringOverflow we reported
   uint32_t  _txDropCount  = 0;  // frames ICanLink::send() refused, counted here so the
                                 // LinkError event does not need a driver status read
+
+  // Link recovery. `_linkDownSince` is 0 when the link is live, which is what makes it both
+  // the outage stamp and the "were we live last time we looked" flag — one variable, so the
+  // two can never disagree.
+  LinkHealth _health{};
+  uint32_t   _recoverBackoffMs = 0;   // 0 = not yet armed; doubles per attempt
 
   KeyCb      _keyCb  = nullptr;   void* _keyCtx  = nullptr;
   CompleteCb _cplCb  = nullptr;   void* _cplCtx  = nullptr;

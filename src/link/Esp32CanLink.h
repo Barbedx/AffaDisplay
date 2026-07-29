@@ -44,11 +44,20 @@ class Esp32CanLink final : public ICanLink {
   // has why the forced path is the only one that completes on a two-node bus; the bench
   // notes have why 250 and not 0 or 2000.
   //
-  // ListenOnly emits no dominant bit at all, so it cannot be driven bus-off or disturb
-  // anything. It answers the first question worth asking on a bench that will not talk:
-  // can we read this bus AT ALL? Clean here and broken in Normal isolates the fault to our
-  // transmit side. Normal is the only mode the library can work in — an unacknowledged
-  // frame is retransmitted by the panel forever.
+  // NORMAL IS THE ONLY MODE THAT WORKS, AND ListenOnly IS REFUSED AT RUNTIME.
+  //
+  // begin(..., LinkMode::ListenOnly) logs an error and returns false — it does NOT bring the
+  // link up in some degraded mode. collin80/esp32_can has no safe place to enter listen-only:
+  // setListenOnlyMode() is disable()+enable(), and before begin() that enable() starts tasks
+  // which block on queues _init() has not created yet (dead board, before WiFi, i.e. before
+  // OTA — measured, at the cost of a cable), while after begin() it is the live driver
+  // reinstall this class prohibits outright. The .cpp carries the full reasoning.
+  //
+  // THE SUBSTITUTE, for the question listen-only exists to answer — "can we read this bus at
+  // all, and is the noise ours?" — is setTxEnabled(false): the software TX gate. It stops
+  // every frame WE would send while the controller keeps ACKing other nodes in hardware,
+  // which a two-node bus requires. If busErr keeps climbing and rxFrames stays 0 while the
+  // gate is shut, we are silent and cannot be the cause; the fault is on the wire.
   enum class LinkMode : uint8_t { Normal, ListenOnly };
 
   bool begin(CanPins pins, uint32_t bitrate = 500000, uint32_t forceRecoveryMs = 0,
@@ -58,7 +67,33 @@ class Esp32CanLink final : public ICanLink {
                                          // worst case; false if the TX gate is shut
   bool  recv(Frame& out) override;       // pops the RX ring
   bool  isLive() const override;         // began, TX gate open, controller RUNNING
+  bool  healthy() const override;        // began and controller RUNNING — GATE IGNORED
   Stats stats() const override;
+
+  // THE PROHIBITION'S ONE EXCEPTION, and the only driver call this class makes after
+  // begin() besides send() and twai_get_status_info(). CONTRACT rule 4a.
+  //
+  // Restarts the driver in place — ESP32CAN::forceDriverRestart(), which is disable() +
+  // settle delay + enable(). That is exactly what the driver's OWN watchdog task calls for a
+  // bus-off controller (esp32_can_builtin.cpp:140), so calling it from the poll task is the
+  // same safety class as the path already shipping, PROVIDED it is not called from task_CAN.
+  // AffaDisplayBase::pumpLink() is its only caller and runs on the poll owner, never in a
+  // driver callback.
+  //
+  // Why it needs no re-configuration afterwards: filters[], the general callback and the pin
+  // configuration are members of ESP32CAN and survive the cycle. Re-issuing watchFor() would
+  // consume a SECOND of the 32 filter slots for the same id.
+  //
+  // BLOCKS for the restart's settle delay — hundreds of milliseconds. Refuses while the
+  // controller is RECOVERING, because twai_driver_uninstall() rejects that state and a
+  // half-torn-down driver is worse than a bus-off one; the caller's backoff will come back.
+  //
+  // Returns whether the controller is RUNNING AFTERWARDS, never merely that a call was made.
+  bool recover() override;
+
+  // How many times recover() has actually restarted the driver. Survives nothing; it is here
+  // to be read off a status endpoint before deciding the fault is in the wire.
+  uint32_t restarts() const { return _restarts; }
 
   // "Silent mode" is a SOFTWARE TX gate — send() returns false. NOT a driver mode change
   // (the prohibition). The controller still ACKs other nodes, which a two-node bus requires.
@@ -94,6 +129,7 @@ class Esp32CanLink final : public ICanLink {
   Stats _stats{};                 // poll()-task only
   bool  _began = false;
   bool  _txEnabled = true;
+  uint32_t _restarts = 0;         // completed forceDriverRestart() calls
 };
 
 } // namespace affa

@@ -25,6 +25,32 @@ struct ICanLink {
   // in-flight jobs complete LinkDown. Default true.
   virtual bool isLive() const { return true; }
 
+  // "Is there a working controller at all", as distinct from isLive()'s "may I transmit
+  // right now". The two differ for exactly one reason and it matters: a SOFTWARE TX GATE.
+  //
+  // An application shuts the gate deliberately — for the duration of an OTA write, or to run
+  // the bench's is-it-us-or-the-bus test — and isLive() correctly goes false so that renders
+  // are held rather than dropped on the floor. But the CONTROLLER is perfectly healthy, and
+  // a recovery layer that watched isLive() would tear the driver down in the middle of the
+  // flash write it was gated for. So recovery watches THIS, and it ignores the gate.
+  //
+  // Defaults to isLive(), so a link with no gate needs no override.
+  virtual bool healthy() const { return isLive(); }
+
+  // Bring a link that healthy() reports down back into service, and return whether it is up
+  // AFTERWARDS — not whether an attempt was made.
+  //
+  // THE DEFAULT IS "I HAVE NO RECOVERY", which is why it is false and not true: a link that
+  // cannot recover must not report that it did, or AffaDisplayBase's backoff would reset on
+  // every attempt and spin. Optional with a body so every existing implementation — the
+  // loopback, every consumer's own — keeps compiling untouched.
+  //
+  // Called ONLY from poll(), i.e. from the one task that owns the FSM, and never from a
+  // driver callback. It MAY block for the duration of a driver restart (hundreds of ms);
+  // that is the one place in this library where that is sanctioned, because the alternative
+  // is a controller that is down for ever.
+  virtual bool recover() { return false; }
+
   virtual Stats stats() const { return Stats{}; }
 };
 

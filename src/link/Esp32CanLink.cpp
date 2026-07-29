@@ -228,14 +228,84 @@ bool Esp32CanLink::send(const Frame& f) {
 bool Esp32CanLink::recv(Frame& out) { return _rx.pop(out); }
 
 bool Esp32CanLink::isLive() const {
-  if (!_began || !_txEnabled) return false;
+  // The gate is the ONLY thing this adds over healthy(), and it is what makes isLive() mean
+  // "may I transmit right now" while healthy() means "is there a controller at all".
+  if (!_txEnabled) return false;
+  return healthy();
+}
+
+bool Esp32CanLink::healthy() const {
+  if (!_began) return false;
   twai_status_info_t st;
-  // Side-effect-free snapshot. This is the whole of our bus-off handling: report it and
-  // let AffaDisplayBase stop enqueueing. The driver's watchdog owns recovery, and its
-  // default path ends in TWAI_STATE_STOPPED with no restart — which is precisely what
-  // this returns false for.
+  // Side-effect-free snapshot. The driver's own watchdog reacts to BUS_OFF only, so a
+  // controller left in TWAI_STATE_STOPPED — which is where forceRecoveryMs=0 leaves it, and
+  // where a failed recovery leaves it — is never restarted by anybody. That is precisely
+  // what this returns false for, and what AffaDisplayBase::pumpLink() now acts on by calling
+  // recover() rather than leaving it to the application to reboot the board.
   if (twai_get_status_info(&st) != ESP_OK) return false;
   return st.state == TWAI_STATE_RUNNING;
+}
+
+bool Esp32CanLink::recover() {
+  // Never before begin(). There is no driver to restart, and forceDriverRestart() would
+  // call enable() on a configuration that setCANPins() has never been given.
+  if (!_began) return false;
+
+  twai_status_info_t st;
+  if (twai_get_status_info(&st) != ESP_OK) {
+    // The status read itself failed, which means the driver is not installed at all. That is
+    // not a state a restart is defined over — enable() would install on top of nothing known
+    // — so report the link down and let the backoff try again.
+    AFFA_LOGE(kTag, "recover(): twai_get_status_info() failed; driver not installed?");
+    return false;
+  }
+
+  if (st.state == TWAI_STATE_RUNNING) return true;   // nothing to do; somebody beat us to it
+
+  // RECOVERING is the driver's own bus-off path in progress. twai_driver_uninstall() rejects
+  // it (IDF requires STOPPED or BUS_OFF), so disable() would leave both tasks deleted and the
+  // driver still installed — and enable()'s install would then fail with INVALID_STATE and
+  // return early, killing the link permanently. Refusing here is what keeps a transient
+  // bus-off from becoming that.
+  if (st.state == TWAI_STATE_RECOVERING) {
+    AFFA_LOGI(kTag, "recover(): controller is RECOVERING — leaving it to finish");
+    return false;
+  }
+
+  AFFA_LOGW(kTag, "restarting the TWAI driver (state %u, txErr %lu, rxErr %lu, busErr %lu)",
+            static_cast<unsigned>(st.state),
+            static_cast<unsigned long>(st.tx_error_counter),
+            static_cast<unsigned long>(st.rx_error_counter),
+            static_cast<unsigned long>(st.bus_error_count));
+
+  // Shut the software gate across the restart and restore the CALLER'S setting afterwards,
+  // not an unconditional true: an application that gated TX off on purpose — an OTA write is
+  // in progress, the bench is running the is-it-us test — must not have that silently undone
+  // by a recovery it did not ask for.
+  const bool wasEnabled = _txEnabled;
+  _txEnabled = false;
+
+  // disable() + settle + enable(). Pins, filters and the general callback are ESP32CAN
+  // members and survive; re-issuing watchFor() here would burn a second filter slot on the
+  // same id. See the header.
+  CAN0.forceDriverRestart();
+  ++_restarts;
+
+  _txEnabled = wasEnabled;
+
+  // A frame that task_CAN was pushing when it was deleted is lost, not corrupting: AffaRing
+  // publishes its head last (core/AffaRing.h). So the ring is NOT reset here — doing so
+  // would throw away frames the panel sent that we have not decoded yet, and the overflow
+  // counter would lose the history that says whether we are keeping up.
+  if (twai_get_status_info(&st) != ESP_OK || st.state != TWAI_STATE_RUNNING) {
+    AFFA_LOGE(kTag, "restart did not leave the controller RUNNING (state %u)",
+              static_cast<unsigned>(st.state));
+    return false;
+  }
+
+  AFFA_LOGI(kTag, "TWAI driver restarted; controller RUNNING (restart %lu)",
+            static_cast<unsigned long>(_restarts));
+  return true;
 }
 
 Stats Esp32CanLink::stats() const {

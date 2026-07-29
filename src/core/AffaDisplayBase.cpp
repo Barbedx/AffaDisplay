@@ -56,6 +56,7 @@ void AffaDisplayBase::poll() {
   // The order is the contract. Do not reorder, and do not add an early-out that can skip
   // a step: key delivery latency is bounded by the poll period ALONE precisely because
   // pumpTx() is never entered before pumpRx() has returned.
+  pumpLink();
   pumpRx();
   pumpSync();
   pumpTx();
@@ -364,6 +365,94 @@ bool AffaDisplayBase::isOurTxId(uint16_t id) const {
 bool AffaDisplayBase::knownFunc(uint16_t id) const {
   for (uint8_t i = 0; i < _funcCount; ++i) if (_funcIds[i] == id) return true;
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Link recovery FSM — the last thing an application had to own
+// ---------------------------------------------------------------------------
+
+AffaDisplayBase::LinkHealth AffaDisplayBase::linkHealth() const { return _health; }
+
+void AffaDisplayBase::pumpLink() {
+  const uint32_t now = _clock.millis();
+
+  // healthy(), NOT isLive(): the difference is the software TX gate, and an application that
+  // shut it on purpose — mid-OTA, or running the is-it-us-or-the-bus test — must not have
+  // the driver torn down underneath it as a reward. See ICanLink::healthy().
+  if (_link.healthy()) {
+    if (_health.downSince) {                       // it came back — the normal case, and it
+      _health.downMs += now - _health.downSince;   // is the one that must be cheap
+      _health.downSince = 0;
+      _health.nextTryMs = 0;
+      _recoverBackoffMs = 0;
+      AFFA_LOGI(kTag, "link live again (flap %lu, %lu ms down in total)",
+                static_cast<unsigned long>(_health.flaps),
+                static_cast<unsigned long>(_health.downMs));
+    }
+    return;
+  }
+
+  // ---- the link is down -----------------------------------------------------
+  if (_health.downSince == 0) {
+    _health.downSince = now;
+    ++_health.flaps;
+    // The FIRST attempt is a full AFFA_LINK_RECOVER_MS away, not immediate. A controller
+    // that has just gone bus-off with forceRecoveryMs armed is ALREADY being restarted by
+    // the driver's own watchdog task, and a second restart racing that one is how a clean
+    // recovery becomes a wedge. Let the cheap path have its chance first.
+    _recoverBackoffMs = AFFA_LINK_RECOVER_MS;
+    _health.nextTryMs = now + AFFA_LINK_RECOVER_MS;
+  }
+
+#if AFFA_LINK_RECOVER_MS
+  if (!expired(now, _health.nextTryMs)) return;
+
+  // Arm the NEXT deadline before attempting, not after. recover() may block for the whole
+  // of a driver restart, and computing the next deadline from a post-call clock read would
+  // make the backoff measure "gap between attempts" instead of "time since we started
+  // trying" — which on a slow restart silently doubles every interval.
+  _recoverBackoffMs = (_recoverBackoffMs >= AFFA_LINK_RECOVER_MAX_MS / 2)
+                          ? static_cast<uint32_t>(AFFA_LINK_RECOVER_MAX_MS)
+                          : _recoverBackoffMs * 2;
+  _health.nextTryMs = now + _recoverBackoffMs;
+
+  AFFA_LOGW(kTag, "link down %lu ms — asking it to recover (attempt %lu)",
+            static_cast<unsigned long>(now - _health.downSince),
+            static_cast<unsigned long>(_health.recoveries + _health.failures + 1));
+
+  if (!_link.recover()) {
+    // A link with no recover() of its own lands here every time, which is correct and is
+    // why the default returns false: the backoff walks out to its ceiling and the counter
+    // says plainly that nothing is working. It must NOT be mistaken for success, or the
+    // backoff would reset on every attempt and spin.
+    ++_health.failures;
+    return;
+  }
+
+  ++_health.recoveries;
+  AFFA_LOGI(kTag, "link recovered after %lu ms",
+            static_cast<unsigned long>(now - _health.downSince));
+
+  // THE CONTROLLER IS NEW, SO THE HANDSHAKE IS VOID. A restarted driver has lost nothing of
+  // ours — the queue, the tickets and the hold windows are all still here — but the PANEL
+  // has been talking to a node that stopped answering, and whatever registration it had for
+  // us is worthless. Tear the handshake down to the state begin() leaves it in and let
+  // pumpSync() run it again from the top; pumpTx() splices the fresh 0x70 burst in front of
+  // the held renders, exactly as it does after a peer loss.
+  //
+  // The queued renders deliberately SURVIVE. They are what the application asked to be on
+  // the glass, they are already bounded by their own hold windows, and dropping them here
+  // would put the "re-issue it yourself" burden straight back where this release took it
+  // from.
+  setSync(SyncState::Failed | SyncState::Start, EventKind::PeerLost);
+  dropRegistrations();
+  _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
+  _nextSyncMs     = now;                      // handshake on the very next poll()
+  for (uint8_t i = 0; i < _qCount; ++i) {
+    if (_queue[i].kind == JobKind::Payload && !_queue[i].started)
+      _queue[i].holdUntilMs = now + AFFA_TX_HOLD_MS;
+  }
+#endif  // AFFA_LINK_RECOVER_MS
 }
 
 // ---------------------------------------------------------------------------

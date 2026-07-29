@@ -89,6 +89,7 @@
 #  define AFFA_ENABLE_MARQUEE 1
 #endif
 
+
 // showPopupText / hidePopup (the mode 0x74 overlay). 0: both return NotSupported.
 #ifndef AFFA_ENABLE_POPUP
 #  define AFFA_ENABLE_POPUP 1
@@ -320,6 +321,54 @@
 // or LinkDown immediately, which is the pre-0.3.0 contract.
 #ifndef AFFA_TX_HOLD_MS
 #  define AFFA_TX_HOLD_MS 8000
+#endif
+
+// ---------------------------------------------------------------------------
+// Link recovery: what the library does about a CONTROLLER that has stopped
+// ---------------------------------------------------------------------------
+// THE LAST THING AN APPLICATION STILL HAD TO OWN, AND THE ONE IT OWNED WORST.
+//
+// 0.3.0 recovered everything above the wire — a torn transfer, a lost registration, a panel
+// that went away — and gave up on exactly one thing: a CAN controller that is no longer
+// RUNNING. `Esp32CanLink` does not touch the driver after begin() (docs/ESP32CAN-CONTRACT.md
+// rule 4), so isLive() reported the link down and nothing in the system ever brought it
+// back. The only move left to the application was a reboot, and a reboot is WORSE THAN THE
+// PROBLEM: it does not fix a wire, and ESP.restart() leaves the TWAI block part-configured.
+// Measured on the bench rig across one evening of warm reboots — flaps 7 -> 139, bus errors
+// 0 -> 827 — ending in a controller cycling BUS_OFF beside a perfectly healthy panel. The
+// application's recovery layer is what made the hardware look broken.
+//
+// Nor does the driver close it. ESP32CAN's own watchdog reacts to TWAI_STATE_BUS_OFF ONLY
+// (esp32_can_builtin.cpp:169). A controller in TWAI_STATE_STOPPED — where forceRecoveryMs=0
+// leaves it, and where a failed recovery leaves it — is never restarted by anybody.
+//
+// So the library asks the link to recover itself, through ICanLink::recover(), and keeps
+// asking. How long the controller must be CONTINUOUSLY down before the first attempt:
+#ifndef AFFA_LINK_RECOVER_MS
+#  define AFFA_LINK_RECOVER_MS 3000
+#endif
+
+// The backoff DOUBLES per attempt and stops here. It never gives up and it never escalates
+// to anything louder, and both halves of that are deliberate:
+//
+// A cap rather than a give-up, because "give up" is a decision that needs information this
+// layer does not have. Thirty seconds is cheap enough to run for ever against a genuinely
+// broken wire — a board that sits there retrying and saying so is worth more than one that
+// reboots itself into a flash-wear loop and loses its own log ring — and fast enough that a
+// transient fault costs seconds.
+//
+// A doubling backoff rather than a fixed interval, because a driver restart is not free: it
+// deletes and recreates two tasks and holds the bus down for its settle delay. Retrying that
+// at 3 s for ever against a dead transceiver is its own kind of storm.
+//
+// 0 disables link recovery entirely, which is the pre-0.3.1 contract: isLive() goes false
+// and stays false.
+#ifndef AFFA_LINK_RECOVER_MAX_MS
+#  define AFFA_LINK_RECOVER_MAX_MS 30000
+#endif
+
+#if AFFA_LINK_RECOVER_MS && AFFA_LINK_RECOVER_MAX_MS < AFFA_LINK_RECOVER_MS
+#  error "AFFA_LINK_RECOVER_MAX_MS is the backoff CEILING; it cannot be below the first delay."
 #endif
 
 // Largest single ISO-TP message, in payload bytes before framing.
