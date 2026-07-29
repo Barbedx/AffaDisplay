@@ -1076,8 +1076,17 @@ if (hasFlag(_sync, Failed) || hasFlag(_sync, Start)) {
 RX side, on `syncReplyId`:
 
 * `61 11 xx …` — the panel asks us to announce. Emit `helloCount` frames from
-  `profile.hello`, in order, on `syncId`. Clear `Failed`. If `data[2] == 0x01`, set
-  `Start`. (The live capture shows `61 11 00`, so `Start` is normally not set.)
+  `profile.hello`, in order, on `syncId` — paced to at most one burst per
+  `AFFA_HELLO_MIN_MS`, because an unacknowledged panel repeats the request at line rate
+  and answering each one is a 4400 f/s flood no TX queue can drain. Clear `Failed`. If
+  `len >= 3 && data[2] == 0x01`, the panel is declaring the REGISTRATION VOID: set
+  `Start` AND, if `FuncsReg` is currently set, drop every registration so the next render
+  re-registers from function zero. The drop is guarded on `FuncsReg`, not on the edge of
+  `Start` — `pumpSync()` clears `Start` once a second, and an edge trigger would re-drop
+  mid-registration and livelock the pass it provoked. (Leaving `FuncsReg` set here was
+  the historic bug: every implementation believed it was still registered, the panel
+  believed the opposite, and only a power cycle ever ended the argument. Observed live
+  2026-07-29 as `3CF 61 11 01` repeated at ~1500 f/s.)
 * `69 …` — peer alive. Set `PeerAlive` and **return**. The legacy code called `tick()`
   from here, which emitted an extra heartbeat per ping. It does not any more: exactly
   one `B9` leaves per `AFFA_SYNC_INTERVAL_MS`, which is what the capture shows.

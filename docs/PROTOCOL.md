@@ -581,7 +581,35 @@ Consequences that matter for anyone reading a capture of this bus:
   form or CRC errors — because passive error flags are recessive. Clean does not mean synced.
 - **There is no polite window after a power cycle.** Measured at 1500 frames/s within 8 s of
   the panel being powered up. Any design that assumes it must catch the panel early is wrong.
-- **Bus occupancy is ~92 %.** Anything that must transmit has to fit in what is left.
+- **Bus occupancy is ~35 % on average, not 92 %.** The frames are back-to-back *within* a
+  burst (4+ frames/ms), but the bursts sit in a ~500 ms macro-cycle — measured 2026-07-29
+  as ~126 × `69 00` plus ~500–630 × `61 11 01` per cycle, with tens of milliseconds of idle
+  between bursts. The 92 % figure came from reading one ring sample as continuous. There is
+  always room to transmit; whether a transmission survives is a different question (§8.3).
+
+### 8.3 Reading the controller's own verdict: ECC and the pad, before any theory
+
+Two measurements settle in minutes what days of counter-reading could not, and both are in
+`examples/04_rows` (`/api/ecc`, `/api/pad`):
+
+- **The TWAI error-code-capture register** latches the type, direction and exact bit-field
+  of the first bus error since it was last read. The driver's ISR consumes it on every
+  bus-error interrupt (the read is what re-arms the interrupt), so a poller sees only
+  zeros until the bus-error interrupt enable bit is masked; with it masked, a 1 ms poll
+  reads the first error of every millisecond. On the deadlocked bench this returned
+  `BIT RX @ ACK-SLOT` on essentially every frame — the receiver drove its ACK dominant and
+  sampled it back recessive — plus `BIT TX @ SOF` for our own queued frames: every dominant
+  we drove, in any field, never appeared at our own sample point.
+- **The pad correlation** samples both CAN pins in a single GPIO input-register read at
+  ~170 ns resolution. It proved the TX pad really pulses dominant (one-bit-wide pulses at
+  the per-frame ACK rate, GPIO matrix and output-enable verified correct) while the RX pad
+  — demonstrably alive with panel traffic in the same window — showed recessive in every
+  one of those instants.
+
+Together they exonerate every firmware-controllable layer at once: mode bits, bit timing,
+matrix routing, output enable, the waveform itself, and the controller's own accounting all
+agree. When these two instruments disagree with a theory, the theory is wrong; run them
+before proposing one.
 
 ### 8.2 Registration is bidirectional and the panel keeps its own state
 

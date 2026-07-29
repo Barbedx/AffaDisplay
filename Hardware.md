@@ -55,3 +55,25 @@ Newest last. Times are local (CEDT).
 Power-cycle the panel while the board runs build 4 (which boots silent). A freshly powered
 panel is polite, which is the state our ACK is known to work in. If it dies again,
 `/api/trace` freezes on the transition and holds the last frames before it.
+
+## 2026-07-29 (afternoon session)
+
+| time | image | why | what the link did afterwards |
+|---|---|---|---|
+| ~15:1x | `ex04_rows` build 5 (unlogged by previous session; has `/api/listen`, setListenOnly from 1220f78) | previous session | found running in LISTEN-ONLY, panel in runaway (1500 f/s of `61 11 01` + `69 00`), decoding flawlessly |
+| ~16:0x | *(no flash)* | `/api/kick?ms=1500` — the panel-reaction oracle | panel INDIFFERENT: same ~500 ms macro-cycle (126× `69 00` + ~500-630× `61 11 01`) before and after; our decode dead during the NORMAL window |
+| ~16:2x | `ex04_rows` +ECC probe (884 kB) | read the error-code-capture register — never done before | ECC always EMPTY across 7618 polls while busErr counted hundreds: the driver ISR consumes the capture to re-arm the bus-error interrupt |
+| ~16:3x | `ex04_rows` +ECC, BEI masked | let the capture survive until our poll | **VERDICT: `BIT RX @ ACK-SLOT` ×1996, plus `BIT TX @ SOF` (tec 144-152). Every dominant we drive samples back recessive.** |
+| ~16:4x | `ex04_rows` +`/api/pad` | is the dominant leaving the chip? | GPIO matrix `out_sel[3]=74`, OE on, IO_MUX correct — and the PAD PULSES: ~1770 one-bit-wide dominant pulses/s (the ACKs) |
+| ~16:5x | `ex04_rows` +pad correlation | same-instant CTX/CRX correlation, one register read | **while CTX low: CRX low 0, CRX HIGH 627 (of 627). Our dominant leaves GPIO3 and never appears on GPIO4. Control: CRX shows panel traffic at 10-23% duty in the same window.** |
+
+### What this session establishes
+
+Every firmware-observable point is now measured and correct: matrix routing, output
+enable, pad waveform (real per-frame ACK pulses, correct width, correct rate), and the
+controller's own error capture agreeing with all of it. The segment GPIO3-pad →
+[return path] → GPIO4-pad does not carry our dominant, while carrying the panel's traffic
+perfectly. Firmware has no lever on that segment and no remaining unexplored lever behind
+it. Historically the loop worked after the rig repower on the morning of 07-29 (3395
+ACKed frames, SUCCESS on the glass) and died mid-run 26 minutes later; nothing in any
+firmware image correlates with either edge.

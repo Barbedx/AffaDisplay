@@ -30,9 +30,11 @@ class LoopbackLink final : public ICanLink {
   // The recovery seam, as a test double. Counts every attempt so a test can assert the
   // BACKOFF rather than merely that something happened, and only actually revives the link
   // when the test says so — a link that always recovered could not exercise the path this
-  // exists for, which is a controller that stays broken.
-  bool recover() override {
+  // exists for, which is a controller that stays broken. `force` (the RUNNING-but-deaf
+  // caller evidence) is recorded so the stall-watchdog tests can assert it was passed.
+  bool recover(bool force) override {
     ++_recoverCalls;
+    if (force) ++_forcedRecoverCalls;
     if (!_recoverable) return false;
     _live = true;
     return true;
@@ -51,6 +53,7 @@ class LoopbackLink final : public ICanLink {
   void     setEcho(bool v)        { _echo = v; }
   void     setRecoverable(bool v) { _recoverable = v; }
   uint32_t recoverCalls() const   { return _recoverCalls; }
+  uint32_t forcedRecoverCalls() const { return _forcedRecoverCalls; }
 
   // Answers each transmitted frame on id|replyFlag. `partialFor` is the number of leading
   // frames of a transfer that are answered PARTIAL (30 01 00) before the DONE (0x74);
@@ -100,6 +103,7 @@ class LoopbackLink final : public ICanLink {
   bool     _recoverable = false;   // OFF by default: a recovery that always works would let
                                    // a broken backoff pass every test
   uint32_t _recoverCalls = 0;
+  uint32_t _forcedRecoverCalls = 0;
 };
 
 } // namespace affa

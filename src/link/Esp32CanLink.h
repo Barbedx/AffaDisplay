@@ -64,10 +64,11 @@ class Esp32CanLink final : public ICanLink {
              LinkMode mode = LinkMode::Normal);
 
   bool  send(const Frame& f) override;   // never blocks longer than the driver's ~4 ms
-                                         // worst case; false if the TX gate is shut
+                                         // worst case; false if the TX gate is shut OR the
+                                         // driver is in listen-only (counted in txDropped)
   bool  recv(Frame& out) override;       // pops the RX ring
-  bool  isLive() const override;         // began, TX gate open, controller RUNNING
-  bool  healthy() const override;        // began and controller RUNNING — GATE IGNORED
+  bool  isLive() const override;         // began, TX gate open, NOT listen-only, RUNNING
+  bool  healthy() const override;        // began and controller RUNNING — gate AND mode ignored
   Stats stats() const override;
 
   // THE PROHIBITION'S ONE EXCEPTION, and the only driver call this class makes after
@@ -88,8 +89,13 @@ class Esp32CanLink final : public ICanLink {
   // controller is RECOVERING, because twai_driver_uninstall() rejects that state and a
   // half-torn-down driver is worse than a bus-off one; the caller's backoff will come back.
   //
+  // `force` restarts even a controller that reports RUNNING. Without it, the RUNNING-but-
+  // deaf state — state 1, rxErr pinned, reception frozen; measured 2026-07-29 — is
+  // unreachable by recovery, because the early-out for "already running" (correct for the
+  // bus-off race) answers success without touching anything.
+  //
   // Returns whether the controller is RUNNING AFTERWARDS, never merely that a call was made.
-  bool recover() override;
+  bool recover(bool force = false) override;
 
   // How many times recover() has actually restarted the driver. Survives nothing; it is here
   // to be read off a status endpoint before deciding the fault is in the wire.
@@ -112,11 +118,16 @@ class Esp32CanLink final : public ICanLink {
   // toggle that one bit cannot tell "the panel is silent" from "our acknowledgement is what
   // destroys every frame", and those two demand opposite fixes.
   //
-  // The software TX gate is shut on the way in and RESTORED on the way out, because
-  // listen-only refuses transmissions at the driver anyway and a gate that disagreed with
-  // the driver would make txDropped lie.
+  // THE GATE AND THE MODE ARE INDEPENDENT. setTxEnabled() is the application's wish;
+  // listen-only is the driver's state; send() refuses (and counts txDropped) when EITHER
+  // forbids, and isLive() reports not-live in listen-only so the protocol layer HOLDS
+  // renders instead of feeding a driver that silently drops them. The old design saved the
+  // gate on entry and restored it on exit, which returned the ENTRY-time gate over anything
+  // set while listening — measured on the bench as a gate that reopened itself.
   //
-  // BLOCKS for the restart. Returns whether the controller is RUNNING afterwards.
+  // BLOCKS for the restart. Returns whether the controller is RUNNING afterwards; the mode
+  // flag follows the DRIVER'S configuration even on a failed restart, so listenOnly() never
+  // reports NORMAL over a listen-only driver.
   bool setListenOnly(bool on);
   bool listenOnly() const { return _listenOnly; }
 
@@ -153,9 +164,8 @@ class Esp32CanLink final : public ICanLink {
 
   Stats _stats{};                 // poll()-task only
   bool  _began = false;
-  bool  _txEnabled = true;
-  bool  _listenOnly = false;      // driver mode, not the software gate
-  bool  _gateBeforeListen = true; // _txEnabled to restore when leaving listen-only
+  bool  _txEnabled = true;        // the application's wish; independent of the mode
+  bool  _listenOnly = false;      // the driver's mode; follows its config even on failure
   uint32_t _restarts = 0;         // completed forceDriverRestart() calls
 };
 

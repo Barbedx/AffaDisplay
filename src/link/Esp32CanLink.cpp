@@ -205,6 +205,11 @@ void Esp32CanLink::ingest(const Frame& f) {
 
 bool Esp32CanLink::send(const Frame& f) {
   if (!_began || !_txEnabled) { ++_stats.txDropped; return false; }
+  // In listen-only the driver refuses every transmission internally — and sendFrame() still
+  // returns true, so without this check txFrames would count frames that never existed on
+  // the wire (measured: "mode LISTEN-ONLY, tx climbing 17/s" on the bench console).
+  // Refusing here keeps the counters honest and gives the caller the false it deserves.
+  if (_listenOnly) { ++_stats.txDropped; return false; }
 
   CAN_FRAME out;
   out.id       = f.id;
@@ -228,9 +233,11 @@ bool Esp32CanLink::send(const Frame& f) {
 bool Esp32CanLink::recv(Frame& out) { return _rx.pop(out); }
 
 bool Esp32CanLink::isLive() const {
-  // The gate is the ONLY thing this adds over healthy(), and it is what makes isLive() mean
-  // "may I transmit right now" while healthy() means "is there a controller at all".
-  if (!_txEnabled) return false;
+  // The gate and the mode are what this adds over healthy(): isLive() means "may I transmit
+  // right now" while healthy() means "is there a controller at all". Listen-only cannot
+  // transmit by definition, so it reports not-live — renders are then HELD by the protocol
+  // layer instead of being fed to a driver that silently drops them.
+  if (!_txEnabled || _listenOnly) return false;
   return healthy();
 }
 
@@ -246,7 +253,7 @@ bool Esp32CanLink::healthy() const {
   return st.state == TWAI_STATE_RUNNING;
 }
 
-bool Esp32CanLink::recover() {
+bool Esp32CanLink::recover(bool force) {
   // Never before begin(). There is no driver to restart, and forceDriverRestart() would
   // call enable() on a configuration that setCANPins() has never been given.
   if (!_began) return false;
@@ -260,7 +267,11 @@ bool Esp32CanLink::recover() {
     return false;
   }
 
-  if (st.state == TWAI_STATE_RUNNING) return true;   // nothing to do; somebody beat us to it
+  // "Already running, nothing to do" is the correct answer for the bus-off race this was
+  // built for — EXCEPT when the caller has evidence the running controller is deaf, which
+  // no state read can show. That is what `force` is: the RUNNING-but-deaf watchdog asking
+  // for the reinstall anyway, because a fresh install is the only re-integration there is.
+  if (st.state == TWAI_STATE_RUNNING && !force) return true;
 
   // RECOVERING is the driver's own bus-off path in progress. twai_driver_uninstall() rejects
   // it (IDF requires STOPPED or BUS_OFF), so disable() would leave both tasks deleted and the
@@ -326,26 +337,37 @@ bool Esp32CanLink::setListenOnly(bool on) {
     return false;
   }
 
-  if (on) {
-    _gateBeforeListen = _txEnabled;
-    _txEnabled        = false;    // the driver refuses transmissions anyway; keep the
-                                  // gate's bookkeeping honest rather than counting drops
-                                  // against a mode that was never going to send
-  }
+  // THE FLAG FLIPS BEFORE THE REINSTALL ON ENTRY AND STAYS SET THROUGH IT ON EXIT. The
+  // reinstall below blocks for hundreds of milliseconds, and a send() racing it from
+  // another task must find the refusal already in place — flipping the flag after the call
+  // would leave a full reinstall-length window in which a frame walks past both gate
+  // checks into a driver that is mid-uninstall. Entering: set it now. Leaving: it is
+  // already true and the final assignment clears it only once the driver is back.
+  if (on) _listenOnly = true;
 
   AFFA_LOGW(kTag, "%s listen-only — reinstalling the driver",
             on ? "entering" : "leaving");
   CAN0.setListenOnlyMode(on);
   ++_restarts;
 
-  if (!on) _txEnabled = _gateBeforeListen;
+  // The final value holds even on a failed restart, because the driver's CONFIGURATION has
+  // flipped regardless — setListenOnlyMode() rewrote it whether or not the reinstall left
+  // the controller RUNNING. A flag that only followed on success would report NORMAL over
+  // a listen-only driver after one failed switch, and every consumer of listenOnly() — the
+  // send() refusal, isLive(), the console's mode line — would lie in the worst moment.
+  //
+  // The software TX gate is deliberately NOT saved or restored across the switch any more:
+  // the gate is the application's wish and the mode is the driver's state, and send()
+  // refuses when EITHER forbids. The old save/restore returned the ENTRY-time gate on exit,
+  // silently overriding any setTxEnabled() made while listening — measured on the bench as
+  // a gate that reopened itself.
+  _listenOnly = on;
 
   if (twai_get_status_info(&st) != ESP_OK || st.state != TWAI_STATE_RUNNING) {
     AFFA_LOGE(kTag, "listen-only switch did not leave the controller RUNNING (state %u)",
               static_cast<unsigned>(st.state));
     return false;
   }
-  _listenOnly = on;
   AFFA_LOGI(kTag, "controller RUNNING in %s mode", on ? "LISTEN-ONLY" : "normal");
   return true;
 }

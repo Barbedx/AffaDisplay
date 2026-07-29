@@ -917,12 +917,7 @@ void setup() {
   delay(300);                    // the application may sleep; the library may not
   Serial.println("\nAffaDisplay 01_bringup");
 
-  // 1. NETWORK AND OTA FIRST, ALWAYS. This board has no cable and no buttons: everything
-  //    after this line is allowed to fail without costing us the way back in.
-  startNetwork();
-  startHttp();
-
-  // 2. The boot mode, read before the controller is touched.
+  // 1. THE BOOT MODE, read before the controller is touched.
   {
     Preferences p;
     if (p.begin(kOwnNamespace, /*readOnly=*/true)) {
@@ -931,13 +926,20 @@ void setup() {
     }
   }
 
-  // 3. CAN. A failure is reported, never fatal — the console stays up to say so.
+  // 2. CAN FIRST, WIFI SECOND. On a shared supply the panel and this board power up
+  //    together, and THE FIRST SECONDS ARE THE ONLY ONES THAT MATTER: a freshly powered
+  //    panel asks for its master politely, and a panel that concludes it has none hammers
+  //    the sync request at line rate for ever after — only its own power cycle resets it.
+  //    WiFi.begin() blocks for up to fifteen seconds; every boot that joined the network
+  //    first spent the panel's entire patience doing it. begin() here installs a driver
+  //    and returns in milliseconds, so OTA is still reachable moments later — the way back
+  //    in is delayed, never lost.
+  //
   //    ALWAYS LinkMode::Normal: begin() refuses ListenOnly outright and would return false,
   //    leaving the board with no link at all. The software gate below is the substitute.
   g_canUp = g_link.begin(kPins, kBitrate, kForceRecoveryMs);
-  logmsg("can %s", g_canUp ? "up" : "DID NOT COME UP");
 
-  // 4. THE ORDER IS THE CONTRACT: callbacks, then begin(), then start(). start() refuses a
+  // 3. THE ORDER IS THE CONTRACT: callbacks, then begin(), then start(). start() refuses a
   //    display that was never begun, and callbacks installed after the task is running
   //    would miss whatever it had already delivered.
   g_display.onFrame(&onTap, nullptr);
@@ -949,11 +951,18 @@ void setup() {
   if (g_canUp && g_bootQuiet) g_link.setTxEnabled(false);
 
   if (!g_task.start(g_display))
-    logmsg("AffaTask::start() FAILED - nothing will be polled");
+    Serial.println("AffaTask::start() FAILED - nothing will be polled");
 
   // Gated, the sequence can never succeed: nothing of ours reaches the wire. Park it rather
   // than letting it burn its five attempts and report a failure that is expected.
   if (g_bootQuiet) g_autoRun = false;
+
+  // 4. NETWORK AND OTA, after the bus is already being answered. Everything from here on is
+  //    allowed to fail without costing the link its opening seconds.
+  startNetwork();
+  startHttp();
+  logmsg("can %s", g_canUp ? "up" : "DID NOT COME UP");
+  logmsg("CAN was up %lu ms before WiFi finished", static_cast<unsigned long>(millis()));
 
   logmsg("up: can=%d task=%d quiet=%d", g_canUp ? 1 : 0,
          g_task.running() ? 1 : 0, g_bootQuiet ? 1 : 0);

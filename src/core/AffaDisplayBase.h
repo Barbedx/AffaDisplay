@@ -426,6 +426,15 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   LinkHealth _health{};
   uint32_t   _recoverBackoffMs = 0;   // 0 = not yet armed; doubles per attempt
 
+  // The RUNNING-but-deaf watchdog (AFFA_RX_STALL_MS). `_rxHeard` arms it — set by every
+  // frame that came off the wire, cleared when the stall latches, so a silence fires it
+  // exactly once. `_rxStalled` is the latch pumpLink() treats as "down"; a real frame or a
+  // completed recovery attempt clears it.
+  uint32_t _lastRxMs = 0;
+  bool     _rxHeard  = false;
+  bool     _rxStalled = false;
+  bool     _wasLive   = false;   // last pass's isLive(): a rising edge re-baselines _lastRxMs
+
   KeyCb      _keyCb  = nullptr;   void* _keyCtx  = nullptr;
   CompleteCb _cplCb  = nullptr;   void* _cplCtx  = nullptr;
   SyncCb     _syncCb = nullptr;   void* _syncCtx = nullptr;

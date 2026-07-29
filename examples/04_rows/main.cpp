@@ -50,6 +50,15 @@
 
 #include <AffaDisplay.h>
 
+// The ECC probe reads the TWAI peripheral's own registers. The register map and the status
+// API are the SDK's; nothing here reaches into esp32_can internals.
+#include <driver/twai.h>
+#include <soc/twai_struct.h>
+#include <soc/gpio_struct.h>
+#include <soc/gpio_sig_map.h>
+#include <soc/io_mux_reg.h>
+#include <soc/system_reg.h>
+
 #if !AFFA_PANEL_CARMINAT
 #  error "04_rows is a Carminat example: build with -D AFFA_PANEL_CARMINAT=1"
 #endif
@@ -446,6 +455,167 @@ uint32_t g_gateOpenMs  = 0;       // when we last opened it
 uint32_t g_reopenAtMs  = 0;       // when we may open it again after a backoff
 uint32_t g_deafEvents  = 0;       // times reception died while we were talking
 
+// ---------------------------------------------------------------------------
+// ECC — the error-code-capture register, read for the first time on this bench
+// ---------------------------------------------------------------------------
+// Every diagnosis so far has argued from COUNTERS: rxErr pinned at 129, busErr at exactly
+// the panel's frame rate, and the mechanism inferred. The controller has been holding the
+// primary evidence the whole time. The SJA1000-compatible ECC register latches the TYPE
+// (bit/form/stuff/other), DIRECTION (tx/rx) and the exact FIELD (SOF, data, CRC, ACK slot,
+// error delimiter, intermission...) of the first bus error since it was last read — and
+// reading it re-arms the capture. A histogram of those codes through one NORMAL-mode episode
+// against the storm NAMES the failing bit, which is the difference between:
+//
+//   BIT errors at ACK-SLOT        our dominant never appears at our own sample point
+//   FORM errors at the delimiters the panel starts its next frame early and a compliant
+//   or around INTERMISSION        receiver answers with overload/error frames, for ever
+//   STUFF/BIT in early fields     the controller trips over the frame AFTER an error
+//
+// Those need three different fixes, and no counter can tell them apart.
+//
+// The poller runs on its own low-priority task. It touches the registers ONLY while
+// twai_get_status_info() succeeds: with the driver uninstalled the peripheral clock may be
+// gated, and a raw register read is then a fault, not a zero. After a BUS-OFF sighting it
+// stands back for 600 ms — that is the window in which the force-recovery watchdog
+// uninstalls the peripheral, and losing a few poll beats costs nothing while reading
+// mid-uninstall costs a panic. Reading ECC races the driver's own ISR on bus-error
+// interrupts; the register keeps the captured value until the NEXT error overwrites it, so
+// the race costs at worst one re-arm, never a wrong code.
+namespace ecc {
+
+struct Change { uint32_t ms; uint8_t raw; uint8_t mode; uint8_t rec; uint8_t tec; };
+
+uint32_t g_hist[4][2][32];            // [errc][dir][seg]; racy reads fine, see soak counters
+uint32_t g_samples      = 0;          // poller beats with the driver installed
+uint32_t g_absent       = 0;          // beats skipped: driver uninstalled
+uint32_t g_standoff     = 0;          // beats skipped: recent BUS-OFF, reinstall imminent
+uint32_t g_empty        = 0;          // reads with nothing captured (raw == 0)
+uint32_t g_changes      = 0;          // distinct raw-value transitions recorded
+uint32_t g_inNormal     = 0;          // beats with lom == 0 (an ACK-driving mode)
+uint32_t g_remasks      = 0;          // times BEIE had to be cleared (== driver reinstalls seen)
+uint8_t  g_lastRaw      = 0;
+volatile bool g_clear   = false;
+Change   g_ring[24];                  // last distinct codes, oldest overwritten
+uint8_t  g_ringHead     = 0;
+
+const char* segName(uint8_t s) {
+  switch (s) {
+    case 0x03: return "SOF";          case 0x02: return "ID28-21";
+    case 0x06: return "ID20-18";      case 0x04: return "SRTR";
+    case 0x05: return "IDE";          case 0x07: return "ID17-13";
+    case 0x0F: return "ID12-5";       case 0x0E: return "ID4-0";
+    case 0x0C: return "RTR";          case 0x0D: return "RSVD1";
+    case 0x09: return "RSVD0";        case 0x0B: return "DLC";
+    case 0x0A: return "DATA";         case 0x08: return "CRC-SEQ";
+    case 0x18: return "CRC-DELIM";    case 0x19: return "ACK-SLOT";
+    case 0x1B: return "ACK-DELIM";    case 0x1A: return "EOF";
+    case 0x12: return "INTERMISSION"; case 0x11: return "ACTIVE-ERR-FLAG";
+    case 0x16: return "PASSIVE-ERR-FLAG"; case 0x13: return "TOLERATE-DOM";
+    case 0x17: return "ERR-DELIM";    case 0x1C: return "OVERLOAD-FLAG";
+    default:   return "?";
+  }
+}
+const char* errcName(uint8_t e) {
+  switch (e) {
+    case 0:  return "BIT";
+    case 1:  return "FORM";
+    case 2:  return "STUFF";
+    default: return "OTHER";
+  }
+}
+
+// THE ONLY SAFE WAY TO TOUCH TWAI.* FROM A SIDE TASK. Driver reinstalls — the deaf
+// recovery, setListenOnly, the bus-off watchdog — uninstall the peripheral from OTHER
+// tasks at higher priority, and an uninstalled peripheral has its clock gated: a raw
+// register access then faults, it does not read zero. twai_get_status_info() alone is a
+// TOCTOU check — the uninstall can land between it and the reads. So the reads run inside
+// a critical section (single core: nothing else can run) with the peripheral's own
+// clock-enable/reset bits as the authority. Returns false when the registers were not
+// safely readable.
+struct RegSnapshot { uint8_t ecc, mode, rec, tec; bool beieWasSet; };
+portMUX_TYPE g_regMux = portMUX_INITIALIZER_UNLOCKED;
+
+bool readTwaiRegs(RegSnapshot& out, bool maskBeie) {
+  bool ok = false;
+  portENTER_CRITICAL(&g_regMux);
+  const bool clkOn = (REG_READ(SYSTEM_PERIP_CLK_EN0_REG) & SYSTEM_TWAI_CLK_EN) != 0;
+  const bool inRst = (REG_READ(SYSTEM_PERIP_RST_EN0_REG) & SYSTEM_TWAI_RST) != 0;
+  if (clkOn && !inRst) {
+    out.beieWasSet = TWAI.interrupt_enable_reg.beie;
+    if (maskBeie && out.beieWasSet) TWAI.interrupt_enable_reg.beie = 0;
+    if (!maskBeie && !out.beieWasSet) TWAI.interrupt_enable_reg.beie = 1;
+    out.ecc  = static_cast<uint8_t>(TWAI.error_code_capture_reg.val);
+    out.mode = static_cast<uint8_t>(TWAI.mode_reg.val & 0x0F);
+    out.rec  = static_cast<uint8_t>(TWAI.rx_error_counter_reg.rxerr);
+    out.tec  = static_cast<uint8_t>(TWAI.tx_error_counter_reg.txerr);
+    ok = true;
+  }
+  portEXIT_CRITICAL(&g_regMux);
+  return ok;
+}
+
+// Whether the poller masks the bus-error interrupt. Masked (the default), the ISR never
+// consumes the ECC capture and the histogram works — measured unmasked: 7618 polls, 7618
+// empty, while busErr counted hundreds, because the ISR's re-arming read eats the capture
+// microseconds after it latches. THE COST: the driver's bus_error_count FREEZES while
+// masked, so /api/status's busErr line stops discriminating "silent bus" from "error
+// storm" — /api/ecc's transitions counter and REC/TEC carry that job instead. /api/ecc?mask=0
+// hands the interrupt back and busErr resumes.
+volatile bool g_maskBeie = true;
+
+void taskFn(void*) {
+  uint32_t standoffMs = 0;
+  for (;;) {
+    vTaskDelay(1);                    // one tick = 1 ms: ~one read per error at storm rate
+    if (g_clear) {
+      memset(g_hist, 0, sizeof(g_hist));
+      memset(g_ring, 0, sizeof(g_ring));
+      g_samples = g_absent = g_standoff = g_empty = g_changes = g_inNormal = g_remasks = 0;
+      g_ringHead = 0;
+      g_lastRaw  = 0;
+      g_clear    = false;
+    }
+    twai_status_info_t st;
+    if (twai_get_status_info(&st) != ESP_OK) { ++g_absent; continue; }
+    const uint32_t now = millis();
+    // Stand back 600 ms after ANY non-RUNNING sighting, not just BUS_OFF: the reinstalls
+    // this firmware performs (deaf recovery, mode switches) start from RUNNING, and the
+    // window right after a state excursion is where the uninstall lives.
+    if (st.state != TWAI_STATE_RUNNING) standoffMs = now ? now : 1;
+    if (standoffMs && now - standoffMs < 600) { ++g_standoff; continue; }
+    standoffMs = 0;
+
+    RegSnapshot r;
+    if (!readTwaiRegs(r, g_maskBeie)) { ++g_absent; continue; }
+
+    ++g_samples;
+    if (!(r.mode & 0x02)) ++g_inNormal;         // MOD.1 = listen-only
+    if (r.beieWasSet && g_maskBeie) ++g_remasks;
+
+    if (r.ecc == 0) { ++g_empty; g_lastRaw = 0; continue; }
+    const uint8_t seg  = r.ecc & 0x1F;
+    const uint8_t dir  = (r.ecc >> 5) & 0x01;
+    const uint8_t code = (r.ecc >> 6) & 0x03;
+    ++g_hist[code][dir][seg];
+    if (r.ecc != g_lastRaw) {
+      ++g_changes;
+      Change& c = g_ring[g_ringHead];
+      c.ms   = now ? now : 1;
+      c.raw  = r.ecc;
+      c.mode = r.mode;
+      c.rec  = r.rec;
+      c.tec  = r.tec;
+      g_ringHead = static_cast<uint8_t>((g_ringHead + 1)
+                     % (sizeof(g_ring) / sizeof(g_ring[0])));
+      g_lastRaw = r.ecc;
+    }
+  }
+}
+
+void start() { xTaskCreate(&taskFn, "ecc", 2048, nullptr, 3, nullptr); }
+
+}  // namespace ecc
+
 // Soak counters. Read from the HTTP task without a lock: aligned 32-bit reads do not tear on
 // this core, and a diagnostic that is one repaint stale is still a correct diagnostic.
 uint32_t g_repaints    = 0;
@@ -455,8 +625,8 @@ uint32_t g_syncLosses  = 0;
 uint32_t g_nextSoakMs  = kSoakReportMs;
 
 // The two scrolling rows' content. Row 2 is generated, because it carries the clock.
-char g_text0[AFFA_TEXT_MAX] = "AFFADISPLAY 0.3.1 - THREE ROWS, THREE SPEEDS, ONE WIRE";
-char g_text1[AFFA_TEXT_MAX] = "ROW 1 RUNS AT HALF THE SPEED OF ROW 0";
+char g_text0[AFFA_TEXT_MAX] = "SUCCESS - AFFADISPLAY 0.4.0";
+char g_text1[AFFA_TEXT_MAX] = "HELLO ABADON - WELCOME FROM HELL";
 
 // ---------------------------------------------------------------------------
 // Row 2: the clock row, and the reason RowScreen exists at all
@@ -650,42 +820,18 @@ void pumpGate(uint32_t now) {
          static_cast<unsigned long>(rxSeen),
          froze ? "FROZEN (see /api/trace)" : "already frozen");
 
-  // ---- REINSTALL THE DRIVER. This is the gap the library's own recovery cannot see. ----
+  // ---- AND THAT IS ALL. The reinstall is THE LIBRARY'S JOB now. -------------------------
   //
-  // AffaDisplayBase::pumpLink() asks ICanLink::healthy(), which is "is the controller
-  // RUNNING". Here it IS running — state 1, txErr 0, never bus-off — and it is stone deaf:
-  // rxErr pinned at 129, bus errors at the panel's exact frame rate, rxFrames frozen. A
-  // controller in that state is never restarted by anybody, because nothing reports it as
-  // down. THAT is why three days of this needed a power cycle.
-  //
-  // The cure is a re-integration attempt, and a driver reinstall is exactly that: a CAN node
-  // that has lost bus synchronisation must observe eleven consecutive recessive bits before
-  // it may rejoin, and a fresh install starts that count over. Cycling through listen-only
-  // performs the full uninstall/settle/install, which is the same operation recover() makes
-  // for a bus-off controller and is sanctioned from the poll owner.
-  //
-  // Then answer the panel BEFORE it can drive us deaf again — the handshake it has been
-  // asking for at line rate this whole time.
-  g_link.setListenOnly(true);
-  g_link.setListenOnly(false);
-  logmsg("driver reinstalled (restart %lu) - re-answering the panel",
-         static_cast<unsigned long>(g_link.restarts()));
-
-  g_gateOpen   = true;         // stay in the conversation; the kick needs the gate open
-  g_gateOpenMs = now;
-  g_link.setTxEnabled(true);
-  g_kickWanted = false;
-  uint8_t sent = 0;
-  for (uint8_t i = 0; i < kKickCount; ++i) {
-    affa::Frame f;
-    f.id  = kKick[i].id;
-    f.ext = false;
-    f.len = 8;
-    memcpy(f.data, kKick[i].d, 8);
-    if (g_link.send(f)) ++sent;
-  }
-  logmsg("re-kick: %u/%u frames (deaf event %lu)", static_cast<unsigned>(sent),
-         static_cast<unsigned>(kKickCount), static_cast<unsigned long>(g_deafEvents));
+  // This handler used to cycle the driver through listen-only and blind-kick the handshake
+  // itself, because "RUNNING but deaf" was a state the library's recovery could not see —
+  // pumpLink() watched healthy(), which is only "state == RUNNING". Since 0.4.0 the library
+  // owns exactly this case: AFFA_RX_STALL_MS latches the silence, recover(force=true)
+  // reinstalls even a RUNNING controller, and the handshake is re-run from the top. Keeping
+  // a SECOND reinstall here would race the library's — two unsynchronised
+  // uninstall/install cycles from different tasks against one driver is how the
+  // dangling-handle teardown bug fires. The example's remaining job is what the library
+  // cannot do: freeze the trace so a human can read what the transition looked like.
+  g_gateOpenMs = now;          // one deaf event per silence, not one per kDeafMs tick
 }
 
 void soakReport(uint32_t now) {
@@ -1010,6 +1156,173 @@ void routes() {
     return r->reply(200, "text/plain", "re-armed");
   });
 
+  // THE PAD AUDIT. The ECC verdict is "every dominant we drive reads back recessive" — this
+  // answers whether the dominant ever leaves the chip. Dumps the GPIO matrix routing and
+  // output-enable for the TX pad, then samples both pads at register-read speed (~25 M/s)
+  // for ~16 ms. CRX (GPIO4) is the control: the storm guarantees it pulses low constantly,
+  // so if the sampler sees GPIO4 move and GPIO3 never leave HIGH while the controller is
+  // ACKing in NORMAL, the dominant is not reaching the pad — a chip-side routing fault.
+  // GPIO3 pulsing low here while ECC still reports ACK-slot bit errors would mean the level
+  // IS on the pad and the loop back through CRX is where it dies.
+  //
+  // FUN_IE (the pad's input buffer) is force-enabled for both pins first: the driver
+  // configures TX as output-only, and with the buffer off GPIO.in reads a constant 0 which
+  // looks exactly like "held dominant". Enabling it does not disturb the output path.
+  g_server.on("/api/pad", HTTP_GET, [](PsychicRequest* r) {
+    static char out[1700];
+    size_t n = 0;
+    twai_status_info_t st;
+    const bool up = twai_get_status_info(&st) == ESP_OK;
+    const uint32_t iomux3 = REG_READ(IO_MUX_GPIO3_REG);
+    const uint32_t iomux4 = REG_READ(IO_MUX_GPIO4_REG);
+    n += snprintf(out + n, sizeof(out) - n,
+                  "driver     %s state %d\n"
+                  "out_sel[3] func %u inv %u oen_sel %u oen_inv %u   enable.3 %u\n"
+                  "in_sel[74] gpio %u sig_in_sel %u inv %u          (74 = TWAI RX/TX idx)\n"
+                  "iomux3     0x%08X (MCU_SEL %u FUN_IE %u)  iomux4 0x%08X (MCU_SEL %u FUN_IE %u)\n",
+                  up ? "ok" : "ABSENT", up ? static_cast<int>(st.state) : -1,
+                  static_cast<unsigned>(GPIO.func_out_sel_cfg[3].func_sel),
+                  static_cast<unsigned>(GPIO.func_out_sel_cfg[3].inv_sel),
+                  static_cast<unsigned>(GPIO.func_out_sel_cfg[3].oen_sel),
+                  static_cast<unsigned>(GPIO.func_out_sel_cfg[3].oen_inv_sel),
+                  static_cast<unsigned>((GPIO.enable.val >> 3) & 1),
+                  static_cast<unsigned>(GPIO.func_in_sel_cfg[TWAI_RX_IDX].func_sel),
+                  static_cast<unsigned>(GPIO.func_in_sel_cfg[TWAI_RX_IDX].sig_in_sel),
+                  static_cast<unsigned>(GPIO.func_in_sel_cfg[TWAI_RX_IDX].sig_in_inv),
+                  static_cast<unsigned>(iomux3),
+                  static_cast<unsigned>((iomux3 >> 12) & 7),
+                  static_cast<unsigned>((iomux3 >> 9) & 1),
+                  static_cast<unsigned>(iomux4),
+                  static_cast<unsigned>((iomux4 >> 12) & 7),
+                  static_cast<unsigned>((iomux4 >> 9) & 1));
+
+    PIN_INPUT_ENABLE(IO_MUX_GPIO3_REG);
+    PIN_INPUT_ENABLE(IO_MUX_GPIO4_REG);
+
+    uint32_t low3 = 0, low4 = 0, edges3 = 0, run3 = 0, maxRun3 = 0;
+    uint32_t bothLow = 0, drive3crx4High = 0;
+    bool last3 = true;
+    constexpr uint32_t kSamples = 400000;
+    const uint32_t t0 = micros();
+    for (uint32_t i = 0; i < kSamples; ++i) {
+      const uint32_t v = GPIO.in.val;
+      const bool b3 = v & (1u << 3);
+      const bool b4 = v & (1u << 4);
+      if (!b3) {
+        ++low3; if (++run3 > maxRun3) maxRun3 = run3;
+        // THE VERDICT COUNTERS: while WE hold TXD dominant, what does CRX say? Same
+        // register read, so the two bits are the same instant. Loop delay through the
+        // transceiver is ~1 sample; anything beyond edge effects is the answer.
+        if (!b4) ++bothLow; else ++drive3crx4High;
+      } else run3 = 0;
+      if (!b4) ++low4;
+      if (b3 != last3) { ++edges3; last3 = b3; }
+    }
+    const uint32_t us = micros() - t0;
+    n += snprintf(out + n, sizeof(out) - n,
+                  "sampled    %lu reads in %lu us (%lu ns/read)\n"
+                  "GPIO3 CTX  low %lu (%lu.%04lu%%)  edges %lu  longest-low-run %lu reads\n"
+                  "GPIO4 CRX  low %lu (%lu.%04lu%%)   <- control: must move during the storm\n"
+                  "correlate  while CTX low: CRX low %lu, CRX HIGH %lu   <- HIGH means the "
+                  "dominant never came back\n",
+                  static_cast<unsigned long>(kSamples), static_cast<unsigned long>(us),
+                  static_cast<unsigned long>((us * 1000UL) / kSamples),
+                  static_cast<unsigned long>(low3),
+                  static_cast<unsigned long>((low3 * 100ULL) / kSamples),
+                  static_cast<unsigned long>(((low3 * 1000000ULL) / kSamples) % 10000),
+                  static_cast<unsigned long>(edges3), static_cast<unsigned long>(maxRun3),
+                  static_cast<unsigned long>(low4),
+                  static_cast<unsigned long>((low4 * 100ULL) / kSamples),
+                  static_cast<unsigned long>(((low4 * 1000000ULL) / kSamples) % 10000),
+                  static_cast<unsigned long>(bothLow),
+                  static_cast<unsigned long>(drive3crx4High));
+    return r->reply(200, "text/plain", out);
+  });
+
+  // The ECC report. Protocol: `/api/ecc?clear=1`, one `/api/kick?ms=3000`, then `/api/ecc`.
+  // The histogram's dominant bucket names the failing bit-field; the transition ring shows
+  // the SEED error of each episode with the error counters at that instant.
+  g_server.on("/api/ecc", HTTP_GET, [](PsychicRequest* r) {
+    if (r->getParam("clear") && r->getParam("clear")->value() == "1") {
+      ecc::g_clear = true;
+      logmsg("console: ecc cleared");
+      return r->reply(200, "text/plain", "clearing");
+    }
+    // ?mask=0 hands the bus-error interrupt back to the driver: busErr resumes counting,
+    // the histogram goes blind. ?mask=1 restores the instrument. See ecc::g_maskBeie.
+    if (r->getParam("mask")) {
+      ecc::g_maskBeie = r->getParam("mask")->value() != "0";
+      logmsg("console: ecc mask %s", ecc::g_maskBeie ? "ON (histogram)" : "OFF (busErr)");
+      return r->reply(200, "text/plain", ecc::g_maskBeie ? "masked" : "unmasked");
+    }
+    static char out[3400];
+    size_t n = 0;
+    twai_status_info_t st;
+    const bool up = twai_get_status_info(&st) == ESP_OK;
+    n += snprintf(out + n, sizeof(out) - n,
+                  "driver     %s state %d  toRx %lu  toTx %lu   beie mask %s\n",
+                  up ? "ok" : "ABSENT", up ? static_cast<int>(st.state) : -1,
+                  up ? static_cast<unsigned long>(st.msgs_to_rx) : 0UL,
+                  up ? static_cast<unsigned long>(st.msgs_to_tx) : 0UL,
+                  ecc::g_maskBeie ? "ON (busErr frozen)" : "off");
+    ecc::RegSnapshot snap;
+    if (up && ecc::readTwaiRegs(snap, ecc::g_maskBeie)) {
+      n += snprintf(out + n, sizeof(out) - n,
+                    "mode       rm %u  lom %u  stm %u  afm %u   rec %u  tec %u\n",
+                    static_cast<unsigned>(snap.mode & 1),
+                    static_cast<unsigned>((snap.mode >> 1) & 1),
+                    static_cast<unsigned>((snap.mode >> 2) & 1),
+                    static_cast<unsigned>((snap.mode >> 3) & 1),
+                    static_cast<unsigned>(snap.rec), static_cast<unsigned>(snap.tec));
+    }
+    n += snprintf(out + n, sizeof(out) - n,
+                  "polls      %lu ok (%lu in normal)  %lu absent  %lu standoff  %lu empty  "
+                  "%lu transitions  %lu remasks\n",
+                  static_cast<unsigned long>(ecc::g_samples),
+                  static_cast<unsigned long>(ecc::g_inNormal),
+                  static_cast<unsigned long>(ecc::g_absent),
+                  static_cast<unsigned long>(ecc::g_standoff),
+                  static_cast<unsigned long>(ecc::g_empty),
+                  static_cast<unsigned long>(ecc::g_changes),
+                  static_cast<unsigned long>(ecc::g_remasks));
+
+    n += snprintf(out + n, sizeof(out) - n, "histogram  (top 12, count desc)\n");
+    bool printed[4][2][32] = {};
+    for (int rank = 0; rank < 12; ++rank) {
+      uint32_t best = 0;
+      int bc = -1, bd = -1, bs = -1;
+      for (int c = 0; c < 4; ++c)
+        for (int d = 0; d < 2; ++d)
+          for (int s = 0; s < 32; ++s)
+            if (!printed[c][d][s] && ecc::g_hist[c][d][s] > best) {
+              best = ecc::g_hist[c][d][s]; bc = c; bd = d; bs = s;
+            }
+      if (bc < 0) break;
+      printed[bc][bd][bs] = true;
+      n += snprintf(out + n, sizeof(out) - n, "  %-5s %s @ %-16s (raw 0x%02X)  x %lu\n",
+                    ecc::errcName(static_cast<uint8_t>(bc)), bd ? "RX" : "TX",
+                    ecc::segName(static_cast<uint8_t>(bs)),
+                    static_cast<unsigned>((bc << 6) | (bd << 5) | bs),
+                    static_cast<unsigned long>(best));
+    }
+
+    n += snprintf(out + n, sizeof(out) - n, "ring       (distinct codes, oldest first)\n");
+    const uint8_t cnt = sizeof(ecc::g_ring) / sizeof(ecc::g_ring[0]);
+    for (uint8_t i = 0; i < cnt; ++i) {
+      const ecc::Change& c = ecc::g_ring[(ecc::g_ringHead + i) % cnt];
+      if (!c.ms) continue;
+      n += snprintf(out + n, sizeof(out) - n,
+                    "  t=%-8lu 0x%02X %-5s %s @ %-16s lom %u stm %u  rec %3u tec %3u\n",
+                    static_cast<unsigned long>(c.ms), c.raw,
+                    ecc::errcName((c.raw >> 6) & 0x03), (c.raw & 0x20) ? "RX" : "TX",
+                    ecc::segName(c.raw & 0x1F),
+                    static_cast<unsigned>((c.mode >> 1) & 1),
+                    static_cast<unsigned>((c.mode >> 2) & 1), c.rec, c.tec);
+      if (n > sizeof(out) - 100) break;
+    }
+    return r->reply(200, "text/plain", out);
+  });
+
   // THE IS-IT-US TEST, and it is the first thing to reach for when the bus looks dead.
   //
   // Shutting the gate stops every frame WE would send, in software. The controller keeps
@@ -1018,8 +1331,9 @@ void routes() {
   // wire or at the other end. If rx starts climbing the moment we go quiet, we were
   // trampling the bus.
   //
-  // True listen-only is NOT available: Esp32CanLink::begin() refuses LinkMode::ListenOnly,
-  // because this driver has no safe place to enter it.
+  // True listen-only IS available at runtime since 1220f78 — setListenOnly(), used below —
+  // it is only begin(..., ListenOnly) that stays refused (pre-begin, the driver has no
+  // queues for the mode switch to land on and the board dies before OTA).
   // THE A/B THAT SETTLES IT, on one boot, with the trace running.
   //
   // Listen-only observes the bus WITHOUT ACKNOWLEDGING IT. Normal acknowledges every frame
@@ -1229,6 +1543,10 @@ void setup() {
   // not block — it installs a driver and returns — whereas WiFi does.
   if (!g_link.begin(kPins, kBitrate, kForceRecoveryMs))
     Serial.println("[can] controller did not come up");
+
+  // The ECC probe watches from the first moment: the SEED error of a storm is worth more
+  // than any amount of steady-state histogram.
+  ecc::start();
 
   // AND THE GATE STARTS OPEN, which reverses the previous build deliberately.
   //

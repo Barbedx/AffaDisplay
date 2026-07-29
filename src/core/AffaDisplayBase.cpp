@@ -31,6 +31,9 @@ bool AffaDisplayBase::begin() {
   _lastEnqueued   = kNoTicket;
   _lastResult     = Result::Ok;
   _lastOverflow   = _link.stats().ringOverflow;
+  _lastRxMs       = now;                 // the deaf watchdog measures from here, and stays
+  _rxHeard        = false;               // disarmed until a frame actually arrives
+  _rxStalled      = false;
   _begun          = true;
 
   AFFA_LOGI(kTag, "begin: syncId=0x%03X reply=0x%03X funcs=%u",
@@ -214,6 +217,12 @@ void AffaDisplayBase::pumpRx() {
     // completing after one frame with a bogus success.
     if (f.fromSelf) continue;
 
+    // A frame off the wire feeds the RUNNING-but-deaf watchdog: re-arm it and release the
+    // latch. Echoes deliberately do not count — a link that hears only itself is deaf.
+    _lastRxMs  = _clock.millis();
+    _rxHeard   = true;
+    _rxStalled = false;
+
     if (f.id == _profile.syncReplyId) { handleSyncFrame(f); continue; }
     if ((f.id & _profile.replyFlag) != 0) { handleAckFrame(f); continue; }
 
@@ -283,8 +292,8 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
   if (f.data[0] == kSyncRequestByte0 && f.len >= 2 && f.data[1] == kSyncRequestByte1) {
     // THE ANSWER IS PACED, THE STATE IS NOT. An unacknowledged panel repeats this request
     // back to back at line rate — 1472 frames/s measured on the bench — and answering each
-    // one with helloCount frames is ~4400 transmit attempts per second into a bus that
-    // holds ~4200 and is already 92 % occupied by the requests themselves. That fills the
+    // one with helloCount frames is ~4400 transmit attempts per second, far beyond what the
+    // TX queue can drain between the panel's line-rate bursts. That fills the
     // TWAI transmit queue permanently, blocks the poll task inside sendFrame(), and starves
     // every render behind it, which is what a panel frozen in half-finished authorisation
     // actually looks like from the outside. See AFFA_HELLO_MIN_MS.
@@ -333,6 +342,16 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
         AFFA_LOGW(kTag, "panel reports registration void (61 11 01) — re-registering");
         dropRegistrations();
         s &= ~SyncState::FuncsReg;
+        // The re-registration this provokes takes time the held renders were never
+        // budgeted for. Without a fresh window, a payload that aged politely while
+        // REGISTERED would be given up as NoSync by pumpTx()'s hold check before the
+        // re-registration it now depends on has even been spliced. Same re-arm as the
+        // peer-timeout and post-recovery paths — the three places a registration is
+        // voided must age the queue identically.
+        for (uint8_t i = 0; i < _qCount; ++i) {
+          if (_queue[i].kind == JobKind::Payload && !_queue[i].started)
+            _queue[i].holdUntilMs = now + AFFA_TX_HOLD_MS;
+        }
       }
       s |= SyncState::Start;
     }
@@ -407,10 +426,43 @@ AffaDisplayBase::LinkHealth AffaDisplayBase::linkHealth() const { return _health
 void AffaDisplayBase::pumpLink() {
   const uint32_t now = _clock.millis();
 
-  // healthy(), NOT isLive(): the difference is the software TX gate, and an application that
-  // shut it on purpose — mid-OTA, or running the is-it-us-or-the-bus test — must not have
-  // the driver torn down underneath it as a reward. See ICanLink::healthy().
-  if (_link.healthy()) {
+  bool down = !_link.healthy();
+
+#if AFFA_RX_STALL_MS
+  // THE RUNNING-BUT-DEAF CASE, which healthy() cannot see: state RUNNING, no bus-off, and
+  // reception simply stopped (bench, 2026-07-29 — rxErr pinned 129, rxFrames frozen, three
+  // days and a power cycle). isLive(), not healthy(), on purpose here: an application that
+  // shut the TX gate or dropped to listen-only has chosen one-sidedness, and silence is
+  // then expected, not a fault. One latch per silence; pumpRx() re-arms on a real frame.
+  const bool live = _link.isLive();
+  if (live && !_wasLive) {
+    // Eligibility rising edge — the gate just opened, or listen-only just ended. Whatever
+    // silence accumulated while we were deliberately one-sided was the application's
+    // choice, not evidence of deafness: the watchdog measures from HERE, a full fresh
+    // window, instead of latching instantly off a stale timestamp.
+    _lastRxMs = now;
+  }
+  _wasLive = live;
+  if (_rxStalled && !live) {
+    // The application chose one-sidedness AFTER the latch. The silence is theirs now, and
+    // holding the latch would keep the backoff force-restarting the driver underneath a
+    // deliberately gated app — the exact thing the healthy()/isLive() split forbids.
+    _rxStalled = false;
+  }
+  if (!down && _rxHeard && live && expired(now, _lastRxMs + AFFA_RX_STALL_MS)) {
+    _rxStalled = true;
+    _rxHeard   = false;
+    AFFA_LOGW(kTag, "controller RUNNING but nothing received for %lu ms — treating as down",
+              static_cast<unsigned long>(now - _lastRxMs));
+  }
+  down = down || _rxStalled;
+#endif
+
+  // healthy(), NOT isLive(), for the controller-down half: the difference is the software
+  // TX gate, and an application that shut it on purpose — mid-OTA, or running the
+  // is-it-us-or-the-bus test — must not have the driver torn down underneath it as a
+  // reward. See ICanLink::healthy().
+  if (!down) {
     if (_health.downSince) {                       // it came back — the normal case, and it
       _health.downMs += now - _health.downSince;   // is the one that must be cheap
       _health.downSince = 0;
@@ -451,7 +503,10 @@ void AffaDisplayBase::pumpLink() {
             static_cast<unsigned long>(now - _health.downSince),
             static_cast<unsigned long>(_health.recoveries + _health.failures + 1));
 
-  if (!_link.recover()) {
+  // `_rxStalled` rides along as `force`: a stall means the controller may well report
+  // RUNNING, and recover()'s "already running, nothing to do" early-out — right for the
+  // bus-off race — would otherwise return success without the reinstall the stall needs.
+  if (!_link.recover(_rxStalled)) {
     // A link with no recover() of its own lands here every time, which is correct and is
     // why the default returns false: the backoff walks out to its ceiling and the counter
     // says plainly that nothing is working. It must NOT be mistaken for success, or the
@@ -463,6 +518,22 @@ void AffaDisplayBase::pumpLink() {
   ++_health.recoveries;
   AFFA_LOGI(kTag, "link recovered after %lu ms",
             static_cast<unsigned long>(now - _health.downSince));
+
+#if AFFA_RX_STALL_MS
+  // A completed recovery answers the stall: the driver has been reinstalled, which is all
+  // this watchdog can buy. Release the latch so the link reports up; it does NOT re-arm —
+  // only a real received frame does that — so a bus that stays silent costs exactly this
+  // one restart and then quiet, never a reinstall per backoff for ever.
+  //
+  // The baseline resets for EVERY successful recovery, not only stall-triggered ones. A
+  // bus-off outage skips the stall check the whole time it is down, so _lastRxMs still
+  // holds its pre-outage value here — and without this reset the latch would fire on the
+  // very next pass, granting the just-restarted controller zero listening time and, on a
+  // genuinely silent bus, a second pointless reinstall at the already-armed backoff.
+  _rxStalled = false;
+  _rxHeard   = false;
+  _lastRxMs  = now;
+#endif
 
   // THE CONTROLLER IS NEW, SO THE HANDSHAKE IS VOID. A restarted driver has lost nothing of
   // ours — the queue, the tickets and the hold windows are all still here — but the PANEL
@@ -849,6 +920,18 @@ void AffaDisplayBase::pumpTx() {
   //    would look exactly like a wire-format bug.
   if (!_passive && _queue[0].kind == JobKind::Payload &&
       !hasFlag(_sync, SyncState::FuncsReg) && !registrationQueued()) {
+    // THE HOLD WINDOW BINDS HERE TOO. Gate 2 checks it only when the link is down — but a
+    // payload can sit behind a registration that fails and re-splices for ever on a link
+    // that is perfectly "ready" (the 61-11-01 storm: every probe times out, dropped probes
+    // re-splice on the next pass, ~10 s per lap, indefinitely). Bench, 2026-07-29:
+    // inFlight climbing into the thousands while timeouts tracked it one for one. A head
+    // job that is not yet started and has outlived its hold window is given up as NoSync —
+    // the same verdict, at the same age, that gate 2 would have delivered.
+    if (!_queue[0].started && expired(now, _queue[0].holdUntilMs)) {
+      AFFA_LOGW(kTag, "registration never completed within the hold window — giving up");
+      finishJob(Result::NoSync, /*allowRetry=*/false);
+      return;
+    }
     if (_qCount + _funcCount <= AFFA_TX_QUEUE_DEPTH) {
       static const uint8_t kReg[1] = { kRegisterByte };
       TxOptions ro;

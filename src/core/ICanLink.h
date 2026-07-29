@@ -26,13 +26,15 @@ struct ICanLink {
   virtual bool isLive() const { return true; }
 
   // "Is there a working controller at all", as distinct from isLive()'s "may I transmit
-  // right now". The two differ for exactly one reason and it matters: a SOFTWARE TX GATE.
+  // right now". The two differ for exactly two reasons and both matter: a SOFTWARE TX
+  // GATE, and a LISTEN-ONLY driver mode.
   //
   // An application shuts the gate deliberately — for the duration of an OTA write, or to run
-  // the bench's is-it-us-or-the-bus test — and isLive() correctly goes false so that renders
-  // are held rather than dropped on the floor. But the CONTROLLER is perfectly healthy, and
-  // a recovery layer that watched isLive() would tear the driver down in the middle of the
-  // flash write it was gated for. So recovery watches THIS, and it ignores the gate.
+  // the bench's is-it-us-or-the-bus test — or drops to listen-only to observe a bus without
+  // acknowledging it, and isLive() correctly goes false so that renders are held rather
+  // than dropped on the floor. But the CONTROLLER is perfectly healthy, and a recovery
+  // layer that watched isLive() would tear the driver down in the middle of the flash
+  // write it was gated for. So recovery watches THIS, and it ignores both.
   //
   // Defaults to isLive(), so a link with no gate needs no override.
   virtual bool healthy() const { return isLive(); }
@@ -45,11 +47,18 @@ struct ICanLink {
   // every attempt and spin. Optional with a body so every existing implementation — the
   // loopback, every consumer's own — keeps compiling untouched.
   //
+  // `force` says the CALLER has evidence the link is broken that the link cannot see in its
+  // own state — the RUNNING-but-deaf case, where the controller reports itself perfectly
+  // healthy while reception has stopped (AFFA_RX_STALL_MS). Without it a recover() that
+  // short-circuits on "already running" — which is the correct answer for the bus-off race
+  // it was built for — would return success without touching the one thing that can help,
+  // the driver reinstall.
+  //
   // Called ONLY from poll(), i.e. from the one task that owns the FSM, and never from a
   // driver callback. It MAY block for the duration of a driver restart (hundreds of ms);
   // that is the one place in this library where that is sanctioned, because the alternative
   // is a controller that is down for ever.
-  virtual bool recover() { return false; }
+  virtual bool recover(bool force = false) { (void)force; return false; }
 
   virtual Stats stats() const { return Stats{}; }
 };

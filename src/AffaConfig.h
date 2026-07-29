@@ -371,6 +371,32 @@
 #  error "AFFA_LINK_RECOVER_MAX_MS is the backoff CEILING; it cannot be below the first delay."
 #endif
 
+// A controller can be RUNNING and stone deaf, and until 0.4.0 that state was NOBODY'S JOB.
+// Measured on the bench, 2026-07-29: state 1 (RUNNING), txErr 0, never bus-off — and rxErr
+// pinned at 129, bus errors at exactly the panel's frame rate, rxFrames frozen. healthy()
+// is "state == RUNNING", so pumpLink() saw nothing wrong, the driver's watchdog reacts to
+// BUS_OFF only, and the link stayed deaf until a human power-cycled the rig. The working
+// image that morning heard 498 frames and then went deaf mid-run the same way.
+//
+// This is the deadline on that gap. If the link is up, transmission is enabled (a
+// deliberately gated link is expected to be one-sided), we HAVE heard the bus since the
+// last stall, and nothing has been received for this long, pumpLink() treats the link as
+// down: same flap accounting, same backoff, same recover(), same handshake teardown as a
+// controller that stopped RUNNING.
+//
+// IT FIRES ONCE PER SILENCE. After a stall-triggered recovery the watchdog re-arms only
+// when a frame is actually heard again, so a panel that is genuinely powered off costs one
+// driver restart and then quiet, not a restart per backoff for ever — every restart is a
+// full teardown, and a teardown against a silent bus is exactly where esp32_can's
+// disable() has wedged before (examples/02_canspy, c8d8695).
+//
+// The default clears the bench panel's slowest healthy signal — the ~1 Hz peer-alive — by
+// 2.5x, and sits below AFFA_PEER_TIMEOUT_MS deliberately: the driver reinstall this
+// watchdog buys is what makes the subsequent re-handshake possible at all. 0 disables it.
+#ifndef AFFA_RX_STALL_MS
+#  define AFFA_RX_STALL_MS 2500
+#endif
+
 // Largest single ISO-TP message, in payload bytes before framing.
 //
 // 113 IS A WIRE LIMIT, NOT A BUDGET: 8 bytes in frame 0, 7 per continuation, and the
