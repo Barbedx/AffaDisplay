@@ -379,6 +379,56 @@ constexpr uint8_t  kHeardEnough   = 20;     // frames decoded before we consider
 // is what has been happening for three days.
 constexpr uint32_t kDeafMs        = 600;    // no RX for this long, having heard before
 constexpr uint32_t kBackoffMs     = 5000;   // stay silent this long before trying again
+constexpr uint32_t kShoutMs       = 4000;   // talk this long into silence before giving up
+
+// ---------------------------------------------------------------------------
+// SHOUT — "can it still hear us?", answered without a scope
+// ---------------------------------------------------------------------------
+// While we are in NORMAL we decode nothing, so we cannot watch the panel answer. But we can
+// watch what it does AFTERWARDS. So: drop to normal, transmit for a couple of seconds, go
+// back to listen-only — where reception is flawless — and compare the panel's traffic with
+// what it was doing before. A panel that heard us CHANGES: it stops repeating the sync
+// request and moves on. A panel that heard nothing carries on identically.
+//
+// That is the difference between "our transmitter does not reach the wire" and "it reaches
+// the wire and only our ACK is malformed", and those need opposite fixes.
+uint8_t  g_shoutPhase = 0;      // 0 idle, 1 start, 2 shouting
+uint32_t g_shoutMs    = 2500;
+uint32_t g_shoutUntil = 0;
+
+// ---------------------------------------------------------------------------
+// KICK — answer the panel BLIND, which is the one thing never yet tried
+// ---------------------------------------------------------------------------
+// The panel asks `61 11 01` at line rate and the answer is a three-frame hello. But the
+// library only emits that hello ON RECEIPT of the request — and in NORMAL mode we decode
+// nothing, so the request never arrives and the hello can never fire. Every measurement so
+// far has therefore had us transmitting only the 1 Hz heartbeat and one registration probe.
+//
+// THE PANEL HAS NEVER ACTUALLY BEEN ANSWERED. Not once, in three days.
+//
+// We do not need to hear it to answer it: the request is unconditional and so is the reply.
+// So drop to NORMAL and put the whole handshake on the wire from a table — heartbeat, the
+// three hello frames, then a registration probe on every function id — then go back to
+// listen-only, where reception is flawless, and read what the panel does next.
+//
+// THE THIRD REGISTRATION IS THE OTHER HALF OF THIS. Captured from a factory head unit
+// (2026-06-16, 22:37:41), the real radio registers THREE ids in one second — 0x151, 0x1C1
+// and 0x1F1 — each individually acknowledged. Our funcs[] holds only 0x151 and 0x1F1. If
+// the panel will not consider a master registered until the key channel is claimed too,
+// that alone explains a handshake that never completes. Note the fillers differ per channel
+// and are reproduced verbatim: 0x1C1 pads with A3, the other two with 00.
+struct KickFrame { uint16_t id; uint8_t d[8]; };
+const KickFrame kKick[] = {
+  {0x3AF, {0xB9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},   // alive
+  {0x3AF, {0x70, 0x1A, 0x11, 0x00, 0x00, 0x00, 0x00, 0x01}},   // hello 1
+  {0x3AF, {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00}},   // hello 2
+  {0x3AF, {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00}},   // hello 3 — identical, [CAP]
+  {0x151, {0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},   // register text/screen
+  {0x1C1, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}},   // register KEYS — [OEM], ours omits
+  {0x1F1, {0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},   // register nav
+};
+constexpr uint8_t kKickCount = sizeof(kKick) / sizeof(kKick[0]);
+bool g_kickWanted = false;
 
 bool     g_gateOpen    = false;   // our copy; g_link owns the truth
 uint32_t g_gateOpenMs  = 0;       // when we last opened it
@@ -500,7 +550,52 @@ void pumpScreen(uint32_t now) {
 // ---------------------------------------------------------------------------
 // The gate FSM — silent until the bus proves itself, silent again the moment it stops
 // ---------------------------------------------------------------------------
+// Driven from loop(), never from a handler: setListenOnly() reinstalls the driver and must
+// not run on the HTTP task while the poll task is inside the library.
+void pumpShout(uint32_t now) {
+  if (g_shoutPhase == 1) {
+    g_link.setListenOnly(false);
+    g_link.setTxEnabled(true);
+    g_gateOpen   = true;
+    g_gateOpenMs = now;
+    g_shoutUntil = now + g_shoutMs;
+    g_shoutPhase = 2;
+    logmsg("SHOUT: normal + gate open for %lu ms - talking blind",
+           static_cast<unsigned long>(g_shoutMs));
+
+    if (g_kickWanted) {
+      g_kickWanted = false;
+      // Straight onto the wire, bypassing the library's FSM entirely. That is the whole
+      // point: the FSM will not emit a hello it has not been asked for, and it cannot be
+      // asked for while we are deaf.
+      uint8_t sent = 0;
+      for (uint8_t i = 0; i < kKickCount; ++i) {
+        affa::Frame f;
+        f.id  = kKick[i].id;
+        f.ext = false;
+        f.len = 8;
+        memcpy(f.data, kKick[i].d, 8);
+        if (g_link.send(f)) ++sent;
+        delay(4);        // the factory spaces its registration probes; do not burst them
+      }
+      logmsg("KICK: %u/%u handshake frames on the wire (hello x3 + reg 151/1C1/1F1)",
+             static_cast<unsigned>(sent), static_cast<unsigned>(kKickCount));
+    }
+    return;
+  }
+  if (g_shoutPhase == 2 && affa::expired(now, g_shoutUntil)) {
+    g_link.setTxEnabled(false);
+    g_gateOpen   = false;
+    g_reopenAtMs = now + 3600000UL;      // stay put; this is a measurement, not a retry loop
+    g_link.setListenOnly(true);
+    g_shoutPhase = 0;
+    logmsg("SHOUT done - back to listen-only. Compare /api/frames with before: a panel that "
+           "heard us stops repeating 61 11 01");
+  }
+}
+
 void pumpGate(uint32_t now) {
+  if (g_shoutPhase) return;              // the shout owns the gate while it runs
   uint32_t rxSeen, lastRx;
   portENTER_CRITICAL(&g_frameMux);
   rxSeen = g_rxSeen;
@@ -522,7 +617,16 @@ void pumpGate(uint32_t now) {
 
   // ---- talking. Watch for the bus going quiet under us. -------------------
   if (rxSeen == 0) return;                              // cannot go deaf without ever hearing
-  if (!affa::expired(now, lastRx + kDeafMs)) return;    // still hearing it
+
+  // HEARD SINCE WE OPENED, or not yet? These are different situations and collapsing them
+  // was a bug: `lastRx` from BEFORE the gate opened made every open look instantly deaf, so
+  // the gate slammed shut in the same loop iteration it opened in and we could never hold a
+  // conversation long enough to see whether the other end reacted.
+  if (lastRx < g_gateOpenMs) {
+    if (!affa::expired(now, g_gateOpenMs + kShoutMs)) return;   // give it a fair hearing
+  } else if (!affa::expired(now, lastRx + kDeafMs)) {
+    return;                                             // still hearing it
+  }
 
   ++g_deafEvents;
   portENTER_CRITICAL(&g_frameMux);
@@ -530,15 +634,47 @@ void pumpGate(uint32_t now) {
   if (froze) { g_traceFrozen = true; g_frozenAtMs = now; }
   portEXIT_CRITICAL(&g_frameMux);
 
-  g_gateOpen  = false;
-  g_reopenAtMs = now + kBackoffMs;
-  g_link.setTxEnabled(false);
-
-  logmsg("DEAF after %lu ms of talking, %lu frames heard - trace %s, going quiet %lu ms",
+  logmsg("DEAF after %lu ms of talking, %lu frames heard - trace %s",
          static_cast<unsigned long>(now - g_gateOpenMs),
          static_cast<unsigned long>(rxSeen),
-         froze ? "FROZEN (see /api/trace)" : "already frozen",
-         static_cast<unsigned long>(kBackoffMs));
+         froze ? "FROZEN (see /api/trace)" : "already frozen");
+
+  // ---- REINSTALL THE DRIVER. This is the gap the library's own recovery cannot see. ----
+  //
+  // AffaDisplayBase::pumpLink() asks ICanLink::healthy(), which is "is the controller
+  // RUNNING". Here it IS running — state 1, txErr 0, never bus-off — and it is stone deaf:
+  // rxErr pinned at 129, bus errors at the panel's exact frame rate, rxFrames frozen. A
+  // controller in that state is never restarted by anybody, because nothing reports it as
+  // down. THAT is why three days of this needed a power cycle.
+  //
+  // The cure is a re-integration attempt, and a driver reinstall is exactly that: a CAN node
+  // that has lost bus synchronisation must observe eleven consecutive recessive bits before
+  // it may rejoin, and a fresh install starts that count over. Cycling through listen-only
+  // performs the full uninstall/settle/install, which is the same operation recover() makes
+  // for a bus-off controller and is sanctioned from the poll owner.
+  //
+  // Then answer the panel BEFORE it can drive us deaf again — the handshake it has been
+  // asking for at line rate this whole time.
+  g_link.setListenOnly(true);
+  g_link.setListenOnly(false);
+  logmsg("driver reinstalled (restart %lu) - re-answering the panel",
+         static_cast<unsigned long>(g_link.restarts()));
+
+  g_gateOpen   = true;         // stay in the conversation; the kick needs the gate open
+  g_gateOpenMs = now;
+  g_link.setTxEnabled(true);
+  g_kickWanted = false;
+  uint8_t sent = 0;
+  for (uint8_t i = 0; i < kKickCount; ++i) {
+    affa::Frame f;
+    f.id  = kKick[i].id;
+    f.ext = false;
+    f.len = 8;
+    memcpy(f.data, kKick[i].d, 8);
+    if (g_link.send(f)) ++sent;
+  }
+  logmsg("re-kick: %u/%u frames (deaf event %lu)", static_cast<unsigned>(sent),
+         static_cast<unsigned>(kKickCount), static_cast<unsigned long>(g_deafEvents));
 }
 
 void soakReport(uint32_t now) {
@@ -621,6 +757,9 @@ a{color:#8ab}
 </fieldset>
 
 <fieldset><legend>wire &mdash; is the panel talking?</legend>
+<button onclick=go('/api/kick')>KICK &mdash; answer the panel blind</button>
+<button onclick=go('/api/listen?on=1')>LISTEN-ONLY (do not ACK)</button>
+<button onclick=go('/api/listen?on=0')>NORMAL (ACK again)</button>
 <button onclick=go('/api/txgate?on=0')>TX gate SHUT (go silent)</button>
 <button onclick=go('/api/txgate?on=1')>TX gate open</button>
 <button onclick=go('/api/trace')>re-arm trace</button>
@@ -719,6 +858,7 @@ void routes() {
              "step       %s\n"
              "           power %s   popup %s (#%lu)   inFlight %lu   txGate %s\n"
              "heard      rx %lu   tx %lu   lastRx %lu ms ago%s\n"
+             "mode       %s\n"
              "gate       %s   deafEvents %lu   trace %s\n"
              "sync       0x%02X   registered %u   busy %u\n"
              "speeds     %lu / %lu / %lu ms   dir %c%c%c\n"
@@ -740,6 +880,8 @@ void routes() {
              static_cast<unsigned long>(rxSeen), static_cast<unsigned long>(txSeen),
              static_cast<unsigned long>(rxSeen ? nowMs - lastRx : 0),
              rxSeen ? "" : "   <-- WE HAVE NEVER HEARD THE PANEL",
+             g_link.listenOnly() ? "LISTEN-ONLY  we do not acknowledge anything"
+                                : "NORMAL       we ACK every frame in hardware",
              g_gateOpen ? "OPEN (we are talking)" : "shut (listening only)",
              static_cast<unsigned long>(g_deafEvents),
              g_traceFrozen ? "FROZEN - see /api/trace" : "live",
@@ -867,6 +1009,43 @@ void routes() {
   //
   // True listen-only is NOT available: Esp32CanLink::begin() refuses LinkMode::ListenOnly,
   // because this driver has no safe place to enter it.
+  // THE A/B THAT SETTLES IT, on one boot, with the trace running.
+  //
+  // Listen-only observes the bus WITHOUT ACKNOWLEDGING IT. Normal acknowledges every frame
+  // in hardware whatever the software gate says. If frames pour in with `on=1` and stop dead
+  // with `on=0` while we are still transmitting nothing, then our ACKNOWLEDGEMENT is what
+  // destroys them — which is a different fault from a silent panel and needs the opposite
+  // fix. Nothing else in this console can distinguish those two.
+  g_server.on("/api/listen", HTTP_GET, [](PsychicRequest* r) {
+    const bool on = !(r->getParam("on") && r->getParam("on")->value() == "0");
+    // Shut the gate first and leave it shut: entering listen-only with renders queued would
+    // silently drop them, and coming BACK from it into a live sequence is not what this
+    // switch is for. pumpGate() re-opens on its own once frames are flowing again.
+    g_gateOpen   = false;
+    g_reopenAtMs = millis() + kBackoffMs;
+    g_link.setTxEnabled(false);
+
+    const bool ok = g_link.setListenOnly(on);
+    logmsg("console: listen-only %s -> %s", on ? "ON" : "OFF", ok ? "ok" : "REFUSED");
+    return r->reply(200, "text/plain", ok ? "ok" : "refused");
+  });
+
+  // The full blind handshake, then straight back to listen-only to read the answer.
+  g_server.on("/api/kick", HTTP_GET, [](PsychicRequest* r) {
+    const long ms = r->getParam("ms") ? r->getParam("ms")->value().toInt() : 1500;
+    g_shoutMs    = static_cast<uint32_t>(ms < 300 ? 300 : (ms > 10000 ? 10000 : ms));
+    g_kickWanted = true;
+    g_shoutPhase = 1;
+    return r->reply(200, "text/plain", "kicking");
+  });
+
+  g_server.on("/api/shout", HTTP_GET, [](PsychicRequest* r) {
+    const long ms = r->getParam("ms") ? r->getParam("ms")->value().toInt() : 2500;
+    g_shoutMs    = static_cast<uint32_t>(ms < 200 ? 200 : (ms > 10000 ? 10000 : ms));
+    g_shoutPhase = 1;                    // loop() does the work; see pumpShout()
+    return r->reply(200, "text/plain", "shouting");
+  });
+
   g_server.on("/api/txgate", HTTP_GET, [](PsychicRequest* r) {
     const bool on = !(r->getParam("on") && r->getParam("on")->value() == "0");
     // Go THROUGH the FSM's state rather than around it. Setting the link directly would be
@@ -1069,6 +1248,7 @@ void loop() {
 
   // BEFORE ANYTHING ELSE. Whether we are allowed to transmit at all outranks every render
   // decision below it, and the deaf-detection has to run even when the sequence is parked.
+  pumpShout(now);
   pumpGate(now);
 
   const affa::rtos::Status st = g_task.status();

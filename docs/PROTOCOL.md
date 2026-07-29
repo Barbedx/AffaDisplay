@@ -206,15 +206,39 @@ original source **and in the capture**; it is not deduplicated. `[REF][IMPL]`
 1. the hello frame `70 1A 11 …` on the *sync* id (§3.4), and
 2. **FUNCSREG**: a one-byte payload `{0x70}` sent to *each* registered function id.
 
-FUNCSREG happens inside the **first render call**, not at boot. For Carminat, `funcs[] =
-{0x151, 0x1F1}`, in that order, and the order is on the wire:
+FUNCSREG happens inside the **first render call**, not at boot. Our `funcs[]` is
+`{0x151, 0x1F1}`, in that order, and the order is on the wire:
 
 ```
 151   70 00 00 00 00 00 00 00      →  wait for ACK on 551
 1F1   70 00 00 00 00 00 00 00      →  wait for ACK on 5F1
 ```
 
-Only after **every** entry is acknowledged is `FUNCSREG` set. `[IMPL][OEM]`
+Only after **every** entry is acknowledged is `FUNCSREG` set. `[IMPL]`
+
+#### The factory head unit registers THREE ids, and we register two
+
+Captured `22:37:41`, all three within the same second, each individually acknowledged:
+
+```
+[RX] 0x1C1  70 A3 A3 A3 A3 A3 A3 A3     →  [RX] 0x5C1  74 00 00 00 00 00 00 00
+[RX] 0x151  70 00 00 00 00 00 00 00     →  [RX] 0x551  74 A3 A3 A3 A3 A3 A3 A3
+[RX] 0x1F1  70 00 00 00 00 00 00 00     →  [RX] 0x5F1  74 A3 A3 A3 A3 A3 A3 A3
+```
+
+**`0x1C1` — the key channel — is registered by the factory radio and is absent from our
+`funcs[]`.** Whether the panel requires it before it will consider a master registered is
+**untested**; it is the strongest available explanation for a panel that asks to re-register
+for ever. `[OEM]`
+
+Note the filler differs per channel even within one broadcast: the `0x1C1` probe pads with
+`A3`, the other two with `0x00`. See §1.1 — do not normalise this.
+
+This `70` broadcast is the only re-sync event in the corpus. It occurred twice, one second
+apart, **immediately after a transfer was truncated mid-flight**, and was followed by
+`03 52 09` (display ON) and a full screen redraw from the first frame. So the factory
+recovery for a broken session is: re-register every channel, re-power the display, redraw.
+`[OEM]`
 
 > **Any failure aborts the whole pass and the flag is never set**, so the next render
 > retries the list from index 0. `0x1F1` is registered but never written to — if the panel
