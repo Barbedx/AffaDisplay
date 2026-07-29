@@ -864,14 +864,20 @@ void startHttp() {
   // And do not let a half-open connection hold its slot for the default 5 s each way.
   g_server.config.recv_wait_timeout = 3;
   g_server.config.send_wait_timeout = 3;
-  g_server.config.max_uri_handlers  = 24;
+  // A FIXED ARRAY, and registering past its end fails silently — PsychicHttp does not check
+  // the return, so the route is simply absent and requests to it hit the not-found handler.
+  // canspy hit this with its cap at 20: /ota/upload was the last registration, it fell off,
+  // and the board needed a cable. Headroom here, and OTA registered FIRST below.
+  g_server.config.max_uri_handlers  = 32;
   // The default 4 kB leaves very little room once a handler builds a body. Headroom here is
   // cheap; a handler that overflows it dies silently, returning an empty response.
   g_server.config.stack_size        = 8192;
 
   g_server.listen(80);
-  routes();
 
+  // OTA FIRST, ALWAYS — it is the only way back into a board with no cable, so it claims its
+  // slots before any console route can crowd it out.
+  //
   // An OTA write stalls CAN reception outright: the TWAI ISR is not in IRAM, so a flash
   // write looks exactly like a dead panel. Gate our transmitter for the duration — we are
   // not shouting at a bus we cannot hear — and expect PeerLost plus a resync after reboot.
@@ -888,6 +894,8 @@ void startHttp() {
   });
   ElegantOTA.onEnd([](bool ok) { logmsg("ota %s", ok ? "ok, rebooting" : "FAILED"); });
   ElegantOTA.begin(&g_server);
+
+  routes();
 }
 
 }  // namespace

@@ -618,6 +618,283 @@ void runTimingSweep() {
 }
 
 // ---------------------------------------------------------------------------
+// The jam test — does OUR dominant actually reach the bus?
+// ---------------------------------------------------------------------------
+// This is the question the handoff left open, and /api/pintest cannot answer it. Pintest
+// tears the TWAI driver down so it can own GPIO3, which leaves digitalRead() on CRX as the
+// only detector — and that detector lied: it reported "CRX high 100%" over an 8 ms window
+// while the panel was demonstrably transmitting 1500 frames/s. A sampler that cannot see a
+// fully busy bus cannot be trusted to tell us what our own dominant did to it.
+//
+// So keep the DECODER alive and use IT as the detector. The trick is to install the TWAI
+// driver with its TX parked on an unconnected pin: the controller receives on GPIO4 exactly
+// as it does now, drives nothing anyone can hear, and leaves GPIO3 free for us to bit-bang.
+//
+// Then the measurement is three windows of two seconds:
+//
+//   baseline   CTX recessive           frames decoded = the bus as it normally is
+//   jamming    CTX pulsed dominant     frames decoded = the bus with us shouting on it
+//   recovery   CTX recessive again     proves we did not break anything permanently
+//
+// and the verdict needs no interpretation:
+//
+//   jamming collapses to ~0   our dominant REACHES the bus. The transmit path is physically
+//                             fine and the fault is in WHEN we drive, not WHETHER we can.
+//   jamming ~= baseline       the bus is indifferent to us. Our dominant never reaches the
+//                             wire — transceiver driver dead, disabled, or TXD not connected.
+//                             No firmware change can fix that.
+//
+// Listen-only is deliberate: the controller must not contribute a single dominant bit of its
+// own, or the experiment measures the controller and the bit-bang together.
+constexpr gpio_num_t kJamParkTx = GPIO_NUM_10;   // unconnected on this board; never driven
+
+volatile bool g_wantJam = false;
+bool     g_jamRan  = false;
+uint32_t g_jamBase = 0, g_jamJam = 0, g_jamRec = 0;
+int      g_jamCrxIdle = -1, g_jamCrxDom = -1;
+// % of jam pulses where CTX was READ BACK low after we asked for low. Anything under 100
+// means the pad is not ours and every other number this test produces is worthless.
+int      g_jamTxLowPct = -1;
+
+// Count frames the controller actually decodes over windowMs. With jam set, CTX is pulsed
+// dominant for 100 us at a time — hard enough to destroy any frame in flight, and far inside
+// the transceiver's TXD dominant timeout, which is the trap that inverted the old test.
+uint32_t jamWindow(uint32_t windowMs, bool jam, int* crxHighPct, int* txLowPct) {
+  uint32_t frames = 0, samples = 0, ones = 0, txLow = 0;
+  const uint32_t t0 = millis();
+  while (millis() - t0 < windowMs) {
+    // 50 ms of tight loop, then yield: two seconds without one would trip the task watchdog.
+    const uint32_t c0 = millis();
+    while (millis() - c0 < 50) {
+      if (jam) {
+        gpio_set_level(kTxPin, 0);                       // dominant
+        delayMicroseconds(20);                           // let the transceiver settle
+        // READ CTX BACK, not just CRX. This is the check whose absence would let the test
+        // report "the bus ignored us" when the truth is "we never actually drove the pin".
+        txLow += gpio_get_level(kTxPin) ? 0u : 1u;
+        ones  += gpio_get_level(kRxPin) ? 1u : 0u; ++samples;
+        delayMicroseconds(80);
+        gpio_set_level(kTxPin, 1);                       // recessive, well inside the timeout
+        delayMicroseconds(100);
+      } else {
+        ones += gpio_get_level(kRxPin) ? 1u : 0u; ++samples;
+        delayMicroseconds(200);
+      }
+      twai_message_t m;
+      while (twai_receive(&m, 0) == ESP_OK) ++frames;
+    }
+    delay(1);
+  }
+  if (crxHighPct) *crxHighPct = samples ? static_cast<int>((ones  * 100) / samples) : -1;
+  if (txLowPct)   *txLowPct   = samples ? static_cast<int>((txLow * 100) / samples) : -1;
+  return frames;
+}
+
+void runJam() {
+  g_jamRan = true;
+  if (g_rate != 500000)
+    logmsg("jam: rate is %lu but this test installs 500k - results are meaningless",
+           static_cast<unsigned long>(g_rate));
+
+  logmsg("jam: decoder stays LIVE on GPIO%d, TWAI TX parked on unconnected GPIO%d, "
+         "GPIO%d is ours to drive", static_cast<int>(kRxPin),
+         static_cast<int>(kJamParkTx), static_cast<int>(kTxPin));
+
+  CAN0.disable();
+  delay(50);
+
+  twai_general_config_t g =
+      TWAI_GENERAL_CONFIG_DEFAULT(kJamParkTx, kRxPin, TWAI_MODE_LISTEN_ONLY);
+  g.rx_queue_len = 64;
+  g.tx_queue_len = 1;
+  twai_timing_config_t t = TWAI_TIMING_CONFIG_500KBITS();
+  twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+  if (twai_driver_install(&g, &t, &f) != ESP_OK || twai_start() != ESP_OK) {
+    logmsg("jam: could not install the listen-only decoder - test aborted, nothing measured");
+    twai_driver_uninstall();
+  } else {
+    // The peripheral has GPIO10 and GPIO4. GPIO3 is still matrix-attached to the OLD TWAI TX
+    // until it is reset by hand — the same trap documented on runPinTest(), and the reason
+    // INPUT_OUTPUT is used: it keeps the input buffer alive so the level can be read back.
+    gpio_reset_pin(kTxPin);
+    gpio_set_direction(kTxPin, GPIO_MODE_INPUT_OUTPUT);
+    gpio_set_level(kTxPin, 1);
+    delay(5);
+    const int readbackHigh = gpio_get_level(kTxPin);
+
+    g_jamBase = jamWindow(2000, false, &g_jamCrxIdle, nullptr);
+    g_jamJam  = jamWindow(2000, true,  &g_jamCrxDom,  &g_jamTxLowPct);
+    gpio_set_level(kTxPin, 1);
+    g_jamRec  = jamWindow(2000, false, nullptr,       nullptr);
+
+    twai_stop();
+    twai_driver_uninstall();
+
+    logmsg("jam: baseline %lu frames/2s (CRX high %d%%)",
+           static_cast<unsigned long>(g_jamBase), g_jamCrxIdle);
+    logmsg("jam: JAMMING  %lu frames/2s (CRX high %d%% while we held CTX dominant)",
+           static_cast<unsigned long>(g_jamJam), g_jamCrxDom);
+    logmsg("jam: after    %lu frames/2s", static_cast<unsigned long>(g_jamRec));
+    logmsg("jam: CTX read back LOW on %d%% of the pulses we asked to be low", g_jamTxLowPct);
+
+    if (g_jamTxLowPct < 95) {
+      logmsg("jam INVALID - we asked GPIO%d for dominant and the PAD DID NOT FOLLOW (%d%%). "
+             "The pin is not under GPIO control, so this test says nothing about the bus. "
+             "Fix the pad ownership first.", static_cast<int>(kTxPin), g_jamTxLowPct);
+    } else if (readbackHigh != 1) {
+      logmsg("jam INVALID - GPIO%d did not read back recessive; something external holds it",
+             static_cast<int>(kTxPin));
+    } else if (g_jamBase < 200) {
+      logmsg("jam INCONCLUSIVE - the bus was not busy enough to notice being jammed "
+             "(%lu frames baseline). Nothing can be concluded.",
+             static_cast<unsigned long>(g_jamBase));
+    } else if (g_jamJam * 4 < g_jamBase) {
+      logmsg("jam PASS - our dominant REACHES the bus: jamming destroyed %lu%% of the "
+             "traffic. The transmit path is physically fine; the fault is in WHEN we drive.",
+             static_cast<unsigned long>(100 - (g_jamJam * 100) / g_jamBase));
+    } else if (g_jamJam * 10 > g_jamBase * 8) {
+      logmsg("jam FAIL - the bus is INDIFFERENT to us (%lu vs %lu baseline). Our dominant "
+             "never reaches the wire: transceiver driver dead, disabled, or TXD not "
+             "connected to GPIO%d. No firmware change can fix this.",
+             static_cast<unsigned long>(g_jamJam), static_cast<unsigned long>(g_jamBase),
+             static_cast<int>(kTxPin));
+    } else {
+      logmsg("jam PARTIAL - %lu vs %lu baseline. Our dominant reaches the bus weakly, which "
+             "is what a marginal driver or missing termination looks like.",
+             static_cast<unsigned long>(g_jamJam), static_cast<unsigned long>(g_jamBase));
+    }
+  }
+
+  // Give the peripheral back to esp32_can exactly as it was.
+  gpio_reset_pin(kTxPin);
+  gpio_reset_pin(kRxPin);
+  CAN0.setCANPins(kRxPin, kTxPin);
+  CAN0.begin(g_rate);
+  if (g_listen) CAN0.setListenOnlyMode(true);
+  CAN0.setGeneralCallback(&onCanFrame);
+  CAN0.watchFor();
+  logmsg("jam: TWAI restored, %s", g_listen ? "listen-only" : "normal");
+}
+
+// ---------------------------------------------------------------------------
+// The jam sweep — if GPIO3 is not TXD, which pin is?
+// ---------------------------------------------------------------------------
+// runJam() proves the bus ignores GPIO3. There are two ways that happens: the transceiver
+// cannot drive (dead output stage, or a standby/silent pin asserted), or GPIO3 is simply not
+// the pin soldered to TXD. The second one is free to rule out, and the rig's own history says
+// to take it seriously — the memory of this board records that MeganeCAN's otherwise identical
+// module is wired with rx and tx the other way round.
+//
+// So run the jam measurement once per candidate pin. Any pin that collapses the decoded frame
+// count IS the transmit path, whatever the silkscreen says. GPIO4 is excluded because it is
+// proven to be RXD; GPIO18/19 are the C3's USB pins and would disconnect the console; GPIO21
+// parks the controller's own transmitter, which in listen-only never drives dominant and so
+// cannot affect the measurement.
+const gpio_num_t kSweepPins[] = {
+  GPIO_NUM_0, GPIO_NUM_1, GPIO_NUM_2,  GPIO_NUM_3,  GPIO_NUM_5, GPIO_NUM_6,
+  GPIO_NUM_7, GPIO_NUM_8, GPIO_NUM_9,  GPIO_NUM_10, GPIO_NUM_20,
+};
+constexpr size_t kSweepCount = sizeof(kSweepPins) / sizeof(kSweepPins[0]);
+constexpr gpio_num_t kSweepParkTx = GPIO_NUM_21;
+
+volatile bool g_wantJamSweep = false;
+bool     g_jsRan = false;
+int      g_jsFound = -1;                 // the pin that jammed, or -1
+uint32_t g_jsBase = 0;
+uint32_t g_jsGot[kSweepCount] = {0};
+
+// The same window as jamWindow(), against an arbitrary pin.
+uint32_t sweepWindow(gpio_num_t pin, uint32_t windowMs, bool jam) {
+  uint32_t frames = 0;
+  const uint32_t t0 = millis();
+  while (millis() - t0 < windowMs) {
+    const uint32_t c0 = millis();
+    while (millis() - c0 < 50) {
+      if (jam) {
+        gpio_set_level(pin, 0);
+        delayMicroseconds(100);
+        gpio_set_level(pin, 1);
+        delayMicroseconds(100);
+      } else {
+        delayMicroseconds(200);
+      }
+      twai_message_t m;
+      while (twai_receive(&m, 0) == ESP_OK) ++frames;
+    }
+    delay(1);
+  }
+  return frames;
+}
+
+void runJamSweep() {
+  g_jsRan   = true;
+  g_jsFound = -1;
+  logmsg("jam sweep: %u candidate pins, 800 ms each, decoder live on GPIO%d",
+         static_cast<unsigned>(kSweepCount), static_cast<int>(kRxPin));
+
+  CAN0.disable();
+  delay(50);
+
+  twai_general_config_t g =
+      TWAI_GENERAL_CONFIG_DEFAULT(kSweepParkTx, kRxPin, TWAI_MODE_LISTEN_ONLY);
+  g.rx_queue_len = 64;
+  g.tx_queue_len = 1;
+  twai_timing_config_t t = TWAI_TIMING_CONFIG_500KBITS();
+  twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+  if (twai_driver_install(&g, &t, &f) != ESP_OK || twai_start() != ESP_OK) {
+    logmsg("jam sweep: decoder would not install - aborted");
+    twai_driver_uninstall();
+  } else {
+    g_jsBase = sweepWindow(kRxPin, 800, false);       // pin unused when jam is false
+    logmsg("jam sweep: baseline %lu frames/800ms", static_cast<unsigned long>(g_jsBase));
+
+    if (g_jsBase < 100) {
+      logmsg("jam sweep: bus too quiet to detect jamming - nothing measured");
+    } else {
+      for (size_t i = 0; i < kSweepCount; ++i) {
+        const gpio_num_t p = kSweepPins[i];
+        gpio_reset_pin(p);
+        gpio_set_direction(p, GPIO_MODE_INPUT_OUTPUT);
+        gpio_set_level(p, 1);
+        delay(2);
+
+        g_jsGot[i] = sweepWindow(p, 800, true);
+
+        gpio_set_level(p, 1);
+        gpio_reset_pin(p);
+
+        const bool hit = (g_jsGot[i] * 4 < g_jsBase);
+        logmsg("  GPIO%-2d  %4lu frames  %s", static_cast<int>(p),
+               static_cast<unsigned long>(g_jsGot[i]), hit ? "<<< JAMS THE BUS" : "no effect");
+        if (hit && g_jsFound < 0) g_jsFound = static_cast<int>(p);
+        delay(20);
+      }
+
+      if (g_jsFound >= 0)
+        logmsg("jam sweep: GPIO%d reaches the bus. THAT is the transmit pin - rebuild with "
+               "tx=GPIO%d.", g_jsFound, g_jsFound);
+      else
+        logmsg("jam sweep: NO pin on this board can disturb the bus. The transmit path is "
+               "not a wiring choice we can make in firmware - it is the transceiver.");
+    }
+
+    twai_stop();
+    twai_driver_uninstall();
+  }
+
+  gpio_reset_pin(kTxPin);
+  gpio_reset_pin(kRxPin);
+  CAN0.setCANPins(kRxPin, kTxPin);
+  CAN0.begin(g_rate);
+  if (g_listen) CAN0.setListenOnlyMode(true);
+  CAN0.setGeneralCallback(&onCanFrame);
+  CAN0.watchFor();
+  logmsg("jam sweep: TWAI restored, %s", g_listen ? "listen-only" : "normal");
+}
+
+// ---------------------------------------------------------------------------
 // JSON
 // ---------------------------------------------------------------------------
 char   g_out[8192];
@@ -673,6 +950,16 @@ void jStatus() {
      g_stRan ? "true" : "false", g_stPass ? "true" : "false",
      static_cast<unsigned>(g_stTries), static_cast<unsigned long>(g_stGot),
      g_wantSelfTest ? "true" : "false");
+
+  jf("\"jam\":{\"ran\":%s,\"base\":%lu,\"jam\":%lu,\"after\":%lu,"
+     "\"crxIdlePct\":%d,\"crxDomPct\":%d,\"txLowPct\":%d,\"busy\":%s},",
+     g_jamRan ? "true" : "false", static_cast<unsigned long>(g_jamBase),
+     static_cast<unsigned long>(g_jamJam), static_cast<unsigned long>(g_jamRec),
+     g_jamCrxIdle, g_jamCrxDom, g_jamTxLowPct, g_wantJam ? "true" : "false");
+
+  jf("\"jamsweep\":{\"ran\":%s,\"found\":%d,\"base\":%lu,\"busy\":%s},",
+     g_jsRan ? "true" : "false", g_jsFound, static_cast<unsigned long>(g_jsBase),
+     g_wantJamSweep ? "true" : "false");
 
   jf("\"drv\":{\"valid\":%s,\"state\":%u,\"txErr\":%lu,\"rxErr\":%lu,\"busErr\":%lu,"
      "\"arbLost\":%lu,\"rxMissed\":%lu,\"toTx\":%lu,\"toRx\":%lu},",
@@ -770,6 +1057,7 @@ label{margin-left:10px}
 <div>
 <button onclick=go('/api/listen?on=1')>LISTEN-ONLY (passive)</button>
 <button onclick=go('/api/listen?on=0')>normal (we ACK)</button>
+<button onclick=go("/api/jam")>JAM TEST (decoder live - does our dominant reach the bus?)</button>
 <button onclick=go("/api/pintest")>PIN TEST (drive CTX, watch CRX)</button>
 <button onclick=go("/api/looptest?pin=6")>INTERNAL LOOPBACK (no transceiver)</button>
 <button onclick=go("/api/selftest")>TX self-test on real pins</button>
@@ -906,6 +1194,19 @@ void routes() {
     return replyJson(r);
   });
 
+  // Six seconds of measurement; the answer lands in /api/log and /api/status.
+  g_server.on("/api/jam", HTTP_GET, [](PsychicRequest* r) {
+    g_wantJam = true;
+    jclear(); jf("{\"queued\":true}");
+    return replyJson(r);
+  });
+
+  g_server.on("/api/jamsweep", HTTP_GET, [](PsychicRequest* r) {
+    g_wantJamSweep = true;
+    jclear(); jf("{\"queued\":true}");
+    return replyJson(r);
+  });
+
   g_server.on("/api/looptest", HTTP_GET, [](PsychicRequest* r) {
     g_wantLoop = static_cast<int16_t>(pnum(r, "pin", 6));
     jclear(); jf("{\"queued\":true,\"pin\":%d}", static_cast<int>(g_wantLoop));
@@ -995,15 +1296,29 @@ void startHttp() {
   g_server.config.max_open_sockets  = 7;
   g_server.config.recv_wait_timeout = 3;
   g_server.config.send_wait_timeout = 3;
-  g_server.config.max_uri_handlers  = 20;
+  // THE SECOND LOCKOUT, and it cost a cable to learn. esp_http_server's URI table is a FIXED
+  // ARRAY of max_uri_handlers entries, and httpd_register_uri_handler() past the end simply
+  // fails — PsychicHttp does not check the return, so the route is silently absent and every
+  // request to it falls through to the not-found handler. With this at 20, seventeen routes
+  // here plus ElegantOTA's three (/update, /ota/start, /ota/upload) sat EXACTLY on the limit.
+  // Adding one diagnostic endpoint pushed /ota/upload — the last one registered — off the
+  // end, and the board could no longer be flashed: /ota/start still answered "OK" and the
+  // upload came back "Request body must be less than 16384 bytes!", which is PsychicHttp's
+  // default handler talking, not ElegantOTA.
+  g_server.config.max_uri_handlers  = 32;
   g_server.config.stack_size        = 8192;
 
   g_server.listen(80);
-  routes();
 
+  // OTA FIRST, ALWAYS. It is the way back into a board with no cable, so it takes its slots
+  // before anything else can crowd it out. Diagnostics are what this firmware is FOR and they
+  // will keep being added; if the table ever fills again, the thing that breaks must be a
+  // diagnostic endpoint, never the route that lets the next image in.
   ElegantOTA.onStart([]() { g_otaRunning = true; logmsg("ota started"); });
   ElegantOTA.onEnd([](bool ok) { logmsg("ota %s", ok ? "ok, rebooting" : "FAILED"); });
   ElegantOTA.begin(&g_server);
+
+  routes();
 }
 
 }  // namespace
@@ -1070,6 +1385,16 @@ void loop() {
   if (g_wantPinTest && !g_otaRunning) {
     g_wantPinTest = false;
     runPinTest();
+  }
+
+  if (g_wantJam && !g_otaRunning) {
+    g_wantJam = false;
+    runJam();
+  }
+
+  if (g_wantJamSweep && !g_otaRunning) {
+    g_wantJamSweep = false;
+    runJamSweep();
   }
 
   if (g_wantLoop >= 0 && !g_otaRunning) {
