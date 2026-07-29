@@ -558,6 +558,38 @@ else:
 > transmit queue permanently and starves everything behind it. **The hello must be paced
 > independently of the request rate**; the sync *state* still advances per request.
 
+### 8.1 An unacknowledged panel is in CAN-level retransmit, and it looks like two states
+
+Measured 2026-07-29, listen-only, over hours. A panel with no master alternates two frames in
+line-rate bursts:
+
+```
+3CF  61 11 01 A3 A3 A3 A3 A3   ×635 in 448 ms
+3CF  69 00 A3 A3 A3 A3 A3 A3   ×126 in  32 ms
+```
+
+**A "1 Hz peer-alive ping" arriving 126 times in 32 ms is not a ping.** Both frames are being
+retransmitted by the CAN controller because nothing is giving them an **ACK bit** — the
+link-layer acknowledgement, not the application `0x74`. The panel goes error-passive, so its
+error flags are recessive and invisible on the wire, and it will sit like that indefinitely.
+
+Consequences that matter for anyone reading a capture of this bus:
+
+- **Frame counts are meaningless as protocol events.** 635 copies of `61 11 01` is *one*
+  request, retransmitted. Coalesce identical consecutive frames before interpreting anything.
+- **A listen-only capture of an unacknowledged bus looks perfectly healthy** — zero stuff,
+  form or CRC errors — because passive error flags are recessive. Clean does not mean synced.
+- **There is no polite window after a power cycle.** Measured at 1500 frames/s within 8 s of
+  the panel being powered up. Any design that assumes it must catch the panel early is wrong.
+- **Bus occupancy is ~92 %.** Anything that must transmit has to fit in what is left.
+
+### 8.2 Registration is bidirectional and the panel keeps its own state
+
+See §3.5. The panel registers itself on its key channel and expects the master to acknowledge
+it; the master registers its own function ids and expects the panel to acknowledge those.
+Either side can decide the other's registration is void — `61 11 01` is the panel doing
+exactly that — and neither side re-checks it spontaneously.
+
 ---
 
 ## 9. Traps

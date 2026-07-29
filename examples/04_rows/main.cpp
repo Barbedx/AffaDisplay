@@ -1208,20 +1208,37 @@ void setup() {
   delay(300);
   Serial.println("\nAffaDisplay 04_rows");
 
-  // NETWORK AND OTA FIRST, before anything that can fail. Everything after this point may
-  // go wrong without costing you the board.
-  startNetwork();
-  startHttp();
-
+  // ===========================================================================
+  // CAN FIRST. WIFI SECOND. THIS ORDER IS THE POINT OF THIS BUILD.
+  // ===========================================================================
+  // Every previous version joined WiFi before touching the bus — and WiFi.begin() blocks for
+  // up to kStaJoinMs, FIFTEEN SECONDS. On a shared supply the panel and this board power up
+  // together, so those fifteen seconds are spent off the bus entirely.
+  //
+  // AND THE FIRST SECONDS ARE THE ONLY ONES THAT MATTER. A freshly powered panel is POLITE:
+  // the run that worked measured 498 frames over 250 s, about 2/s. A panel that has concluded
+  // it has no master hammers its sync request at line rate — 1470/s, 92 % bus occupancy —
+  // and that is the state every measurement since has been fighting. The panel does not
+  // recover from it on its own; only a power cycle resets it.
+  //
+  // So the window in which this link can be established is the moment after power-on, and we
+  // have been sleeping through it in WiFi.begin(). CAN now comes up within milliseconds of
+  // boot, ready to answer the panel's very first request.
+  //
+  // The cost is that a CAN failure now precedes OTA. That is acceptable because begin() does
+  // not block — it installs a driver and returns — whereas WiFi does.
   if (!g_link.begin(kPins, kBitrate, kForceRecoveryMs))
-    logmsg("can: controller did not come up");
+    Serial.println("[can] controller did not come up");
 
-  // SHUT BEFORE THE FIRST POLL, not three seconds into boot. The library starts its sync FSM
-  // the moment the task runs, and the frames it would send in that first second are exactly
-  // the ones under suspicion. See LISTEN BEFORE YOU SPEAK above.
-  g_link.setTxEnabled(false);
-  logmsg("gate SHUT at boot - listening only until we have heard %u frames",
-         static_cast<unsigned>(kHeardEnough));
+  // AND THE GATE STARTS OPEN, which reverses the previous build deliberately.
+  //
+  // Booting silent was the right answer to "are we poisoning a sulking panel?" — and the
+  // answer measured out as no: with the gate shut and zero frames transmitted, reception was
+  // exactly as dead. The panel is not sulking at us. It is asking for a master, and the only
+  // thing that stops it asking is being ANSWERED. Staying quiet through the one window in
+  // which it is still willing to listen is the opposite of what we want.
+  g_gateOpen   = true;
+  g_gateOpenMs = 0;
 
   g_rows.setScroll(0, kSpeedFast);
   g_rows.setScroll(1, kSpeedMedium);
@@ -1236,7 +1253,13 @@ void setup() {
   g_display.begin();
 
   if (!g_task.start(g_display))
-    logmsg("task: start() FAILED - nothing will be polled");
+    Serial.println("[task] start() FAILED - nothing will be polled");
+
+  // Network AFTER the bus. OTA is still reached long before anyone can need it.
+  startNetwork();
+  startHttp();
+  logmsg("CAN was up %lu ms before WiFi finished - that is the whole change",
+         static_cast<unsigned long>(millis()));
 
   logmsg("up: rows %lu/%lu/%lu ms, popup every %lus for %lus",
          static_cast<unsigned long>(kSpeedFast), static_cast<unsigned long>(kSpeedMedium),
