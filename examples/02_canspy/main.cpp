@@ -1617,6 +1617,24 @@ void startHttp() {
 
 // ---------------------------------------------------------------------------
 void setup() {
+  // THE VERY FIRST INSTRUCTION, AND IT HAS TO BE.
+  //
+  // Nothing drives GPIO3 between reset and twai_driver_install(). The pad comes out of reset
+  // as a floating input, and a floating TXD is NOT guaranteed recessive — if it sits low the
+  // transceiver drives the bus dominant and we jam the whole bus while doing nothing at all.
+  // Every other node then sees a permanently dominant bus for as long as the window lasts.
+  //
+  // That window used to run from reset all the way past Serial, WiFi and the HTTP server —
+  // over three seconds, and longer still during a flash. On 2026-07-29 the panel went silent
+  // at the exact moment of a USB flash and never came back: a bus held dominant for the
+  // duration of a reflash is a plausible way to put the node at the other end into a state
+  // that only its own power cycle clears.
+  //
+  // So claim the pin before anything else happens and hold it recessive. It costs two lines
+  // and it cannot be done too early.
+  pinMode(kTxPin, OUTPUT);
+  digitalWrite(kTxPin, HIGH);
+
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
   delay(300);

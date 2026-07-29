@@ -902,6 +902,16 @@ void startHttp() {
 
 // ---------------------------------------------------------------------------
 void setup() {
+  // FIRST, AND IT CANNOT BE TOO EARLY. Nothing drives the CAN TX pad between reset and
+  // twai_driver_install(): it comes out of reset floating, and a floating TXD is not
+  // guaranteed recessive. Sitting low makes the transceiver hold the whole bus dominant while
+  // we are doing nothing but booting — and that window otherwise spans Serial, WiFi and the
+  // web server. On 2026-07-29 the bench panel went silent at the moment of a flash and did not
+  // come back; a bus pinned dominant for the length of a reflash is a good way to leave the
+  // node at the far end in a state only its own power cycle clears.
+  pinMode(kPins.tx, OUTPUT);
+  digitalWrite(kPins.tx, HIGH);  // recessive, and actively so
+
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);      // a detached USB host must not be able to stall a write
   delay(300);                    // the application may sleep; the library may not
