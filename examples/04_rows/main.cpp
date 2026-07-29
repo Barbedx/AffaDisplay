@@ -187,17 +187,35 @@ void logmsg(const char* fmt, ...) {
 // Pushed from the library's owned task, read from the HTTP task, so it takes a spinlock. Not
 // because it is precious, but because a torn record here sends you hunting a protocol bug
 // that does not exist.
+// A RAW RING IS THE WRONG SHAPE HERE and it is why nothing useful has been captured yet.
+// The panel transmits ONE IDENTICAL FRAME back to back at line rate — measured ~3000 in two
+// seconds — so sixty-four raw slots hold about twenty milliseconds of history and every one
+// of them says the same thing. The two frames a second that WE send, which are the only
+// candidate cause, are flushed out before anyone can read them.
+//
+// So identical consecutive frames COALESCE into one row with a repeat count and a last-seen
+// stamp. The panel's flood becomes a single line, our transmissions stay visible next to it,
+// and the ring holds minutes instead of milliseconds. A trace then reads:
+//
+//     RX 3CF 61 11 01 A3.. x14832   (t=2140..7003)
+//     TX 3AF B9 00 ..               (t=7010)
+//     RX 3CF 61 11 01 A3.. x4       (t=7011..7012)
+//     <nothing more>
+//
+// which names the last frame we sent before the bus went quiet. That is the whole question.
 struct FrameRec {
-  uint32_t ms  = 0;
-  uint16_t id  = 0;
-  uint8_t  dir = 0;          // 0 = RX (heard), 1 = TX (ours)
-  uint8_t  len = 0;
-  uint8_t  d[8] = {0};
+  uint32_t firstMs = 0;
+  uint32_t lastMs  = 0;
+  uint32_t count   = 0;
+  uint16_t id      = 0;
+  uint8_t  dir     = 0;      // 0 = RX (heard), 1 = TX (ours)
+  uint8_t  len     = 0;
+  uint8_t  d[8]    = {0};
 };
-constexpr uint8_t kFrameRing = 64;
+constexpr uint8_t kFrameRing = 48;
 FrameRec     g_frames[kFrameRing];
-uint8_t      g_frameHead = 0;
-uint32_t     g_frameSeq  = 0;
+uint8_t      g_frameHead = 0;      // slot AFTER the newest, i.e. the next one to overwrite
+uint32_t     g_frameSeq  = 0;      // total frames observed, uncoalesced
 portMUX_TYPE g_frameMux  = portMUX_INITIALIZER_UNLOCKED;
 
 // Counted separately from the driver's counters: these are frames that reached the LIBRARY,
@@ -206,19 +224,43 @@ uint32_t g_rxSeen   = 0;
 uint32_t g_txSeen   = 0;
 uint32_t g_lastRxMs = 0;
 
+// THE TRACE FREEZES ITSELF WHEN RECEPTION STOPS, and that is the entire point of it. Every
+// measurement taken so far has been of the steady state AFTER the link died, by which time
+// the evidence has been overwritten by a thousand of our own retries. Frozen, the ring holds
+// the last frames before the panel went quiet — including whatever we transmitted into it.
+bool     g_traceFrozen = false;
+uint32_t g_frozenAtMs  = 0;
+
 void onTap(const affa::Frame& f, affa::Direction d, void*) {
   const bool rx = (d == affa::Direction::Rx);
   const uint32_t ms = ::millis();
   portENTER_CRITICAL(&g_frameMux);
-  FrameRec& r = g_frames[g_frameHead];
-  r.ms  = ms;
-  r.id  = static_cast<uint16_t>(f.id);
-  r.dir = rx ? 0 : 1;
-  r.len = f.len;
-  memcpy(r.d, f.data, 8);
-  g_frameHead = static_cast<uint8_t>((g_frameHead + 1) % kFrameRing);
   ++g_frameSeq;
   if (rx) { ++g_rxSeen; g_lastRxMs = ms; } else { ++g_txSeen; }
+
+  if (!g_traceFrozen) {
+    // Coalesce against the NEWEST row only. Not a search: the question is "what changed",
+    // and a run that is interrupted and resumes is exactly the thing that must show as two
+    // rows rather than one.
+    FrameRec& last = g_frames[(g_frameHead + kFrameRing - 1) % kFrameRing];
+    const bool same = last.count && last.dir == (rx ? 0 : 1) &&
+                      last.id == static_cast<uint16_t>(f.id) && last.len == f.len &&
+                      memcmp(last.d, f.data, 8) == 0;
+    if (same) {
+      ++last.count;
+      last.lastMs = ms;
+    } else {
+      FrameRec& r = g_frames[g_frameHead];
+      r.firstMs = ms;
+      r.lastMs  = ms;
+      r.count   = 1;
+      r.id      = static_cast<uint16_t>(f.id);
+      r.dir     = rx ? 0 : 1;
+      r.len     = f.len;
+      memcpy(r.d, f.data, 8);
+      g_frameHead = static_cast<uint8_t>((g_frameHead + 1) % kFrameRing);
+    }
+  }
   portEXIT_CRITICAL(&g_frameMux);
 }
 
@@ -305,6 +347,43 @@ bool     g_popupUp     = false;
 uint32_t g_popupNextMs = 0;
 uint32_t g_popupUntil  = 0;
 uint32_t g_popupCount  = 0;
+
+// ---------------------------------------------------------------------------
+// LISTEN BEFORE YOU SPEAK
+// ---------------------------------------------------------------------------
+// THE BOARD COMES UP WITH ITS TRANSMITTER GATED SHUT, and this is the change that matters
+// rather than any of the instrumentation around it.
+//
+// The panel repeats one identical frame back to back at line rate. That is not a node
+// spamming; it is a CAN transmitter RETRANSMITTING BECAUSE NOTHING HAS ACKNOWLEDGED IT. A
+// node in that state is transmitting essentially all the time, and a node that is
+// transmitting cannot acknowledge anybody else — so our own frames go unacknowledged too,
+// our controller retries, and both ends sit in a deadlock neither can leave. Every
+// measurement of this rig fits that shape: perfect in listen-only, collapse the moment we
+// drive, `rxErr` 129 (a bit error on the ACK — the one bit we drive), `txErr` -> 128 ->
+// bus-off, and a working image that heard 498 frames and then went deaf for ever.
+//
+// THE SOFTWARE GATE IS EXACTLY THE RIGHT TOOL and it is why it is not a driver mode: it
+// refuses our own send() while THE CONTROLLER STILL ACKS IN HARDWARE. So with the gate shut
+// we are the silent listener that acknowledges — which is precisely what a runaway
+// retransmitter needs to see in order to stop. Listen-only cannot do this: it acknowledges
+// nothing, which is why it never rescues the bus however long it runs.
+//
+// Only once we have actually heard the panel do we open the gate and let the library talk.
+constexpr uint32_t kQuietMinMs    = 3000;   // never speak before this, however loud the bus
+constexpr uint8_t  kHeardEnough   = 20;     // frames decoded before we consider the bus sane
+
+// AND IF IT DIES AGAIN, GO QUIET AGAIN. Reception stopping while our gate is open is the one
+// event worth reacting to, because it is the transition nobody has ever captured. We freeze
+// the trace, shut the gate, and let the panel recover — rather than retrying into it, which
+// is what has been happening for three days.
+constexpr uint32_t kDeafMs        = 600;    // no RX for this long, having heard before
+constexpr uint32_t kBackoffMs     = 5000;   // stay silent this long before trying again
+
+bool     g_gateOpen    = false;   // our copy; g_link owns the truth
+uint32_t g_gateOpenMs  = 0;       // when we last opened it
+uint32_t g_reopenAtMs  = 0;       // when we may open it again after a backoff
+uint32_t g_deafEvents  = 0;       // times reception died while we were talking
 
 // Soak counters. Read from the HTTP task without a lock: aligned 32-bit reads do not tear on
 // this core, and a diagnostic that is one repaint stale is still a correct diagnostic.
@@ -418,6 +497,50 @@ void pumpScreen(uint32_t now) {
   ++g_repaints;
 }
 
+// ---------------------------------------------------------------------------
+// The gate FSM — silent until the bus proves itself, silent again the moment it stops
+// ---------------------------------------------------------------------------
+void pumpGate(uint32_t now) {
+  uint32_t rxSeen, lastRx;
+  portENTER_CRITICAL(&g_frameMux);
+  rxSeen = g_rxSeen;
+  lastRx = g_lastRxMs;
+  portEXIT_CRITICAL(&g_frameMux);
+
+  if (!g_gateOpen) {
+    if (!affa::expired(now, g_reopenAtMs)) return;      // serving a backoff
+    if (now < kQuietMinMs) return;                      // never speak in the first seconds
+    if (rxSeen < kHeardEnough) return;                  // we have not heard enough to trust it
+
+    g_gateOpen   = true;
+    g_gateOpenMs = now;
+    g_link.setTxEnabled(true);
+    logmsg("gate OPEN after %lu frames heard (silent for %lu ms) - the library may talk now",
+           static_cast<unsigned long>(rxSeen), static_cast<unsigned long>(now));
+    return;
+  }
+
+  // ---- talking. Watch for the bus going quiet under us. -------------------
+  if (rxSeen == 0) return;                              // cannot go deaf without ever hearing
+  if (!affa::expired(now, lastRx + kDeafMs)) return;    // still hearing it
+
+  ++g_deafEvents;
+  portENTER_CRITICAL(&g_frameMux);
+  const bool froze = !g_traceFrozen;
+  if (froze) { g_traceFrozen = true; g_frozenAtMs = now; }
+  portEXIT_CRITICAL(&g_frameMux);
+
+  g_gateOpen  = false;
+  g_reopenAtMs = now + kBackoffMs;
+  g_link.setTxEnabled(false);
+
+  logmsg("DEAF after %lu ms of talking, %lu frames heard - trace %s, going quiet %lu ms",
+         static_cast<unsigned long>(now - g_gateOpenMs),
+         static_cast<unsigned long>(rxSeen),
+         froze ? "FROZEN (see /api/trace)" : "already frozen",
+         static_cast<unsigned long>(kBackoffMs));
+}
+
 void soakReport(uint32_t now) {
   if (!affa::expired(now, g_nextSoakMs)) return;
   g_nextSoakMs = now + kSoakReportMs;
@@ -469,7 +592,6 @@ constexpr uint32_t    kStaJoinMs     = 15000;
 
 PsychicHttpServer g_server;
 bool     g_otaRunning = false;
-bool     g_txGate     = true;    // mirrors Esp32CanLink::setTxEnabled, for the console
 uint32_t g_rebootAt   = 0;
 
 const char kPage[] PROGMEM = R"HTML(<!doctype html><meta charset=utf-8>
@@ -501,8 +623,11 @@ a{color:#8ab}
 <fieldset><legend>wire &mdash; is the panel talking?</legend>
 <button onclick=go('/api/txgate?on=0')>TX gate SHUT (go silent)</button>
 <button onclick=go('/api/txgate?on=1')>TX gate open</button>
-<div class=row>Shut the gate and watch <b>rx</b> above. Still 0 &rarr; we are silent and the
-fault is on the wire or at the panel. Climbing &rarr; we were trampling the bus.</div>
+<button onclick=go('/api/trace')>re-arm trace</button>
+<div class=row>The board boots SILENT and only speaks once it has heard the panel. If
+reception stops while it is talking, the trace below <b>freezes</b> and it goes quiet again
+&mdash; so the last frames before the bus died stay readable. Identical frames are collapsed
+into one row with a repeat count.</div>
 <pre id=f>...</pre>
 </fieldset>
 
@@ -594,6 +719,7 @@ void routes() {
              "step       %s\n"
              "           power %s   popup %s (#%lu)   inFlight %lu   txGate %s\n"
              "heard      rx %lu   tx %lu   lastRx %lu ms ago%s\n"
+             "gate       %s   deafEvents %lu   trace %s\n"
              "sync       0x%02X   registered %u   busy %u\n"
              "speeds     %lu / %lu / %lu ms   dir %c%c%c\n"
              "paints     %lu   fails %lu   timeouts %lu   syncLost %lu\n"
@@ -610,10 +736,13 @@ void routes() {
              stepName(g_step),
              g_powerIsOn ? "on" : "off",
              g_popupUp ? "up" : "down", static_cast<unsigned long>(g_popupCount),
-             static_cast<unsigned long>(g_inFlight), g_txGate ? "open" : "SHUT",
+             static_cast<unsigned long>(g_inFlight), g_gateOpen ? "open" : "SHUT",
              static_cast<unsigned long>(rxSeen), static_cast<unsigned long>(txSeen),
              static_cast<unsigned long>(rxSeen ? nowMs - lastRx : 0),
              rxSeen ? "" : "   <-- WE HAVE NEVER HEARD THE PANEL",
+             g_gateOpen ? "OPEN (we are talking)" : "shut (listening only)",
+             static_cast<unsigned long>(g_deafEvents),
+             g_traceFrozen ? "FROZEN - see /api/trace" : "live",
              static_cast<unsigned>(st.sync), st.registered ? 1u : 0u, st.busy ? 1u : 0u,
              static_cast<unsigned long>(g_rows.scroll(0)),
              static_cast<unsigned long>(g_rows.scroll(1)),
@@ -679,33 +808,53 @@ void routes() {
     // body. Every handler runs on that one task, so two snapshots are never taken at once.
     static FrameRec snap[kFrameRing];
     uint8_t  head;
-    uint32_t seq;
+    uint32_t seq, frozenAt;
+    bool     frozen;
     portENTER_CRITICAL(&g_frameMux);
     memcpy(snap, g_frames, sizeof(snap));
-    head = g_frameHead;
-    seq  = g_frameSeq;
+    head     = g_frameHead;
+    seq      = g_frameSeq;
+    frozen   = g_traceFrozen;
+    frozenAt = g_frozenAtMs;
     portEXIT_CRITICAL(&g_frameMux);
 
-    const uint8_t have = (seq < kFrameRing) ? static_cast<uint8_t>(seq) : kFrameRing;
-
     String out;
-    out.reserve(kFrameRing * 48 + 64);
-    char hdr[64];
-    snprintf(hdr, sizeof(hdr), "total %lu, showing last %u\n",
-             static_cast<unsigned long>(seq), static_cast<unsigned>(have));
+    out.reserve(kFrameRing * 64 + 128);
+    char hdr[160];
+    snprintf(hdr, sizeof(hdr), "%lu frames observed. trace %s%s\n"
+                               "  t-first   t-last   xN  dir  id  data\n",
+             static_cast<unsigned long>(seq),
+             frozen ? "FROZEN at " : "live",
+             frozen ? String(frozenAt).c_str() : "");
     out += hdr;
-    for (uint8_t i = 0; i < have; ++i) {
-      const FrameRec& f = snap[(head + kFrameRing - have + i) % kFrameRing];
-      char line[80];
-      int n = snprintf(line, sizeof(line), "%8lu %s %03X [%u]",
-                       static_cast<unsigned long>(f.ms), f.dir ? "TX" : "RX",
-                       static_cast<unsigned>(f.id), static_cast<unsigned>(f.len));
+    for (uint8_t i = 0; i < kFrameRing; ++i) {
+      const FrameRec& f = snap[(head + i) % kFrameRing];
+      if (!f.count) continue;                     // never written
+      char line[112];
+      int n = snprintf(line, sizeof(line), "%9lu %8lu %5lu  %s  %03X ",
+                       static_cast<unsigned long>(f.firstMs),
+                       static_cast<unsigned long>(f.lastMs),
+                       static_cast<unsigned long>(f.count),
+                       f.dir ? "TX" : "RX", static_cast<unsigned>(f.id));
       for (uint8_t b = 0; b < f.len && b < 8 && n < static_cast<int>(sizeof(line)) - 4; ++b)
         n += snprintf(line + n, sizeof(line) - n, " %02X", static_cast<unsigned>(f.d[b]));
       out += line;
       out += '\n';
     }
     return r->reply(200, "text/plain", out.c_str());
+  });
+
+  // Re-arm: clear the ring and let it record again. The whole ring, not just the flag —
+  // a re-armed trace that still holds the last death is worse than no trace.
+  g_server.on("/api/trace", HTTP_GET, [](PsychicRequest* r) {
+    portENTER_CRITICAL(&g_frameMux);
+    memset(g_frames, 0, sizeof(g_frames));
+    g_frameHead   = 0;
+    g_traceFrozen = false;
+    g_frozenAtMs  = 0;
+    portEXIT_CRITICAL(&g_frameMux);
+    logmsg("console: trace re-armed");
+    return r->reply(200, "text/plain", "re-armed");
   });
 
   // THE IS-IT-US TEST, and it is the first thing to reach for when the bus looks dead.
@@ -719,9 +868,15 @@ void routes() {
   // True listen-only is NOT available: Esp32CanLink::begin() refuses LinkMode::ListenOnly,
   // because this driver has no safe place to enter it.
   g_server.on("/api/txgate", HTTP_GET, [](PsychicRequest* r) {
-    g_txGate = !(r->getParam("on") && r->getParam("on")->value() == "0");
-    g_link.setTxEnabled(g_txGate);
-    logmsg("console: TX gate %s", g_txGate ? "OPEN" : "SHUT - we are silent now");
+    const bool on = !(r->getParam("on") && r->getParam("on")->value() == "0");
+    // Go THROUGH the FSM's state rather than around it. Setting the link directly would be
+    // undone by pumpGate() on its next pass, and a console switch that silently reverts is
+    // worse than no switch.
+    g_gateOpen = on;
+    g_link.setTxEnabled(on);
+    if (on) g_gateOpenMs = millis();
+    else    g_reopenAtMs = millis() + 3600000UL;   // an hour: "shut, and stay shut"
+    logmsg("console: TX gate %s", on ? "OPEN" : "SHUT - we are silent now");
     return r->reply(200, "text/plain", "ok");
   });
 
@@ -871,6 +1026,13 @@ void setup() {
   if (!g_link.begin(kPins, kBitrate, kForceRecoveryMs))
     logmsg("can: controller did not come up");
 
+  // SHUT BEFORE THE FIRST POLL, not three seconds into boot. The library starts its sync FSM
+  // the moment the task runs, and the frames it would send in that first second are exactly
+  // the ones under suspicion. See LISTEN BEFORE YOU SPEAK above.
+  g_link.setTxEnabled(false);
+  logmsg("gate SHUT at boot - listening only until we have heard %u frames",
+         static_cast<unsigned>(kHeardEnough));
+
   g_rows.setScroll(0, kSpeedFast);
   g_rows.setScroll(1, kSpeedMedium);
   g_rows.setScroll(2, kSpeedSlow);
@@ -904,6 +1066,10 @@ void loop() {
 
   // An OTA write stalls the CAN ISR; do not fight it for the bus.
   if (g_otaRunning) { delay(10); return; }
+
+  // BEFORE ANYTHING ELSE. Whether we are allowed to transmit at all outranks every render
+  // decision below it, and the deaf-detection has to run even when the sequence is parked.
+  pumpGate(now);
 
   const affa::rtos::Status st = g_task.status();
 
