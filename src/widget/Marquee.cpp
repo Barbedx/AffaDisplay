@@ -28,7 +28,7 @@ MarqueeGeometry sane(MarqueeGeometry g) {
 
 Marquee::Marquee(const MarqueeGeometry& g) : _geom(sane(g)) {}
 
-bool Marquee::setText(const char* text, uint32_t now) {
+bool Marquee::setText(const char* text, uint32_t now, Phase p) {
   char buf[AFFA_TEXT_MAX];
 
   // normalizeTitle strips the video annotations and trims, on top of transliterating. The
@@ -52,9 +52,16 @@ bool Marquee::setText(const char* text, uint32_t now) {
 
   if (std::strcmp(buf, _text) == 0) return false;   // the line that lets it keep scrolling
 
+  // Sampled BEFORE _text is replaced, because windowAt() reads _len. Under Keep this is the
+  // phase the row carries across the change; under Reset it is discarded.
+  const uint16_t carried = (p == Phase::Keep) ? windowAt(now) : 0;
+
   std::memcpy(_text, buf, i + 1);
   _len     = static_cast<uint16_t>(i);
-  _base    = 0;
+  // Modulo the NEW length: a replacement shorter than the position we were at would
+  // otherwise start the row out of range, and windowAt() would only bring it back after a
+  // full wrap. `_len` is non-zero here — the empty case returned above.
+  _base    = static_cast<uint16_t>(carried % _len);
   _epochMs = now;
   return true;
 }

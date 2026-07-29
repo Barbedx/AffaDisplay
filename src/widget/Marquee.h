@@ -41,15 +41,30 @@ class Marquee {
  public:
   explicit Marquee(const MarqueeGeometry& g);
 
+  // What a CHANGE of text does to the scroll position.
+  //
+  // Reset (the default, and the original behaviour) restarts at character 0. Right for a
+  // marquee whose text is an identity — a track title, a station name — where a change means
+  // "this is a different thing, show it from the start".
+  //
+  // Keep carries the current window across the change, and it exists because of a shape the
+  // Reset policy cannot express AT ALL: a row that scrolls AND contains the time. Its text
+  // changes every second, so under Reset the window is pinned to character 0 for ever and
+  // the row never scrolls — it just flickers. Under Keep the phase belongs to the ROW rather
+  // than to the string, which is what makes "a scrolling row that also tells the time" a
+  // thing that can exist. The position is taken modulo the new length, so it stays in range
+  // when the replacement is shorter.
+  enum class Phase : uint8_t { Reset, Keep };
+
   // The text to scroll. Transliterated and cleaned with affa::normalizeTitle(), then given
   // `gap` blank cells so the wrap reads as a pause rather than a collision. nullptr, or a
   // string that normalises to nothing, switches the marquee off.
   //
-  // RE-SETTING THE SAME TEXT IS A NO-OP that does not reset the position. An application
-  // re-publishing the current track on every media update would otherwise pin the window
-  // to character 0 for ever, and the title would never scroll. Returns true if the content
-  // actually changed.
-  bool setText(const char* text, uint32_t now);
+  // RE-SETTING THE SAME TEXT IS A NO-OP that does not reset the position under EITHER policy.
+  // An application re-publishing the current track on every media update would otherwise pin
+  // the window to character 0 for ever, and the title would never scroll. Returns true if the
+  // content actually changed.
+  bool setText(const char* text, uint32_t now, Phase p = Phase::Reset);
 
   // Frozen keeps the current window; resuming continues from it rather than from wherever
   // a free-running clock would have reached. The pause does not advance the marquee.

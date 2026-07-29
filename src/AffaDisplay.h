@@ -38,10 +38,16 @@
 #  endif
 #endif
 
-// Same story, same layer: a scrolling text window that knows nothing about a panel.
+// Same story, same layer: a scrolling text window that knows nothing about a panel, and
+// three of them arranged as a live screen. Both transmit nothing and hold no display — the
+// application samples them and calls the render primitive itself, exactly as MenuModel is
+// sampled through an IMenuRenderer.
 #if AFFA_ENABLE_MARQUEE
 #  if __has_include("widget/Marquee.h")
 #    include "widget/Marquee.h"
+#  endif
+#  if __has_include("widget/RowScreen.h")
+#    include "widget/RowScreen.h"
 #  endif
 #endif
 
