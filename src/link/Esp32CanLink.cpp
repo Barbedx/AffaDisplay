@@ -308,6 +308,48 @@ bool Esp32CanLink::recover() {
   return true;
 }
 
+bool Esp32CanLink::setListenOnly(bool on) {
+  // Never before begin(). This is the whole distinction from the refusal in begin(): there,
+  // the queues setListenOnlyMode()'s enable() blocks on do not exist yet.
+  if (!_began) {
+    AFFA_LOGE(kTag, "setListenOnly() before begin() — that is the case begin() refuses");
+    return false;
+  }
+  if (on == _listenOnly) return true;
+
+  twai_status_info_t st;
+  if (twai_get_status_info(&st) == ESP_OK && st.state == TWAI_STATE_RECOVERING) {
+    // Same refusal as recover(), for the same reason: twai_driver_uninstall() rejects
+    // RECOVERING, so disable() would delete both tasks and leave the driver installed, and
+    // the enable() behind it would fail INVALID_STATE and kill the link permanently.
+    AFFA_LOGI(kTag, "setListenOnly(): controller is RECOVERING — refusing to reinstall");
+    return false;
+  }
+
+  if (on) {
+    _gateBeforeListen = _txEnabled;
+    _txEnabled        = false;    // the driver refuses transmissions anyway; keep the
+                                  // gate's bookkeeping honest rather than counting drops
+                                  // against a mode that was never going to send
+  }
+
+  AFFA_LOGW(kTag, "%s listen-only — reinstalling the driver",
+            on ? "entering" : "leaving");
+  CAN0.setListenOnlyMode(on);
+  ++_restarts;
+
+  if (!on) _txEnabled = _gateBeforeListen;
+
+  if (twai_get_status_info(&st) != ESP_OK || st.state != TWAI_STATE_RUNNING) {
+    AFFA_LOGE(kTag, "listen-only switch did not leave the controller RUNNING (state %u)",
+              static_cast<unsigned>(st.state));
+    return false;
+  }
+  _listenOnly = on;
+  AFFA_LOGI(kTag, "controller RUNNING in %s mode", on ? "LISTEN-ONLY" : "normal");
+  return true;
+}
+
 Stats Esp32CanLink::stats() const {
   Stats s = _stats;
   s.rxFrames     = _rxFrames.load(std::memory_order_relaxed);

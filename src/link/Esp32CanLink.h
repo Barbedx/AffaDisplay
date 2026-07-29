@@ -95,6 +95,31 @@ class Esp32CanLink final : public ICanLink {
   // to be read off a status endpoint before deciding the fault is in the wire.
   uint32_t restarts() const { return _restarts; }
 
+  // ---- listen-only, AFTER begin() and only after ----------------------------------------
+  //
+  // begin(..., ListenOnly) is still refused, and that refusal is still right: before the
+  // driver exists, setListenOnlyMode() is disable()+enable() on queues _init() has not
+  // created, and the board dies before WiFi comes up. THIS call is a different thing. It
+  // runs on a driver that is up, so its disable()+enable() is EXACTLY the operation
+  // recover() already performs and the CONTRACT already sanctions (rule 4a) — same tasks
+  // deleted and recreated, same settle, same requirement that it not be called from
+  // task_CAN. Filters, pins and the general callback are ESP32CAN members and survive.
+  //
+  // WHY IT IS WORTH HAVING AT ALL, given the library can never render in this mode: it is
+  // the only way to observe the bus WITHOUT ACKNOWLEDGING IT, and the difference between
+  // those two is not a detail — on this bench it is the difference between decoding 157 000
+  // frames cleanly and decoding none at 1472 bus errors a second. An application that cannot
+  // toggle that one bit cannot tell "the panel is silent" from "our acknowledgement is what
+  // destroys every frame", and those two demand opposite fixes.
+  //
+  // The software TX gate is shut on the way in and RESTORED on the way out, because
+  // listen-only refuses transmissions at the driver anyway and a gate that disagreed with
+  // the driver would make txDropped lie.
+  //
+  // BLOCKS for the restart. Returns whether the controller is RUNNING afterwards.
+  bool setListenOnly(bool on);
+  bool listenOnly() const { return _listenOnly; }
+
   // "Silent mode" is a SOFTWARE TX gate — send() returns false. NOT a driver mode change
   // (the prohibition). The controller still ACKs other nodes, which a two-node bus requires.
   void setTxEnabled(bool on);
@@ -129,6 +154,8 @@ class Esp32CanLink final : public ICanLink {
   Stats _stats{};                 // poll()-task only
   bool  _began = false;
   bool  _txEnabled = true;
+  bool  _listenOnly = false;      // driver mode, not the software gate
+  bool  _gateBeforeListen = true; // _txEnabled to restore when leaving listen-only
   uint32_t _restarts = 0;         // completed forceDriverRestart() calls
 };
 
