@@ -204,7 +204,50 @@ bool canStart(uint32_t rate, bool listen) {
 }
 
 // The A/B that matters: same boot, same wire, same bitrate — only our transmitter changes.
+// CAN0.disable() DEADLOCKS ON A SILENT BUS, AND IT TAKES loop() WITH IT.
+//
+// disable() tears the driver down and joins esp32_can's receive task — but that task is
+// blocked in twai_receive() waiting for a frame. With 1500 frames/s it returns instantly and
+// everything works, which is why mode switches and every test here ran fine for hours. Let the
+// bus go quiet and the join never completes: loop() stops for the rest of the boot, and with
+// it the sweeps, the mode switches and /api/reboot, while HTTP keeps answering cheerfully from
+// its own task so the board looks healthy. Diagnosed 2026-07-29 after it ate two flashes.
+//
+// Every teardown path is affected — pintest, both sweeps and the rate sweep all open with
+// CAN0.disable(). None of them can produce a result on a silent bus anyway, so refusing is
+// strictly better than hanging.
+constexpr uint32_t kBusQuietMs = 2000;
+
+bool busQuiet() {
+  return g_lastRxMs == 0 || (millis() - g_lastRxMs) > kBusQuietMs;
+}
+
+bool refuseIfBusQuiet(const char* what) {
+  if (!busQuiet()) return false;
+  logmsg("%s REFUSED - no frames for %lu ms. Tearing the driver down on a silent bus "
+         "deadlocks loop() and wedges the board until a power cycle.", what,
+         static_cast<unsigned long>(g_lastRxMs ? millis() - g_lastRxMs : 0));
+  return true;
+}
+
 void applyListen(bool on) {
+  // A REDUNDANT SWITCH WEDGES loop() FOR THE REST OF THE BOOT, AND IT COST A FLASH TO FIND.
+  //
+  // setListenOnlyMode() is disable() + enable() — a full driver teardown and reinstall, not a
+  // mode bit. Asking for the mode the controller is ALREADY in is pure downside: nothing
+  // changes and the teardown can hang. It did. The board boots into listen-only, a script
+  // helpfully asked for listen-only again, and loop() never returned from it — so every
+  // command dispatched from loop() afterwards (the sweeps, and /api/reboot itself) sat queued
+  // forever while HTTP kept answering cheerfully from its own task. Worse, a driver stopped
+  // mid-reinstall leaves the TX pad in no defined state, which is a good way to hold the bus
+  // dominant and silence the very panel you are trying to observe.
+  //
+  // So: never touch the driver to reach a state it is already in.
+  if (g_canUp && on == g_listen) {
+    logmsg("already %s - not touching the driver", on ? "LISTEN-ONLY" : "normal");
+    return;
+  }
+
   logmsg("switching to %s ...", on ? "LISTEN-ONLY (we emit nothing at all)" : "normal");
   CAN0.setListenOnlyMode(on);
   CAN0.setGeneralCallback(&onCanFrame);   // survives in principle; re-armed to be certain
@@ -265,6 +308,7 @@ uint32_t g_stGot   = 0;
 constexpr uint32_t kSelfTestId = 0x001;
 
 void runSelfTest() {
+  if (refuseIfBusQuiet("selftest")) return;
   const bool wasListen = g_listen;
   logmsg("selftest: entering NO_ACK + self-reception ...");
 
@@ -461,6 +505,7 @@ constexpr uint32_t kDomSamples = 40;
 constexpr uint32_t kDomGapUs   = 2;
 
 void runPinTest() {
+  if (refuseIfBusQuiet("pintest")) return;
   g_ptRan = true;
   logmsg("pintest: releasing TWAI and driving GPIO%d by hand", static_cast<int>(kTxPin));
 
@@ -565,6 +610,7 @@ uint32_t g_swGot[kTimingCount] = {0};
 int      g_swBest = -1;
 
 void runTimingSweep() {
+  if (refuseIfBusQuiet("timing sweep")) return;
   g_swRan  = true;
   g_swBest = -1;
   logmsg("timing sweep: %u configs, NORMAL mode, 1.5 s each",
@@ -726,6 +772,7 @@ bool waitForPanel(uint32_t maxMs) {
 }
 
 void runRateSweep() {
+  if (refuseIfBusQuiet("rate sweep")) return;
   RunningScope scope("ratesweep");
   g_rsRan  = true;
   g_rsBest = -1;
@@ -898,6 +945,7 @@ uint32_t jamWindow(uint32_t windowMs, bool jam, int* crxHighPct, int* txLowPct) 
 }
 
 void runJam() {
+  if (refuseIfBusQuiet("jam")) return;
   RunningScope scope("jam");
   g_jamRan = true;
   if (g_rate != 500000)
@@ -1045,6 +1093,7 @@ uint32_t sweepWindow(gpio_num_t pin, uint32_t windowMs, bool jam, int* txLowPct)
 }
 
 void runJamSweep() {
+  if (refuseIfBusQuiet("jam sweep")) return;
   RunningScope scope("jamsweep");
   g_jsRan   = true;
   g_jsFound = -1;
