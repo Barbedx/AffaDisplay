@@ -300,11 +300,42 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
       }
     }
     SyncState s = _sync & ~SyncState::Failed;
-    // len >= 3 before touching data[2]: short DLCs are real on this channel (the OEM
-    // corpus holds 0x3CF with DLC 1 and DLC 2), and the legacy shim read uninitialised
-    // stack there, which would latch Start at random. data[2] is the panel's filler on
-    // every capture we hold; Start has never actually been observed.
-    if (f.len >= 3 && f.data[2] == kSyncStartFlag) s |= SyncState::Start;
+
+    // data[2] == 0x01 IS THE PANEL SAYING OUR REGISTRATION IS VOID, and under-reacting to
+    // it is how a link deadlocks until somebody power-cycles the rig.
+    //
+    // Every implementation of this protocol latches Start here — which re-arms the 0xBA
+    // sync request — and LEAVES FUNCSREG SET. So we go on believing we are registered, the
+    // lazy registration in pumpTx() never runs again, and the panel goes on asking. At line
+    // rate: 1472 frames/s measured on the bench 2026-07-29, for hours, which is what a
+    // panel that has given up on us looks like.
+    //
+    // So Start also drops the registrations, exactly as a peer-alive timeout does. The next
+    // render re-runs the 0x70 probe over every funcId from index 0, which is the thing the
+    // panel is actually asking for and is a frame we can send. See docs/PROTOCOL.md §3.3.
+    //
+    // len >= 3 before touching data[2]: short DLCs are real on this channel — the OEM corpus
+    // holds 0x3CF at DLC 1 and DLC 2 — and the legacy shim read uninitialised stack there,
+    // latching Start at random.
+    if (f.len >= 3 && f.data[2] == kSyncStartFlag) {
+      // GUARDED ON FuncsReg, NOT on the edge of Start, and the difference matters.
+      //
+      // Start is cleared once per AFFA_SYNC_INTERVAL_MS by pumpSync(), so an edge-triggered
+      // drop would still re-fire about once a second — and registration is not free. It is
+      // a 0x70 probe per funcId, each waiting on an ACK, and a funcId the panel does not
+      // answer costs a full AFFA_ACK_TIMEOUT_MS. Re-dropping every second would cut across
+      // the very pass it is trying to provoke, which is a livelock, not a fix.
+      //
+      // So drop only what there is to drop: if we still BELIEVE we are registered while the
+      // panel says we are not, that belief is the bug and it goes. If FuncsReg is already
+      // clear, a registration is either pending or in flight and must be left alone.
+      if (hasFlag(_sync, SyncState::FuncsReg)) {
+        AFFA_LOGW(kTag, "panel reports registration void (61 11 01) — re-registering");
+        dropRegistrations();
+        s &= ~SyncState::FuncsReg;
+      }
+      s |= SyncState::Start;
+    }
     setSync(s, EventKind::SyncChanged);
     return true;
   }
