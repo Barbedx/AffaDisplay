@@ -216,29 +216,42 @@ FUNCSREG happens inside the **first render call**, not at boot. Our `funcs[]` is
 
 Only after **every** entry is acknowledged is `FUNCSREG` set. `[IMPL]`
 
-#### The factory head unit registers THREE ids, and we register two
+#### Registration is BIDIRECTIONAL, and the filler is what tells you which way
 
-Captured `22:37:41`, all three within the same second, each individually acknowledged:
+Captured `22:37:41` — three `70` probes in one second, each individually acknowledged. A
+sniffer logs all six as `[RX]`, so the ids alone do not say who sent what. **The filler
+does** (§1.1): `0x00` is the radio's signature, `0xA3` is the panel's.
 
 ```
-[RX] 0x1C1  70 A3 A3 A3 A3 A3 A3 A3     →  [RX] 0x5C1  74 00 00 00 00 00 00 00
-[RX] 0x151  70 00 00 00 00 00 00 00     →  [RX] 0x551  74 A3 A3 A3 A3 A3 A3 A3
-[RX] 0x1F1  70 00 00 00 00 00 00 00     →  [RX] 0x5F1  74 A3 A3 A3 A3 A3 A3 A3
+0x151  70 00 …   radio  →   0x551  74 A3 …   panel ACKs      radio registers
+0x1F1  70 00 …   radio  →   0x5F1  74 A3 …   panel ACKs      radio registers
+0x1C1  70 A3 …   PANEL  →   0x5C1  74 00 …   RADIO ACKs      PANEL registers
 ```
 
-**`0x1C1` — the key channel — is registered by the factory radio and is absent from our
-`funcs[]`.** Whether the panel requires it before it will consider a master registered is
-**untested**; it is the strongest available explanation for a panel that asks to re-register
-for ever. `[OEM]`
+**So `0x1C1` is the panel's channel to register, not ours**, and `funcs[] = {0x151, 0x1F1}`
+is correct. That is exactly right for a key channel: the joystick is wired to the panel, so
+keys flow one way — the panel decodes the stick, sends on `0x1C1`, we answer `74` on
+`0x5C1`, and the key goes up to the application.
 
-Note the filler differs per channel even within one broadcast: the `0x1C1` probe pads with
-`A3`, the other two with `0x00`. See §1.1 — do not normalise this.
+> **THE FILLER IS A DIRECTION SIGNATURE.** Never validate it (§1.1), but *do* read it: on a
+> single-ended capture where both directions share an id family, the pad byte is often the
+> only thing that says who transmitted. Misreading `1C1 70 A3 …` as ours would put us
+> transmitting on the panel's own channel.
 
-This `70` broadcast is the only re-sync event in the corpus. It occurred twice, one second
+This `70` exchange is the only re-sync event in the corpus. It occurred twice, one second
 apart, **immediately after a transfer was truncated mid-flight**, and was followed by
 `03 52 09` (display ON) and a full screen redraw from the first frame. So the factory
-recovery for a broken session is: re-register every channel, re-power the display, redraw.
-`[OEM]`
+recovery for a broken session is: re-register, re-power the display, redraw. `[OEM]`
+
+#### Registration is strictly sequential — one probe, one ACK, then the next
+
+`70` on the funcId → **wait** for `74` on `funcId | 0x400` → next funcId. `FUNCSREG` is
+latched on those ACKs and on nothing else.
+
+> **Registration therefore cannot be performed blind.** Putting the probes on the wire
+> without reading the replies latches nothing, leaves unanswered probes on the bus, and
+> achieves exactly zero. Only the *hello* (§3.4) is fire-and-forget — it is an unconditional
+> answer to an unconditional request and carries no state.
 
 > **Any failure aborts the whole pass and the flag is never set**, so the next render
 > retries the list from index 0. `0x1F1` is registered but never written to — if the panel

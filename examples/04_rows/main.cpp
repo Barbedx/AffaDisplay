@@ -411,21 +411,32 @@ uint32_t g_shoutUntil = 0;
 // three hello frames, then a registration probe on every function id — then go back to
 // listen-only, where reception is flawless, and read what the panel does next.
 //
-// THE THIRD REGISTRATION IS THE OTHER HALF OF THIS. Captured from a factory head unit
-// (2026-06-16, 22:37:41), the real radio registers THREE ids in one second — 0x151, 0x1C1
-// and 0x1F1 — each individually acknowledged. Our funcs[] holds only 0x151 and 0x1F1. If
-// the panel will not consider a master registered until the key channel is claimed too,
-// that alone explains a handshake that never completes. Note the fillers differ per channel
-// and are reproduced verbatim: 0x1C1 pads with A3, the other two with 00.
+// ONLY THE HELLO GOES OUT BLIND, AND REGISTRATION DELIBERATELY DOES NOT.
+//
+// The hello is a pure reply to an unconditional request — fire and forget, no ACK, no state.
+// Registration is the opposite: `70` on a funcId, WAIT for `74` on funcId|0x400, then the
+// next one, and FUNCSREG is latched on those ACKs. Firing registration probes blind cannot
+// complete anything — we would not see the ACK, the flag would stay clear, and we would have
+// put unanswered probes on the bus for nothing. The library owns registration; it runs it
+// properly the moment we can hear again.
+//
+// AND 0x1C1 IS NOT OURS TO SEND ON. The OEM capture shows `1C1 70 A3 A3 …` and it is easy to
+// misread as the radio registering a third channel. THE FILLER SETTLES IT: 0xA3 is the
+// PANEL's filler and 0x00 is the radio's, so that frame is the PANEL registering itself, and
+// `5C1 74 00 …` is the radio acknowledging it. Same shape, opposite direction:
+//
+//     0x151  70 00 …  radio  ->  0x551  74 A3 …  panel ACKs
+//     0x1F1  70 00 …  radio  ->  0x5F1  74 A3 …  panel ACKs
+//     0x1C1  70 A3 …  PANEL  ->  0x5C1  74 00 …  RADIO ACKs
+//
+// Which is exactly right for a key channel: the joystick is on the panel, so keys flow one
+// way and we answer them. funcs[] = {0x151, 0x1F1} was correct all along.
 struct KickFrame { uint16_t id; uint8_t d[8]; };
 const KickFrame kKick[] = {
-  {0x3AF, {0xB9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},   // alive
+  {0x3AF, {0xB9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},   // alive — "a master is here"
   {0x3AF, {0x70, 0x1A, 0x11, 0x00, 0x00, 0x00, 0x00, 0x01}},   // hello 1
   {0x3AF, {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00}},   // hello 2
   {0x3AF, {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00}},   // hello 3 — identical, [CAP]
-  {0x151, {0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},   // register text/screen
-  {0x1C1, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}},   // register KEYS — [OEM], ours omits
-  {0x1F1, {0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},   // register nav
 };
 constexpr uint8_t kKickCount = sizeof(kKick) / sizeof(kKick[0]);
 bool g_kickWanted = false;
@@ -1298,15 +1309,26 @@ void loop() {
       if (g_inFlight) break;
       if (!issue(g_task.setPower(true), now, "setPower")) break;
       g_powerIsOn = true;
-      g_deadline  = now + kWarmUpMs;
+      // NOT `now + kWarmUpMs`. The glass does not begin lighting when we ENQUEUE the power
+      // command, it begins when the panel ACKNOWLEDGES it — and on a busy bus that ACK can
+      // take longer than the warm-up itself, in which case a deadline armed here has already
+      // expired by the time it lands and buys exactly nothing. 0 means "not armed yet".
+      g_deadline  = 0;
       g_step      = Step::WarmUp;
       break;
 
     case Step::WarmUp:
-      // Two waits at once, and both are needed: the power render must be acknowledged, AND
-      // the glass needs its settling time afterwards. Skipping the second is what makes the
-      // first screen vanish and "setText does not work".
-      if (g_inFlight) break;
+      // TWO WAITS, IN SERIES, and the order is the whole point. First the power render must
+      // be acknowledged; only THEN does the settling clock start. Running them concurrently
+      // is what makes the first screen vanish and produces "setText does not work".
+      if (g_inFlight) break;                       // still waiting for the ACK
+      if (g_deadline == 0) {                       // it just landed — start the clock now
+        g_deadline = now + kWarmUpMs;
+        if (g_deadline == 0) g_deadline = 1;       // millis() wrap: 0 is the "unarmed" value
+        logmsg("power acknowledged - warming the glass %lu ms",
+               static_cast<unsigned long>(kWarmUpMs));
+        break;
+      }
       if (!affa::expired(now, g_deadline)) break;
       logmsg("glass warm - going live");
       g_popupNextMs = now + kPopupEveryMs;
