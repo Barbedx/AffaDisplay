@@ -93,3 +93,29 @@ firmware image correlates with either edge.
 |---|---|---|---|
 | 00:46 | `ex04_rows` 0.4.1 (899184 B) | **reply-to-ping**: `SyncProfile::replyToPing` answers the panel's `69` with an immediate paced B9, wire-identical to MeganeCAN — the last auth difference vs the driver that worked, found by the MegaOpen-side audit (`MegaOpen/docs/DISPLAY-INIT-SPEC.md` §5) and the best candidate for the unexplained 2026-07-28 registration stall. Plus: goal state SUCCESS (static row 0, Marquee no longer wraps short texts) + clock 10:00 (latched, paced re-issue on failure, `clock` field in `/api/status`); wrap-stale pacing floors fixed; 238 host tests green. Reviewed by 12-agent adversarial workflow before flash | boots clean in 22 s, ARMED from boot (NORMAL, gate open, CAN up 2.5 s before WiFi). Pre-existing episode unchanged, as expected: rx 0, rxErr 129, panel still in runaway from before the flash. **Next step is the LONG power-off** — the one repower that ever cleared the runaway (morning 07-29) followed a long off period; the three quick cycles did not. On a polite panel the board completes everything itself: ACK from frame one, handshake, pong per ping, power on, clock 10:00, SUCCESS on the glass |
 | ~01:20 | *(no flash — owner cold-booted the rig after ~15 min off)* | the long-power-off attempt | **fault present within 3.3 s of power-on, WITH the board armed and ACKing from the first frame** (busErr already 422 at uptime 3341 ms, rxErr pinned 129, rx 0). ECC on the fresh episode: `BIT RX @ ACK-SLOT` ×9906 + `BIT TX @ SOF`, same as every episode. Listen-only peek: the identical runaway macro-cycle (126× `69 00` + ~630× `61 11 01` per ~500 ms), decoded flawlessly. NEW FACTS: (1) ~15 min off is NOT the morning's overnight off — the one recovery precedent remains overnight-length; (2) "catch the panel's first polite frame" is now EXCLUDED as the fix — this boot ACKed from power-on and the storm was at line rate within 3 s anyway. Board left ARMED: NORMAL, gate open, trace re-armed |
+
+## 2026-07-30 (afternoon session — the library leaves the equation)
+
+Board found OFF the network (~14:1x, gateway "host unreachable" — powered down, not the
+socket lockout, which still answers ping). Owner repowered the rig ~14:3x; a watcher
+caught it the moment it answered.
+
+| time | image | why | what the link did afterwards |
+|---|---|---|---|
+| ~14:35 | `ex05_pingpong` 0.1.0 (855 kB) | **the protocol BY HAND, zero library code** — `build_src_filter = -<*>` strips src/ entirely; one file implements PROTOCOL.md directly. Pong UNCONDITIONAL per §3.2/§3.6 (any `69`, any state, paced 250 ms), hello on `61 11`, FUNCSREG sequential, display ON, 1 s, `0x77` SUCCESS; re-auth on `61 11 01` / watchdog / 3 delivery failures | boots clean, ARMED, CAN live 2.5 s before WiFi. Same episode as every boot since 07-28: rx 0, rxErr pinned 129, busErr climbing, ~12 s cycle to BUS-OFF and forceRecovery reinstall. **The library is now excluded: an image with no AffaDisplay code measures identically** |
+| ~14:47 | `ex05_pingpong` 0.2.0 | add the two instruments 0.1.0 lacked: `/api/txgate` and a BOOT-TIME listen-only sniffer (raw TWAI install, no esp32_can — a runtime switch tears down the driver and that join deadlocks when nothing decodes) | boots clean, ARMED |
+| ~14:50 | *(no flash)* | txgate test on the fresh episode | **~1,560 bus errors/s with our transmitter fully gated** (busErr 51878 → 83023 over 20 s, tx frozen, controller RUNNING throughout once the queued frame cleared). The error stream is external — same verdict as the 07-28 third occurrence |
+| ~14:52 | *(no flash — reboot into listen sniffer)* | what is the panel actually sending after ITS cold boot? | the identical runaway, byte for byte: `61 11 01` ×~635 per ~450 ms burst alternating `69 00` ×~126 per ~32 ms, ~500 ms macro-cycle, ~1,500 f/s aggregate, filler 0xA3. **33,343 frames decoded flawlessly in 24 s of listen-only.** So: RX path, bitrate, wiring-as-receiver all perfect; the panel cold-boots straight into the storm (rig was off ~30+ min — still not the overnight-length off of the one recovery precedent) |
+| ~14:54 | *(no flash — reboot ARMED)* | leave the board self-completing | **left ARMED: NORMAL, gate open, pong armed.** On a polite panel this image completes everything itself: ACK from frame one, hello, pong per ping, register 151/1F1, display ON, 1 s, SUCCESS |
+
+### What this session establishes
+
+The zero-library image reproduces the fault byte-identically, which closes the last
+firmware-shaped question this rig had open: protocol layer (twice-audited), driver
+config, task structure, and now the library itself are all excluded. Combined with the
+07-29 instrument verdicts (`BIT RX @ ACK-SLOT`, pad correlation 627/627: our dominant
+leaves GPIO3 and never appears on GPIO4 while panel traffic decodes in the same window),
+every firmware-observable point measures correct on an image that contains no library at
+all. What remains unexplored is only the segment the 07-29 session already named — GPIO3
+pad → transceiver D → CANH/CANL → transceiver R → GPIO4 pad — plus the panel's own
+runaway latch, whose one known reset is an overnight-length power-off.

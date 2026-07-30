@@ -56,7 +56,19 @@
 
 namespace {
 
-constexpr const char* kVersion = "05_pingpong 0.1.0";
+constexpr const char* kVersion = "05_pingpong 0.2.0";
+
+// ---------------------------------------------------------------------------
+// Boot mode — ARMED (normal, talking) or LISTEN (pure sniffer, direct TWAI)
+// ---------------------------------------------------------------------------
+// Listen-only is decided AT BOOT, from NVS, and is implemented with the raw TWAI driver —
+// no esp32_can at all in that mode. Deliberately: a RUNTIME switch to listen-only is
+// disable()+enable(), and disable() joins a receive task that is blocked in twai_receive()
+// — on a bus where nothing decodes (exactly when you want listen-only) that join never
+// returns, loop() wedges, and the board needs a power cycle. It ate two flashes on this
+// rig already. A reboot into a clean listen-only install has no teardown to hang.
+constexpr const char* kOwnNamespace = "pingpong";    // ours: the boot mode, and only that
+bool g_listenBoot = false;
 
 // ---------------------------------------------------------------------------
 // Board — ESP32-C3 SuperMini on the bench rig. RX FIRST.
@@ -684,6 +696,12 @@ input{background:#000;color:#ddd;border:1px solid #444;border-radius:4px;padding
 <button onclick=go('/api/restart')>redo sequence</button>
 <button onclick=go('/api/reboot')>reboot board</button>
 </fieldset>
+<fieldset><legend>wire tests</legend>
+<button onclick=go('/api/txgate?on=0')>TX gate SHUT</button>
+<button onclick=go('/api/txgate?on=1')>TX gate open</button>
+<button onclick=go('/api/mode?listen=1')>reboot into LISTEN-ONLY sniffer</button>
+<button onclick=go('/api/mode?listen=0')>reboot ARMED</button>
+</fieldset>
 <fieldset><legend>status</legend><pre id=s>...</pre></fieldset>
 <fieldset><legend>wire (identical frames coalesced)</legend><pre id=f>...</pre></fieldset>
 <fieldset><legend>log</legend><pre id=l>...</pre></fieldset>
@@ -726,6 +744,10 @@ void routes() {
     int n = 0;
     n += snprintf(out + n, sizeof(out) - n, "%s  up %lus\n", kVersion,
                   static_cast<unsigned long>(now / 1000));
+    n += snprintf(out + n, sizeof(out) - n, "mode    %s  txGate %s\n",
+                  g_listenBoot ? "LISTEN-ONLY sniffer (no TX, no ACK, protocol parked)"
+                               : "ARMED (normal, ACKing, talking)",
+                  g_txGate ? "open" : "SHUT");
     n += snprintf(out + n, sizeof(out) - n,
                   "sync    0x%02X %s%s%s%s\n",
                   g_sync,
@@ -815,6 +837,31 @@ void routes() {
     portEXIT_CRITICAL(&g_logMux);
     if (n == 0) n = snprintf(out, sizeof(out), "(empty)\n");
     return r->reply(200, "text/plain", out);
+  });
+
+  // THE IS-IT-US TEST. Shutting the gate stops every frame WE would hand the driver, in
+  // software; the controller keeps ACKing in hardware. One caveat this rig taught: a frame
+  // ALREADY in the TX queue keeps retransmitting until the next bus-off reinstall clears
+  // it, so wait ~30 s after gating before reading the busErr slope as our-TX-free.
+  g_server.on("/api/txgate", HTTP_GET, [](PsychicRequest* r) {
+    const bool on = !(r->getParam("on") && r->getParam("on")->value() == "0");
+    g_txGate = on;
+    logmsg("console: TX gate %s", on ? "OPEN" : "SHUT - we hand the driver nothing now");
+    return r->reply(200, "text/plain", "ok");
+  });
+
+  // Reboot into the other mode. NVS write stalls CAN reception for the flash write, which
+  // costs nothing here — we are about to reboot anyway.
+  g_server.on("/api/mode", HTTP_GET, [](PsychicRequest* r) {
+    const bool listen = r->getParam("listen") && r->getParam("listen")->value() == "1";
+    Preferences p;
+    if (!p.begin(kOwnNamespace, /*readOnly=*/false))
+      return r->reply(500, "text/plain", "nvs open failed");
+    p.putUChar("listen", listen ? 1 : 0);
+    p.end();
+    logmsg("console: rebooting into %s mode", listen ? "LISTEN-ONLY sniffer" : "ARMED");
+    g_rebootAt = millis() + 300;
+    return r->reply(200, "text/plain", listen ? "rebooting into listen-only" : "rebooting armed");
   });
 
   g_server.on("/api/text", HTTP_GET, [](PsychicRequest* r) {
@@ -912,6 +959,14 @@ void setup() {
   delay(300);
   Serial.printf("\n%s - bare protocol, no AffaDisplay\n", kVersion);
 
+  {
+    Preferences p;
+    if (p.begin(kOwnNamespace, /*readOnly=*/true)) {
+      g_listenBoot = p.getUChar("listen", 0) != 0;
+      p.end();
+    }
+  }
+
   // CAN FIRST, WIFI SECOND. The seconds after a shared-supply power-on are the only window
   // in which a fresh panel is polite, and WiFi.begin() blocks for up to fifteen of them.
   //
@@ -920,21 +975,36 @@ void setup() {
   // driver is installed — this is the one safe moment.
   periph_module_reset(PERIPH_TWAI_MODULE);
 
-  // BEFORE begin(): it only writes two members the watchdog task reads later. 0 would park
-  // a bus-off in STOPPED for ever; 2000 accumulates. 250 is the measured value for this rig.
-  CAN0.setForceRecovery(true, kForceRecoveryMs);
+  if (g_listenBoot) {
+    // PURE SNIFFER: raw TWAI in LISTEN_ONLY, no esp32_can, no tasks of anybody's to join,
+    // nothing transmitted ever (the controller does not even ACK). loop() polls.
+    g_txGate = false;
+    twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(kTxPin, kRxPin,
+                                                          TWAI_MODE_LISTEN_ONLY);
+    g.rx_queue_len = 32;
+    twai_timing_config_t t = TWAI_TIMING_CONFIG_500KBITS();
+    twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+    const bool ok = twai_driver_install(&g, &t, &f) == ESP_OK && twai_start() == ESP_OK;
+    Serial.printf("[can] %s at %lu bit/s LISTEN-ONLY sniffer (rx=GPIO%d tx=GPIO%d)\n",
+                  ok ? "RUNNING" : "NOT RUNNING", static_cast<unsigned long>(kBitrate),
+                  static_cast<int>(kRxPin), static_cast<int>(kTxPin));
+  } else {
+    // BEFORE begin(): it only writes two members the watchdog task reads later. 0 would
+    // park a bus-off in STOPPED for ever; 2000 accumulates. 250 is measured for this rig.
+    CAN0.setForceRecovery(true, kForceRecoveryMs);
 
-  // Order is load-bearing: pins, begin(), callback, watchFor() LAST.
-  CAN0.setCANPins(kRxPin, kTxPin);
-  CAN0.begin(kBitrate);
-  CAN0.setGeneralCallback(&onCanFrame);
-  CAN0.watchFor();
+    // Order is load-bearing: pins, begin(), callback, watchFor() LAST.
+    CAN0.setCANPins(kRxPin, kTxPin);
+    CAN0.begin(kBitrate);
+    CAN0.setGeneralCallback(&onCanFrame);
+    CAN0.watchFor();
 
-  twai_status_info_t st{};
-  const bool ok = twai_get_status_info(&st) == ESP_OK && st.state == TWAI_STATE_RUNNING;
-  Serial.printf("[can] %s at %lu bit/s NORMAL (rx=GPIO%d tx=GPIO%d) - armed from power-on\n",
-                ok ? "RUNNING" : "NOT RUNNING", static_cast<unsigned long>(kBitrate),
-                static_cast<int>(kRxPin), static_cast<int>(kTxPin));
+    twai_status_info_t st{};
+    const bool ok = twai_get_status_info(&st) == ESP_OK && st.state == TWAI_STATE_RUNNING;
+    Serial.printf("[can] %s at %lu bit/s NORMAL (rx=GPIO%d tx=GPIO%d) - armed from power-on\n",
+                  ok ? "RUNNING" : "NOT RUNNING", static_cast<unsigned long>(kBitrate),
+                  static_cast<int>(kRxPin), static_cast<int>(kTxPin));
+  }
 
   // Network AFTER the bus. OTA is still reachable long before anyone can need it.
   startNetwork();
@@ -954,6 +1024,21 @@ void loop() {
 
   // An OTA write stalls the CAN ISR; do not fight it for the bus.
   if (g_otaRunning) { delay(10); return; }
+
+  if (g_listenBoot) {
+    // Sniffer: drain the raw driver into the trace ring and do nothing else. The protocol
+    // FSM stays parked — a node that cannot transmit cannot hold up its end of it.
+    twai_message_t m;
+    while (twai_receive(&m, 0) == ESP_OK) {
+      if (m.extd || m.rtr) continue;
+      ++g_rxCount;
+      g_lastRxMs = now;
+      tap(static_cast<uint16_t>(m.identifier), m.data,
+          m.data_length_code > 8 ? 8 : m.data_length_code, /*tx=*/false);
+    }
+    delay(2);
+    return;
+  }
 
   pumpRx(now);       // pongs, hellos, ACKs, reply routing — everything event-driven
   pumpTick(now);     // the 1 Hz heartbeat and the peer-alive watchdog
