@@ -68,7 +68,12 @@ using widget::listField;
 
 class CarminatDisplay final : public AffaDisplayBase {
  public:
-  CarminatDisplay(ICanLink& link, IClock& clock);
+  // CapturedB0x3 is the default and matches the supplied OEM-radio monitor traces.  The
+  // legacy option is intentionally explicit: it preserves a proven MeganeCAN 70/B0/B0
+  // opening for panels that require it without weakening the strict 61 11 00 gate.
+  CarminatDisplay(ICanLink& link, IClock& clock,
+                  carminat::CarminatHelloProfile hello =
+                      carminat::CarminatHelloProfile::CapturedB0x3);
 
   // NAME HIDING, not decoration. The protected `bool onFrame(const Frame&)` hook below
   // hides EVERY base member called onFrame, including the public Layer-0 tap
@@ -145,6 +150,9 @@ class CarminatDisplay final : public AffaDisplayBase {
  protected:
   uint8_t  packetFiller() const override { return carminat::kFiller; }
   uint16_t keyTxId()      const override { return carminat::kIdKeyPressed; }
+  bool shouldAutoAck(const Frame& f) const override {
+    return f.id == carminat::kIdKeyPressed;
+  }
 
   bool onFrame(const Frame& f) override;
   void onPoll() override;
@@ -166,7 +174,9 @@ class CarminatDisplay final : public AffaDisplayBase {
  private:
   // enqueue() + "translate kNoTicket into the reason". Every builder ends in this.
   [[nodiscard]] Result submit(uint16_t funcId, const uint8_t* data, uint8_t len,
-                              RenderSlot slot, bool coalesce = (AFFA_TX_COALESCE != 0));
+                              RenderSlot slot, bool coalesce = (AFFA_TX_COALESCE != 0),
+                              Priority priority = Priority::Normal,
+                              bool reassertAfterSession = false);
 
 #if AFFA_ENABLE_MENU
   void initializeMenu();                    // creates an EMPTY menu; the app fills it

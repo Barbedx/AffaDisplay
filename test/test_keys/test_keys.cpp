@@ -38,8 +38,7 @@ struct Rig {
 
   void up() {
     d.begin();
-    link.inject(affatest::panelSyncRequest());
-    d.poll();
+    affatest::completeCarminatAuth(d, link, clk);
     d.onKey(&countKey, nullptr);
     drain(link);
     g_keys = 0;

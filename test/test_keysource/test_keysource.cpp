@@ -40,10 +40,12 @@ struct Rig {
   CarminatDisplay d;
   Rig() : d(link, clk) {}
 
-  void up(bool echo) {
+  void up(bool echo, bool selfAck = false) {
     d.begin();
-    link.inject(affatest::panelSyncRequest());
-    d.poll();
+    // The 0x70 registrations leave with the final hello frame on this family, so a rig that
+    // wants them acknowledged must arm the emulator before the opening, not after.
+    d.setSelfAck(selfAck);
+    affatest::completeCarminatAuth(d, link, clk);
     link.setEcho(echo);            // AFTER the handshake, so the hello frames do not echo
     d.onKey(&countKey, nullptr);
     drain(link);
@@ -51,8 +53,8 @@ struct Rig {
   }
 
   void registerFuncs() {
-    d.setSelfAck(true);
     (void)d.setPower(true);
+    affatest::settleCarminatRegistration(d, clk);
     pumpUntilIdle(d);
     TEST_ASSERT_TRUE(d.registered());
     d.setSelfAck(false);
@@ -132,7 +134,7 @@ void test_fromSelf_is_dropped_before_the_ack_matcher(void) {
   // The failure this prevents is silent and it looks like success: a loopback transfer
   // that "completes" after one frame because our own echo was credited as the panel's ACK.
   Rig r;
-  r.up(false);
+  r.up(false, /*selfAck=*/true);
   r.registerFuncs();
 
   uint8_t payload[22];

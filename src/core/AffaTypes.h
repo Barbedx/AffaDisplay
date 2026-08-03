@@ -174,6 +174,11 @@ struct TxOptions {
   RenderSlot slot     = RenderSlot::None;
   Priority   priority = Priority::Normal;
   bool       coalesce = (AFFA_TX_COALESCE != 0);  // per-message opt-out
+  // A successfully ACKed payload with this flag becomes desired session state. If the
+  // panel later loses registration, the base restores it internally before held text/time.
+  // It is intentionally opt-in: only a true durable control such as display power should
+  // survive a session reset; ordinary render frames must not reappear unexpectedly.
+  bool       reassertAfterSession = false;
 };
 
 // Free-running counters. Each field is a plain uint32_t updated by a single writer, so a

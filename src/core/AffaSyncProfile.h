@@ -77,7 +77,60 @@ struct SyncProfile {
   // Minimum spacing between complete hello bursts. Zero uses the conservative generic
   // AFFA_HELLO_MIN_MS. A panel with a proven faster startup cadence carries that measured
   // floor here instead of changing the policy for other panel families.
+  //
+  // Keep this field at its historical aggregate-initializer position. New profile controls
+  // are appended below so a downstream positional SyncProfile initializer that supplied a
+  // hello floor continues to mean the same thing.
   uint32_t helloMinMs = 0;
+
+  // Legacy Carminat replied to every complete `61 11 xx` with its hello burst. The AFFA3
+  // monitor captures instead show `01 -> B9/BA -> 00 -> hello`, so a modern profile can
+  // keep 01 as discovery-only. Leave this true by default for existing profiles/source
+  // compatibility; the captured Carminat profile deliberately sets it false.
+  bool helloOnNonAuthRequest = true;
+
+  // Timing belongs to the panel profile, not the application poll rate. A zero keeps the
+  // historical immediate burst behaviour. AFFA3 NAV uses a 30/31 ms first-frame and
+  // inter-frame spacing, which leaves the panel's `1C1 -> 5C1` control ACK between B0s.
+  uint32_t helloFirstDelayMs = 0;
+  uint32_t helloFrameGapMs = 0;
+
+  // Delay application/control payloads after the final function-registration ACK. The
+  // captured AFFA3 radio waits about 400 ms before `03 52 <on/off>`; zero preserves the
+  // existing immediate behaviour for other panel families.
+  uint32_t payloadAfterRegistrationMs = 0;
+
+  // Per-profile heartbeat cadence. Zero uses AFFA_SYNC_INTERVAL_MS, retaining the public
+  // default for existing profiles. AFFA3 NAV's observed B9/69 cadence is about 500 ms.
+  uint32_t syncIntervalMs = 0;
+
+  // Some panel-initiated sessions begin with a bare `69` liveness frame, before any full
+  // `61 11`. When enabled, the first such frame gets the same bounded B9 -> BA discovery
+  // transaction as a START request. It is still NOT authorization: only the profile's good
+  // full request can release hello, registration, or application traffic.
+  bool oneShotResyncOnPeerAlive = false;
+
+  // MEASURED, NOT ASSUMED. docs/captures/"aknowledge offed display cONNECT OT POWER.csv" is
+  // a real OEM radio meeting a display that had been powered with no radio present. That
+  // display repeats `3CF 61 11 01` every ~104 ms and NEVER sends `61 11 00` — not once in
+  // sixteen requests — yet the radio answers it with the ordinary B0 announce burst 30.75 ms
+  // later and the session completes: registration, `03 52`, ISO-TP text, and the `01` never
+  // reappears. `61 11 01` is therefore the SAME request as `61 11 00`; the low bit reports
+  // the panel's own state, it is not an authorization grade.
+  //
+  // The gate is our own BA, not the byte: a `01` seen before we have sent BA is the panel
+  // calling into an empty bus and earns only the bounded B9 -> BA discovery pair. The first
+  // `01` that arrives AFTER that BA is the answer to it, and authorizes exactly as `00`
+  // does. See docs/PROTOCOL.md §3.6 for the four-capture timing table.
+  bool helloAfterBootstrapRequest = false;
+
+  // Whether the function-registration probes are part of the OPENING or part of RENDERING.
+  // The captured AFFA3 radio puts `151 70` and `1F1 70` on the wire 0.10-0.59 ms after the
+  // third B0, with no application involvement at all — so a Carminat build that never
+  // renders must still register, or the panel sits in a half-open session for ever.
+  // UpdateList has a separately validated startup contract in which registration is lazy
+  // and follows the first payload, so this stays false for that family. Do not unify.
+  bool registerAfterHello = false;
 };
 
 } // namespace affa

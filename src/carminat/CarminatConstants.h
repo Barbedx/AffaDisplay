@@ -55,12 +55,21 @@ inline constexpr uint8_t kFiller = 0x00;
 // Sync profile
 // ---------------------------------------------------------------------------
 
-// Sent in reply to EVERY complete panel `61 11 xx` request on 0x3CF, in this order. The
-// later `00` authorizes registration and rendering; `01` is only the bootstrap / START
-// phase. The second and third
+// Sent after the authorized panel `61 11 00` request on 0x3CF, in this order. `01` is
+// only the bootstrap / START phase and receives the bounded B9 + BA control pair; it
+// never starts this announce burst. The second and third
 // frames are IDENTICAL — two sendCan calls in the legacy source, and present in the
 // capture. It is not a typo and it is not deduplicated. [CAP]
 inline constexpr uint8_t kHello[3][8] = {
+    {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00},
+    {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00},
+    {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00},
+};
+
+// Historical MeganeCAN spelling. It remains named evidence rather than silently mixed
+// into the captured profile above: `70/B0/B0` is a compatibility variant, not the AFFA3
+// monitor sequence selected by kSync.
+inline constexpr uint8_t kLegacyHello[3][8] = {
     {0x70, 0x1A, 0x11, 0x00, 0x00, 0x00, 0x00, 0x01},
     {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00},
     {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00},
@@ -70,29 +79,82 @@ inline constexpr uint8_t kHello[3][8] = {
 // handler answered that cadence, so this preserves the measured exchange without allowing
 // a pathological line-rate retry storm to turn into an unbounded transmit flood.
 inline constexpr uint32_t kHelloMinMs = 90;
+inline constexpr uint32_t kHelloFirstDelayMs = 31;
+inline constexpr uint32_t kHelloFrameGapMs = 31;
+inline constexpr uint32_t kPayloadAfterRegistrationMs = 400;
+inline constexpr uint32_t kSyncIntervalMs = 500;
+
+// The monitor corpus and the historical MeganeCAN implementation are both real, but they
+// disagree on the first three capability frames.  Make the distinction an explicit caller
+// choice rather than guessing from timing or silently mixing bytes from two radios.
+enum class CarminatHelloProfile : uint8_t {
+  CapturedB0x3,          // current default: B0/B0/B0, paced at 31 ms on the wire
+  MeganeCanLegacy70B0B0, // historical source: immediate 70/B0/B0 compatibility sequence
+};
 
 // requestArg is 0x00 AND MUST STAY SO. Carminat's `BA 00 00 …` is 0xBA followed by seven
 // filler bytes that merely happen to be zero; UpdateList's `7A 01` carries a genuine
 // argument. The two look symmetrical on the wire and are not. [CAP]
 //
-// replyToPing is TRUE for this family: the MeganeCAN Carminat driver — the one proven on a
-// real panel — answers every `69` ping with an immediate B9 from inside its 0x69 handler,
-// and this profile reproduces that wire behaviour (paced; see AFFA_PING_REPLY_MIN_MS).
-// The other families keep the paced-only heartbeat. docs/PROTOCOL.md §3.6.
+// replyToPing is FALSE for this family, and the four OEM captures are why. The real radio's
+// B9 is a free-running 500.08 ms timer (sigma <= 0.5 ms) that never flinches as the display's
+// 504/512 ms `69` drifts past it through a full phase cycle — including one 0.023 ms
+// near-collision. It is categorically not a reply. With replyToPing on we emitted the paced
+// B9 AND a pong ~4 ms later, twice the OEM rate. docs/PROTOCOL.md §3.
 //
 //   syncId, syncReplyId, replyFlag, alive, request, requestArg, filler, hello, helloCount,
 //   replyToPing, waitForPanel, sendSyncRequest, requireAuthRequest, authRequestByte2,
-//   oneShotResyncOnStart, helloMinMs
+//   oneShotResyncOnStart, helloMinMs, helloOnNonAuthRequest, helloFirstDelayMs,
+//   helloFrameGapMs, payloadAfterRegistrationMs, syncIntervalMs, oneShotResyncOnPeerAlive,
+//   helloAfterBootstrapRequest
 inline constexpr SyncProfile kSync = {
     kIdSync, kIdSyncReply, 0x0400, 0xB9, 0xBA, 0x00, kFiller, kHello, 3,
-    true,  // B9 is a paced reply to a panel 69 ping, after a complete 61 11 bootstrap.
+    false, // B9 free-runs at 500 ms. The panel's 69 is an independent timer, not a request.
     true,  // Do not speak until the AFFA3 NAV panel speaks first.
     false, // Never spray BA probes as periodic recovery.
-    true,  // A bare 69 is only a ping; only good 61 11 00 starts auth/registration.
+    true,  // A bare 69 is only a ping; only a full 61 11 xx starts auth/registration.
     0x00,  // Good authorization byte.
     true,  // 61 11 01 gets one nonblocking B9 + BA bootstrap, never a repeating stream.
     kHelloMinMs,
+    false, // Handled by helloAfterBootstrapRequest below, which also opens the auth gate.
+    kHelloFirstDelayMs,
+    kHelloFrameGapMs,
+    kPayloadAfterRegistrationMs,
+    kSyncIntervalMs,
+    true,  // A bare 69 can be the measured first display message: one B9 + BA discovery.
+    true,  // A 61 11 01 that ANSWERS our BA is a full request. Measured, not assumed:
+           // "cONNECT OT POWER" completes a whole session on 01 with zero 00 frames.
+    true,  // 151 70 / 1F1 70 follow the third B0 by 0.10-0.59 ms, with no application
+           // involvement. Registration belongs to the opening on this family.
 };
+
+// Historical MeganeCAN compatibility profile.  It deliberately keeps the user's strict
+// `61 11 00` authorization gate and the bounded one-shot 01 -> B9/BA discovery path; only
+// the wire spelling/timing of the three hello frames differs.  The zero gaps reproduce the
+// proven old sender's three immediate `sendCan()` calls exactly.  Use it only for a panel
+// that has demonstrated the legacy opening; `kSync` above is the capture-backed default.
+inline constexpr SyncProfile kLegacyMeganeCanSync = {
+    kIdSync, kIdSyncReply, 0x0400, 0xB9, 0xBA, 0x00, kFiller, kLegacyHello, 3,
+    true,  // replyToPing
+    true,  // waitForPanel
+    false, // no periodic BA recovery
+    true,  // still require good 61 11 00
+    0x00,
+    true,  // one bounded 01 discovery pair
+    kHelloMinMs,
+    false, // 01 never releases application output
+    0,     // old source emitted its first 70 in the receive pass
+    0,     // old source emitted the two B0 frames immediately after it
+    kPayloadAfterRegistrationMs,
+    kSyncIntervalMs,
+    true,  // preserve the 69-first discovery path for this same panel family
+    true,  // same panel, same 61 11 01 rule — only the hello spelling differs here
+    true,  // same panel, same unconditional registration after the final hello frame
+};
+
+inline constexpr const SyncProfile& syncProfile(CarminatHelloProfile profile) {
+  return profile == CarminatHelloProfile::MeganeCanLegacy70B0B0 ? kLegacyMeganeCanSync : kSync;
+}
 
 // ORDER IS ON THE WIRE: the first send after a resync walks this table in declaration
 // order and puts a 1-byte 0x70 on each id before the payload. [CAP]

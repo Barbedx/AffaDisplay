@@ -80,17 +80,19 @@ struct Rig {
   CarminatDisplay d;
   Rig() : d(link, clk) {}
 
-  void sync() {
+  void sync(bool selfAck = false) {
     d.begin();
-    link.inject(affatest::panelSyncRequest());
-    d.poll();
+    // The 0x70 registrations leave with the final hello frame on this family, so a rig that
+    // wants them acknowledged must arm the emulator before the opening, not after.
+    d.setSelfAck(selfAck);
+    affatest::completeCarminatAuth(d, link, clk);
     TEST_ASSERT_TRUE(d.synced());
     drain(link);
   }
   void up() {
-    sync();
-    d.setSelfAck(true);
+    sync(/*selfAck=*/true);
     (void)d.setPower(true);
+    affatest::settleCarminatRegistration(d, clk);
     pumpUntilIdle(d);
     TEST_ASSERT_TRUE(d.registered());
     drain(link);
@@ -488,12 +490,23 @@ void test_sync_registered_and_txcomplete_fire_at_the_right_moment(void) {
   g_ev = EventLog{};
   r.d.begin();
   r.d.onEvent(&record, nullptr);
+  // Armed here, not after the burst: the opening itself emits the 0x70 probes with the final
+  // B0, so an emulator armed later would leave the first one waiting for an ACK for ever.
+  // It still cannot latch FUNCSREG early — the self-ACK is credited on the following poll.
+  r.d.setSelfAck(true);
 
   // begin() writes SyncState::Failed DIRECTLY rather than transitioning to it: firing a
   // callback from inside setup() would surprise every application.
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_ev.sync, "begin() is a reset, not a transition");
 
   r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_ev.sync, "auth remains closed before B0 #3");
+  r.clk.advance(carminat::kHelloFirstDelayMs);
+  r.d.poll();
+  r.clk.advance(carminat::kHelloFrameGapMs);
+  r.d.poll();
+  r.clk.advance(carminat::kHelloFrameGapMs);
   r.d.poll();
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_ev.sync, "the handshake is one transition");
   TEST_ASSERT_TRUE(hasFlag(g_ev.prev, SyncState::Failed));
@@ -504,6 +517,7 @@ void test_sync_registered_and_txcomplete_fire_at_the_right_moment(void) {
   ASSERT_RESULT(Ok, r.d.setPower(true));
   const TxTicket t = r.d.lastEnqueued();
   TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
+  affatest::settleCarminatRegistration(r.d, r.clk);
   pumpUntilIdle(r.d);
 
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_ev.registered, "Registered fires once, on the latch");

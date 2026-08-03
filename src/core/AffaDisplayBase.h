@@ -285,8 +285,9 @@ class AffaDisplayBase : public IDisplay, public IPanel {
 
  private:
   enum class TxState  : uint8_t { Idle, SendingFrame, WaitAck };
-  enum class JobKind  : uint8_t { Payload, Registration };
+  enum class JobKind  : uint8_t { Payload, Registration, Reassert };
   enum class SelfAck  : uint8_t { None, Partial, Done };
+  enum class BootstrapStage : uint8_t { None, Alive, Request };
 
   struct TxJob {
     uint16_t   funcId     = 0;
@@ -296,9 +297,11 @@ class AffaDisplayBase : public IDisplay, public IPanel {
     RenderSlot slot       = RenderSlot::None;   // coalescing key, together with funcId
     Priority   prio       = Priority::Normal;
     bool       coalesce   = false;      // false = this message is never replaced
+    bool       reassertAfterSession = false; // cache this ACKed desired control state
     bool       started    = false;      // one byte was accepted by ICanLink::trySend(). THE
                                         // SINGLE AUTHORITY for "not yet started" — never infer it
                                         // from queue position, TxState or frameIndex.
+    uint32_t   sessionEpoch = 0;        // stamped when the first frame is accepted
     bool       abandon    = false;      // abortAll() asked; honoured at a frame boundary
     uint8_t    len        = 0;
     uint8_t    sent       = 0;          // bytes already accepted by the link
@@ -349,20 +352,30 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   bool handleSyncFrame(const Frame& f);
   bool handleAckFrame(const Frame& f);
   void sendGenericAck(uint16_t id);      // the 0x74 reply on id|replyFlag
+  void pumpGenericAck(uint32_t now);     // one bounded Busy retry, ahead of hello work
   TxDisposition sendAlive();             // the B9/79 heartbeat frame — ONE builder, so the
                                          // paced tick and the reply-to-ping path cannot
                                          // drift apart byte-wise
   TxDisposition sendSyncRequest();       // the BA/7A frame, shared by normal and one-shot
                                          // recovery so their bytes cannot drift either
-  void queueHello(uint32_t now);         // emits now or coalesces one paced reply
-  bool sendHelloBurst(uint32_t now);     // exact profile hello sequence; true only when
-                                         // every raw hello frame was accepted
+  void armUnauthControl(uint32_t now);   // one bounded B9 -> BA discovery transaction
+  void pumpUnauthControl(uint32_t now);  // advances the current stage, never an open retry
+  void queueHello(uint32_t now);         // arms one profile-paced hello sequence
+  void pumpHello(uint32_t now);           // submits at most the profile-permitted prefix
+  uint32_t syncIntervalMs() const;        // profile override or AFFA_SYNC_INTERVAL_MS
   bool isOurTxId(uint16_t id) const;
   bool knownFunc(uint16_t id) const;
 
   int  findCoalescable(uint16_t funcId, RenderSlot s) const;  // -1 if none
   uint8_t insertIndexFor(Priority p) const;   // after started + Registration jobs
   bool registrationQueued() const;
+  bool queueRegistrations();              // inserts one ordered 70 burst if capacity allows
+  bool hasQueuedControl() const;          // newer app control wins over a cached reassert
+  bool reassertQueued() const;
+  // A queued internal restore is always older than a new application control request.  It
+  // has no ticket and has not touched the bus yet, so remove it before admitting the newer
+  // desired state; otherwise an old ON replay could follow a newly queued OFF and undo it.
+  uint8_t dropUnstartedReasserts();
   void pushJob(uint16_t funcId, const uint8_t* d, uint8_t len, JobKind kind, TxTicket t,
                const TxOptions& opt, uint8_t at);
   void removeJob(uint8_t index);
@@ -394,6 +407,11 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // alone. Used when registration failed or the panel forgot us — the probes are void, the
   // renders behind them are still what the application wants on the glass.
   uint8_t dropRegistrations();
+  // A new panel session invalidates the protocol ACK currently awaited by the head job.
+  // Registrations are discarded; app payloads are reset and held for the new registration;
+  // stale internal reasserts are recreated from CachedControl in the new session.
+  void invalidateInFlightForSession(uint32_t now);
+  void advanceSessionEpoch();
   void completeTicket(TxTicket t, Result r);
   // Stores the new state and fires SyncCb + EventKind::SyncChanged, but only on an actual
   // change. `extra` fires additionally (Registered / PeerLost); pass SyncChanged for none.
@@ -413,6 +431,10 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // Earliest millisecond at which another hello burst may go out. Paces the ANSWER to the
   // sync request, which the panel can ask for 1500 times a second. See AFFA_HELLO_MIN_MS.
   uint32_t  _nextHelloMs    = 0;
+  uint8_t   _helloIndex     = 0;          // next profile hello frame to offer
+  // Final registration ACK -> first application/control payload. It implements the
+  // captured Carminat 400 ms quiet interval without blocking poll().
+  uint32_t  _nextPayloadMs  = 0;
   // Earliest millisecond at which another reply-to-ping heartbeat may go out — same shape,
   // same reason: the storm repeats `69` at line rate too. See AFFA_PING_REPLY_MIN_MS.
   uint32_t  _nextPongMs     = 0;
@@ -433,13 +455,49 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // A request repeated without CAN ACK is not permission to enqueue another full hello
   // burst. One deferred reply preserves the latest protocol state without a TX storm.
   bool      _helloPending = false;
-  // `61 11 01` gets exactly one B9 + BA bootstrap for profiles that ask for it. The first
-  // flag schedules it after RX has drained; the second suppresses every retransmission.
+  // `61 11 01` (and, where profiled, the first bare 69) gets exactly one B9 -> BA
+  // discovery transaction. `Issued` is consumed on arm even if the local controller refuses
+  // it, so line-rate duplicate panel frames cannot recreate a BA stream.
   bool      _unauthControlPending = false;
+  // BA was physically accepted by the link. This is the evidence helloAfterBootstrapRequest
+  // needs, so it must mean "the display has been asked", never merely "we tried".
   bool      _unauthControlIssued = false;
-  // Separate from _nextSyncMs: a START followed by 00 in the same RX drain still emits its
-  // legacy B9 + BA immediately, but a locally busy controller is not hammered every poll.
+  // The one-shot BUDGET, consumed on arm. Separate from _unauthControlIssued on purpose: a
+  // bootstrap that the controller refused outright has spent its turn without ever putting
+  // BA on the wire, and a panel repeating `01`/`69` at line rate must not buy another.
+  // Only a session teardown clears it.
+  bool      _unauthControlSpent = false;
+  BootstrapStage _unauthControlStage = BootstrapStage::None;
+  uint8_t   _unauthControlBusyRetries = 0;
+  // Separate from _nextSyncMs: a START/first-69 followed by 00 in the same RX drain still
+  // emits its B9 + BA immediately, but never as a periodic local retry.
   uint32_t  _nextUnauthControlMs = 0;
+
+  // A panel's 1C1 -> 5C1 registration ACK is control-plane traffic, not an application
+  // render.  A locally full controller must not lose it behind the next B0; retain exactly
+  // one pending reply and retry it once when the link was merely Busy.  A hard Rejected
+  // offer belongs to the normal transport recovery/session reset path instead.
+  bool      _genericAckPending = false;
+  uint16_t  _genericAckId = 0;
+  uint8_t   _genericAckBusyRetries = 0;
+  // How many 0x74 replies we still owe for `_genericAckId`. The panel acknowledges every
+  // frame individually, so a second arrival while the first is stuck owes a second reply.
+  uint8_t   _genericAckOwed = 0;
+  uint32_t  _nextGenericAckMs = 0;
+
+  // One opt-in durable control payload (currently Carminat setPower). It is cached only
+  // after a real terminal ACK, and replayed internally/no-ticket after a later re-register.
+  struct CachedControl {
+    bool     valid   = false;
+    bool     pending = false;
+    uint16_t funcId  = 0;
+    uint8_t  len     = 0;
+    uint8_t  data[AFFA_MAX_PAYLOAD] = {0};
+  };
+  CachedControl _cachedControl;
+  // Bumped at every panel-session boundary. A job is stamped only once it starts, so a
+  // late ACK from a previous registration/control transfer cannot mutate the new session.
+  uint32_t  _sessionEpoch = 1;
   TxTicket  _nextTicket    = 1;
   TxTicket  _lastCompleted = kNoTicket;
   TxTicket  _lastEnqueued  = kNoTicket;

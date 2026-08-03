@@ -38,9 +38,10 @@ using namespace carminat;
 // Construction
 // ---------------------------------------------------------------------------
 
-CarminatDisplay::CarminatDisplay(ICanLink& link, IClock& clock)
-    : AffaDisplayBase(link, clock, carminat::kSync, carminat::kFuncIds,
-                      carminat::kFuncCount)
+CarminatDisplay::CarminatDisplay(ICanLink& link, IClock& clock,
+                                 carminat::CarminatHelloProfile hello)
+    : AffaDisplayBase(link, clock, carminat::syncProfile(hello), carminat::kFuncIds,
+                       carminat::kFuncCount)
 #if AFFA_ENABLE_MENU
       ,
       // The AffaDisplayBase subobject is fully constructed before any member is, so binding
@@ -74,10 +75,13 @@ bool CarminatDisplay::supports(Feature f) const {
 }
 
 Result CarminatDisplay::submit(uint16_t funcId, const uint8_t* data, uint8_t len,
-                               RenderSlot slot, bool coalesce) {
+                               RenderSlot slot, bool coalesce, Priority priority,
+                               bool reassertAfterSession) {
   TxOptions opt;
   opt.slot     = slot;
   opt.coalesce = coalesce;
+  opt.priority = priority;
+  opt.reassertAfterSession = reassertAfterSession;
   // kNoTicket carries its reason in lastResult(); a render call returns that reason rather
   // than a bare boolean, because "queued" and "rejected because the panel is not synced"
   // are different answers.
@@ -218,14 +222,18 @@ Result CarminatDisplay::setTime(const char* hhmm) {
   return submit(kIdSetText, d, sizeof(d), RenderSlot::Clock);
 }
 
-// setPower — 0x151, WIRE-SPEC §8.3.  03 52 <09|00> FF FF
+// setPower — 0x151, WIRE-SPEC §8.3.  03 52 <09|00> 00 00 00 00 00
 //
-// DO NOT UNIFY THIS WITH UpdateList: Carminat declares 0x03 for four bytes after the PCI,
-// UpdateList declares 0x04 for the same shape. Only UpdateList's is self-consistent, and
-// both have been accepted by their panels for months.
+// DO NOT UNIFY THIS WITH UpdateList: Carminat's captured control byte is 0x03, whereas
+// UpdateList uses 0x04 for its distinct control payload.
 Result CarminatDisplay::setPower(bool on) {
-  const uint8_t d[5] = {0x03, kCmdCtrl, on ? kDisplayCtrlOn : kDisplayCtrlOff, 0xFF, 0xFF};
-  return submit(kIdDisplayCtrl, d, sizeof(d), RenderSlot::Control);
+  // The monitor-proven AFFA3 form is a complete zero-padded 8-byte frame. The historical
+  // source used FF FF in bytes 3/4; keep that variant documented, but do not inject it
+  // into this captured profile.
+  const uint8_t d[8] = {0x03, kCmdCtrl, on ? kDisplayCtrlOn : kDisplayCtrlOff,
+                        0x00, 0x00, 0x00, 0x00, 0x00};
+  return submit(kIdDisplayCtrl, d, sizeof(d), RenderSlot::Control,
+                /*coalesce=*/true, Priority::Urgent, /*reassertAfterSession=*/true);
 }
 
 // highlightItem — 0x151, WIRE-SPEC §8.4.  07 29 01 <7E|7F> 80 00 00 00

@@ -46,17 +46,19 @@ struct Rig {
   CarminatDisplay d;
   Rig() : d(link, clk) {}
 
-  void sync() {
+  void sync(bool selfAck = false) {
     d.begin();
-    link.inject(affatest::panelSyncRequest());
-    d.poll();
+    // The 0x70 registrations leave with the final hello frame on this family, so a rig that
+    // wants them acknowledged must arm the emulator before the opening, not after.
+    d.setSelfAck(selfAck);
+    affatest::completeCarminatAuth(d, link, clk);
     TEST_ASSERT_TRUE(d.synced());
     drain(link);
   }
   void up() {
-    sync();
-    d.setSelfAck(true);
+    sync(/*selfAck=*/true);
     (void)d.setPower(true);
+    affatest::settleCarminatRegistration(d, clk);
     pumpUntilIdle(d);
     TEST_ASSERT_TRUE(d.registered());
     drain(link);
@@ -239,22 +241,30 @@ void test_abortPending_never_touches_a_registration_job(void) {
   // the resulting SendFailed looks exactly like a wire-format bug. So the probes survive
   // everything the application can do to the queue.
   Rig r;
+  // sync() leaves the emulator OFF, so the opening's own probes are caught mid-flight:
+  // 0x151 is started and in WaitAck, 0x1F1 is still queued behind it. That is precisely the
+  // window this test is about, and it now arrives from the opening rather than from a render.
   r.sync();
-  r.d.setSelfAck(true);
   TEST_ASSERT_FALSE(r.d.registered());
 
   TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, g_payload, 4));
-  TEST_ASSERT_EQUAL_UINT8_MESSAGE(2, r.d.queued(), "2 probes + 1 payload are queued");
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(2, r.d.queued(), "1 pending probe + 1 payload are queued");
 
   TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, r.d.abortPending(), "only the PAYLOAD is dropped");
-  TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, r.d.queued(), "both registration jobs survive");
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, r.d.queued(), "the registration job survives");
 
-  pumpUntilIdle(r.d);
-  static const Frame kProbes[] = {
-      {0x151, 8, {0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false},
+  // Acknowledge from the panel, not from setSelfAck: probe #0 was already on the wire before
+  // any emulator could be armed, so on hardware its 74 can only come from the display.
+  r.link.inject(affatest::mk(0x551, {0x74, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
+  pump(r.d, 2);
+  r.link.inject(affatest::mk(0x5F1, {0x74, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
+  pump(r.d, 2);
+
+  static const Frame kSecondProbe[] = {
       {0x1F1, 8, {0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false},
   };
-  affatest::expectFrames(r.link, kProbes, 2, "the probes still went out, in table order");
+  affatest::expectFrames(r.link, kSecondProbe, 1,
+                         "the surviving probe still went out, in table order");
   TEST_ASSERT_TRUE_MESSAGE(r.d.registered(), "and FUNCSREG still latched");
 }
 
@@ -262,8 +272,9 @@ void test_urgent_overtakes_normal_but_never_a_registration_job(void) {
   // Urgent jumps the queue ahead of Normal work, never splits a message already on the
   // wire, and never overtakes a pending function registration.
   Rig r;
+  // As above: the opening's second probe is still queued when the renders arrive, which is
+  // the only moment at which Urgent could possibly overtake a registration.
   r.sync();
-  r.d.setSelfAck(true);
   TEST_ASSERT_FALSE(r.d.registered());
 
   uint8_t normal[4] = {0xA1, 0xA2, 0xA3, 0xA4};
@@ -274,15 +285,23 @@ void test_urgent_overtakes_normal_but_never_a_registration_job(void) {
   opt.priority = Priority::Urgent;
   TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, hot, sizeof(hot), opt));
 
+  // The panel acknowledges probe #0 (already in flight from the opening), then probe #1.
+  r.link.inject(affatest::mk(0x551, {0x74, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
+  pump(r.d, 2);
+  r.link.inject(affatest::mk(0x5F1, {0x74, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
+  pump(r.d, 2);
+  TEST_ASSERT_TRUE_MESSAGE(r.d.registered(), "both probes completed before any payload");
+
+  r.clk.advance(carminat::kPayloadAfterRegistrationMs);
+  r.d.setSelfAck(true);
   pumpUntilIdle(r.d);
   static const Frame kOrder[] = {
-      {0x151, 8, {0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false},
       {0x1F1, 8, {0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false},
       {0x151, 8, {0xE1, 0xE2, 0xE3, 0xE4, 0x00, 0x00, 0x00, 0x00}, false},
       {0x151, 8, {0xA1, 0xA2, 0xA3, 0xA4, 0x00, 0x00, 0x00, 0x00}, false},
   };
-  affatest::expectFrames(r.link, kOrder, 4,
-                         "both probes first, then Urgent, then the Normal it overtook");
+  affatest::expectFrames(r.link, kOrder, 3,
+                         "the pending probe first, then Urgent, then the Normal it overtook");
 }
 
 // ---------------------------------------------------------------------------

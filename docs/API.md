@@ -644,38 +644,71 @@ struct SyncProfile {
   uint8_t  filler;        // 0x00 / 0x81   pads every frame we build
   const uint8_t (*hello)[8];  // frames sent in reply to `61 11`, in order
   uint8_t  helloCount;    // Carminat 3, UpdateList 1
+  bool replyToPing = false;
+  bool waitForPanel = false;
+  bool sendSyncRequest = true;
+  bool requireAuthRequest = false;
+  uint8_t authRequestByte2 = 0x00;
+  bool oneShotResyncOnStart = false;
+  bool helloOnNonAuthRequest = true;
+  uint32_t helloFirstDelayMs = 0;
+  uint32_t helloFrameGapMs = 0;
+  uint32_t payloadAfterRegistrationMs = 0;
+  uint32_t syncIntervalMs = 0;
+  uint32_t helloMinMs = 0;
 };
 
 } // namespace affa
 ```
 
-The two instances, for reference (full byte-level justification in `WIRE-SPEC.md`):
+Carminat exposes the opening choice without exposing a mutable `SyncProfile`:
 
 ```cpp
-// carminat/CarminatConstants.h
-namespace affa { namespace carminat {
-inline constexpr uint8_t kHello[3][8] = {
-  {0x70, 0x1A, 0x11, 0x00, 0x00, 0x00, 0x00, 0x01},
-  {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00},
-  {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00},   // sent TWICE — observed, not a typo
+enum class affa::carminat::CarminatHelloProfile : uint8_t {
+  CapturedB0x3,          // default
+  MeganeCanLegacy70B0B0  // explicit compatibility profile
 };
-inline constexpr SyncProfile kSync = {
-  0x3AF, 0x3CF, 0x400, 0xB9, 0xBA, 0x00, 0x00, kHello, 3
-};
-inline constexpr uint16_t kFuncIds[] = { 0x151, 0x1F1 };  // ORDER IS ON THE WIRE
-}}
 
-// updatelist/UpdateListConstants.h
-namespace affa { namespace updatelist {
-inline constexpr uint8_t kHello[1][8] = {
-  {0x70, 0x1A, 0x11, 0x00, 0x00, 0x00, 0x00, 0x01},
-};
-inline constexpr SyncProfile kSync = {
-  0x3DF, 0x3CF, 0x400, 0x79, 0x7A, 0x01, 0x81, kHello, 1
-};
-inline constexpr uint16_t kFuncIds[] = { 0x121, 0x1B1 };
-}}
+affa::CarminatDisplay display(
+    link, clock,
+    affa::carminat::CarminatHelloProfile::CapturedB0x3);
 ```
+
+`CapturedB0x3` holds the strict `61 11 00` gate and sends three identical
+`B0 14 11 00 1F 00 00 00` frames at +31 ms intervals. It waits for link acceptance of
+the third frame before inserting the sequential `151` / `1F1` registration work, waits
+400 ms after the final registration ACK before a zero-padded power command, and paces B9/69
+liveness at about 500 ms. Its `01` path is one `B9` + `BA` discovery pair only.
+
+`MeganeCanLegacy70B0B0` keeps all of that safety policy but substitutes the historical
+immediate MeganeCAN `70 1A 11 ...`, `B0 ...`, `B0 ...` opening. It is for a panel that
+has demonstrated that legacy requirement; it is never selected automatically or mixed into
+the default sequence.
+
+The UpdateList profile remains separate: `3DF` / `79` / `7A 01`, filler `81`, and
+function IDs `121` / `1B1`. Its old `affa3.c` reference is not a Carminat authority.
+
+#### 2.7.1 Auth-clock POC capture and TX terms
+
+`examples/06_authclock` arms its LittleFS boot capture before CAN starts. It writes the
+first history of the experiment to `/can-boot.bin`; `GET /api/capture` downloads that
+binary record stream, while `/api/boot` shows paged decoded rows. The record is intentionally
+first-history-wins rather than a wrapping tail, so the opening handshake remains available
+after a long run.
+
+The POC uses direct TWAI controller alerts, so its labels have a stronger distinction than
+the generic library:
+
+| POC record | Meaning |
+|---|---|
+| `TXQ` | TWAI accepted the frame into its transmit path. It is not proof that the bus transmitted it. |
+| `TX+` | the controller later reported a successful transmit outcome. |
+| `TX-` / `TX!` | a controller failure after acceptance / a local refusal before acceptance. |
+
+The generic `ICanLink` API only reports whether `send()` accepted a frame. Therefore the
+library-side Carminat gate is based on **link acceptance**, not a claim that a controller
+`TX+` occurred. The direct POC can additionally wait for `TX+` before treating its own
+opening step or ACK timeout as progressed.
 
 ### 2.8 `core/AffaRing.h`
 
@@ -1055,6 +1088,14 @@ class AffaDisplayBase : public IDisplay, public IPanel {
 `pumpSync()` runs once per `poll()`. Nothing here is conditional on how often `poll()`
 is called.
 
+> **Carminat override.** Read the following as generic FSM structure, not as the default
+> Carminat wire sequence. Carminat waits for complete `3CF 61 11 xx`; `01` schedules one
+> `B9` + `BA` discovery pair and remains locked, while `00` stages default B0/B0/B0 at
+> +31 ms gaps. Each B0 only needs `ICanLink::send()` acceptance at the library boundary.
+> Registration starts after the third acceptance, in strict `151` then `1F1` ACK order;
+> normal B9/69 is about 500 ms and no timer emits BA. See section 2.7 and
+> `WIRE-SPEC.md` section 5.3.
+
 ```
 if (_passive) return;                      // the radio owns the handshake
 
@@ -1097,9 +1138,14 @@ RX side, on `syncReplyId`:
   one `B9` leaves per `AFFA_SYNC_INTERVAL_MS`, which is what the capture shows.
 * anything else — ignored, logged at trace.
 
-Any other received frame, when `!_passive` and the id does not carry `replyFlag`, is
+After a complete `61 11 xx` opening request, any other received frame, when `!_passive`
+and the id does not carry `replyFlag`, is
 answered with the generic ACK `id|replyFlag : { 0x74, filler x7 }`. That is the
 `RX 1C1 70 …` → `TX 5C1 74 00 …` pair in the capture.
+
+> For Carminat, this generic reply is control-plane traffic: it is allowed during `01`
+> bootstrap and the good-`00` hello burst, but it does not make `linkReady()` true or
+> authorize our registration, power, text, or clock writes.
 
 #### 2.9.2 The transmit FSM, specified
 
@@ -3216,7 +3262,7 @@ Four things this demonstrates, and one it deliberately does not.
   re-deriving the protocol.
 * **The blocking is gone, not moved.** `delay(1000)` and four `delay(200)`s became two
   deadlines on the application's own clock. Meanwhile `poll()` keeps running, the sync
-  heartbeat keeps its 1 Hz cadence, and a key arriving mid-sequence is still delivered
+  heartbeat stays paced, and a key arriving mid-sequence is still delivered
   within one poll.
 * **What the library did not supply: the timer.** Pacing keypresses at 200 ms is radio
   policy, so the pacing lives in the application, driven by the same `IClock` the

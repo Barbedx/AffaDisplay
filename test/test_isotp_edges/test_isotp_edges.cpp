@@ -27,10 +27,13 @@ struct Rig {
 
   void up() {
     d.begin();
-    link.inject(affatest::panelSyncRequest());
-    d.poll();
+    // Self-ACK BEFORE the opening: on this family the 0x70 registrations leave with the
+    // final hello frame, so a rig that arms the emulator afterwards leaves the first
+    // registration parked in WaitAck for ever.
     d.setSelfAck(true);
+    affatest::completeCarminatAuth(d, link, clk);
     (void)d.setPower(true);
+    affatest::settleCarminatRegistration(d, clk);
     pumpUntilIdle(d);
     TEST_ASSERT_TRUE(d.registered());
     drain(link);

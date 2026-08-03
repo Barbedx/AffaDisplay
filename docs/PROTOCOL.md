@@ -110,21 +110,56 @@ Picking the wrong column is silent — the bus simply never answers.
 
 ## 3. Session
 
-> **AFFA3 NAV bench correction (2026-07-31).** The Carminat display owns session start.
-> The ESP32 remains silent after boot until it receives a *complete* display-originated
-> `3CF 61 11 xx` frame (DLC at least 3). It answers **every** such request with the exact
-> three-frame Carminat hello (`70 / B0 / B0`). `61 11 01` is the bootstrap/resync phase: it
-> additionally receives one bounded `B9` + `BA` control sequence, but it does **not**
-> authorize function registration, rendering, display power, text, or the clock. Only a
-> later `3CF 61 11 00` authorizes those operations. A bare `3CF 69` is liveness only and
-> cannot start authorization. Repeated `01` frames must never create a periodic `BA` stream.
+### 3.0 Carminat opening and recovery -- authoritative captured profile
+
+The Carminat panel starts the session. The ESP32 is silent after boot until a complete
+`3CF 61 11 xx` (DLC >= 3) arrives. On a single-ended monitor, `Dir=Rx` only means that
+the monitor received the frame; direction is determined primarily by the IDs:
+`3CF` and `1C1` are panel -> ESP32, while `3AF`, `151`, `1F1`, and `5C1` are
+ESP32 -> panel. The usual fillers corroborate that reading (`A3` from the panel,
+`00` from this driver), but a received filler is never a validation rule.
+
+The default `CarminatHelloProfile::CapturedB0x3` is the sequence measured in the supplied
+real-display monitor captures:
+
+```text
+RX  3CF  61 11 00 A3 A3 A3 A3 A3
+   +31 ms  TX 3AF  B0 14 11 00 1F 00 00 00
+             RX 1C1  70 A3 A3 A3 A3 A3 A3 A3
+             TX 5C1  74 00 00 00 00 00 00 00
+   +31 ms  TX 3AF  B0 14 11 00 1F 00 00 00
+   +31 ms  TX 3AF  B0 14 11 00 1F 00 00 00
+```
+
+One opening frame is offered to `ICanLink` at a time; the `1C1 -> 5C1` control ACK is allowed
+to interleave between B0 frames. Only after the third B0 has been accepted by the link may
+the application side register `151`, wait for `551 74`, register `1F1`, and wait for
+`5F1 74` -- strictly in that order. Wait about 400 ms after the final registration ACK
+before the zero-padded display-on frame `151 03 52 09 00 00 00 00 00`. A clock request for
+10:00 is `151 05 56 31 30 30 30 00 00`, and it too requires `551 74`.
+
+`61 11 01` is discovery only in the strict Carminat profile: issue one nonblocking
+`3AF B9 ...` + `3AF BA ...` pair, keep registration/render/power/time locked, and wait
+for `61 11 00`. Repeated `01` frames never create a periodic BA stream. A full request
+also opens the panel control plane, so `1C1 70 -> 5C1 74` remains permitted during discovery;
+that ACK is not authorization for application output.
+
+Healthy traffic is a paced roughly-500-ms `3AF B9` / `3CF 69` liveness exchange. A lost
+session drops registrations and held application work waits for the next panel-originated
+opening; recovery replays the selected profile, never a timer-driven BA probe.
+
+The historical `CarminatHelloProfile::MeganeCanLegacy70B0B0` profile is explicit
+compatibility only. It preserves the old MeganeCAN source's immediate
+`70 1A 11 ...`, `B0 ...`, `B0 ...` opening for a panel that has demonstrated that
+requirement. It is not the capture-backed default, and selecting it does not weaken the
+strict `61 11 00` gate or permit periodic BA.
 
 ### 3.1 State
 
 Four flags. `FAILED = 0x01`, `PEER_ALIVE = 0x02`, `START = 0x04`, `FUNCSREG = 0x08`.
 Initial state is `FAILED`. `[REF][IMPL]`
 
-### 3.2 Legacy transmit tick and the bounded library behaviour
+### 3.2 Historical MeganeCAN transmit tick (not the current profile)
 
 The original driver sent this heartbeat once per second on the sync id:
 
@@ -140,11 +175,10 @@ and additionally, **while `FAILED` or `START` is set**:
 
 then cleared `START`. `[IMPL]`
 
-That is historical behaviour, not the Carminat library's retry policy. The library stays
-silent before the first complete `61 11 xx`, emits a single `B9` + `BA` sequence for the
-bootstrap `61 11 01`, and does not periodically repeat `BA`. It can continue its paced
-`B9` heartbeat only after the display has initiated a session; neither heartbeat nor ping
-reply authorizes application output.
+That is historical behaviour, not the Carminat library's retry policy. The current
+capture-backed rules are in section 3.0: one discovery `B9` + `BA` pair for `01`, no
+periodic BA, a roughly-500-ms heartbeat once the panel has opened the session, and no
+application output before the later good `00`.
 
 > `requestArg` (`data[1]`) is `0x00` on Carminat **and it is filler, not an argument**.
 > UpdateList's `7A 01` carries a genuine `0x01`. The two look symmetric on the wire and
@@ -154,7 +188,7 @@ reply authorizes application output.
 
 ```
 3CF   61 11 xx A3 A3 A3 A3 A3      sync request
-3CF   69 00 A3 A3 A3 A3 A3 A3      peer-alive ping, nominally ~1 Hz
+3CF   69 00 A3 A3 A3 A3 A3 A3      peer-alive ping, roughly every 500 ms when healthy
 ```
 
 Match rules — **and the loose matching is deliberate**:
@@ -168,9 +202,9 @@ Match rules — **and the loose matching is deliberate**:
 
 | value | meaning |
 |---|---|
-| `0x00` | authorization request: after its hello has been sent, registration and output may proceed |
-| **`0x01`** | **bootstrap/resync request: hello plus one bounded `B9` + `BA`; remain unauthorized** |
-| any other `xx` | hello response only; it does not authorize output |
+| `0x00` | authorization request: run the selected hello profile, then registration and output may proceed |
+| **`0x01`** | **discovery only: one bounded `B9` + `BA`, no hello/register/output** |
+| any other `xx` | ignore for application authorization and output |
 
 `0x01` means the panel is asking us to bootstrap its session, not that application traffic
 may resume. The historical driver treated this as a registration-loss indication and may
@@ -190,53 +224,52 @@ and permits queued display output.
 > a peer is never answered. Known hole, not a bug — the Carminat panel sends `61 11`.
 > `[OEM]`
 
-### 3.4 The hello — our answer to every full `61 11 xx`
+### 3.4 Captured hello default and the historical compatibility profile
 
-Queued on receipt, on the sync id, in this order. The initial burst is sent promptly;
-repeated/retransmitted requests are rate-limited without blocking the application:
+For the default Carminat profile, a good `61 11 00` emits **three identical**
+`B0 14 11 00 1F 00 00 00` frames at approximately +31 ms, +62 ms, and +93 ms from
+the request. The gaps are protocol timing, not a blocking delay: only one B0 is offered at
+a time so the panel's `1C1 -> 5C1` control exchange can occur between them. The default does
+not send either B0 or `70 1A 11` for `01`.
 
+```text
+TX  3AF  B0 14 11 00 1F 00 00 00   // +31 ms
+TX  3AF  B0 14 11 00 1F 00 00 00   // +62 ms
+TX  3AF  B0 14 11 00 1F 00 00 00   // +93 ms
 ```
-3AF   70 1A 11 00 00 00 00 01
-3AF   B0 14 11 00 1F 00 00 00
-3AF   B0 14 11 00 1F 00 00 00      <-- IDENTICAL, sent twice, NOT a typo
+
+`CarminatHelloProfile::MeganeCanLegacy70B0B0` is a separately selectable compatibility
+profile. It preserves the immediate historical MeganeCAN source sequence below, which was
+proven on a real panel, but it is not inferred from or silently mixed into the capture-backed
+default:
+
+```text
+TX  3AF  70 1A 11 00 00 00 00 01
+TX  3AF  B0 14 11 00 1F 00 00 00
+TX  3AF  B0 14 11 00 1F 00 00 00
 ```
 
-The library sends this burst for every complete `61 11 xx`, including `01`, `00`, and an
-unknown `xx`. The hello alone is not authorization: a bootstrap `01` remains locked; only a
-later `00`, after its own hello burst has been emitted, clears the application gate. `01`
-also receives one bounded `B9` + `BA` sequence; repeated requests are coalesced and cannot
-create periodic `BA` traffic. `[IMPL][CAP]`
+Both profiles retain the same strict good-`00` authorization and bounded recovery policy.
+They differ only in the three opening frames and their timing.
 
-UpdateList sends only the first frame. The duplicate second/third frame is present in the
-original source **and in the capture**; it is not deduplicated. `[REF][IMPL]`
+### 3.5 Function registration (`FUNCSREG`) — strictly sequential
 
-> **Authorization is deliberately stricter than hello.** The legacy driver cleared `FAILED`
-> on any `61 11`; the library does not declare the application side ready until it has seen
-> `61 11 00` and sent the corresponding hello. It is still an optimistic local belief —
-> the panel does not acknowledge the hello burst directly.
+`FUNCSREG` is a one-byte payload `{0x70}` on each registered function ID. It is unrelated
+to the `70 1A 11 ...` sync frame used only by the optional legacy hello profile.
 
-> **The panel's own test is weaker still**: the emulator sets `_synced` on *any* frame on
-> the sync id whose `data[0] == 0x70`. It does not check the remaining seven bytes.
-> `[EMU]`
-
-### 3.5 Function registration (`FUNCSREG`) — lazy, and a different `0x70`
-
-**Two unrelated things are both called "0x70 registration". Do not conflate them:**
-
-1. the hello frame `70 1A 11 …` on the *sync* id (§3.4), and
-2. **FUNCSREG**: a one-byte payload `{0x70}` sent to *each* registered function id.
-
-FUNCSREG happens inside the **first render call**, not at boot. For the Carminat profile,
-that render call is held until the display has completed the `61 11 00` authorization phase;
-a preceding `61 11 01` never starts registration or a time/text/power command. Our `funcs[]`
-is `{0x151, 0x1F1}`, in that order, and the order is on the wire:
+After the good-`00` opening has completed, registration is held behind the application gate.
+The library performs it before the queued application payload; the 10:00 POC performs it
+explicitly before display power and time. A preceding `61 11 01` never starts registration or
+a time/text/power command. Our `funcs[]` is `{0x151, 0x1F1}`, in that order, and the order is
+on the wire:
 
 ```
 151   70 00 00 00 00 00 00 00      →  wait for ACK on 551
 1F1   70 00 00 00 00 00 00 00      →  wait for ACK on 5F1
 ```
 
-Only after **every** entry is acknowledged is `FUNCSREG` set. `[IMPL]`
+Only after **every** entry is acknowledged is `FUNCSREG` set. After the final `5F1 74`,
+wait approximately 400 ms before `151 03 52 09 00 00 00 00 00` (display ON).
 
 #### Registration is BIDIRECTIONAL, and the filler is what tells you which way
 
@@ -283,7 +316,7 @@ latched on those ACKs and on nothing else.
 ### 3.6 Peer-alive watchdog
 
 - **Re-armed by** any `0x69` on the sync-reply id.
-- **Timeout:** 5 ticks × 1000 ms ≈ **5 s**.
+- **Timeout:** a 5000-ms wall-clock deadline.
 - **On expiry:** state is *assigned* `FAILED` — which clears `PEER_ALIVE`, `START` **and
   `FUNCSREG` together**. Registration must be redone before the next render. `[IMPL]`
 
@@ -291,22 +324,12 @@ For the Carminat library, `69` remains liveness only: a bare ping before any com
 `61 11 xx` produces no session/control traffic and can never authorize registration or
 application output.
 
-#### The ping is ANSWERED on Carminat, and the reply is a second heartbeat
+#### Captured heartbeat cadence
 
-The proven Carminat driver calls its 1 Hz tick from inside the `0x69` handler
-(`CarminatDisplay.cpp:346`), so on the wire its `B9` follows the panel's `69` within
-milliseconds — a pong, whatever the panel makes of it — and a healthy link carries **two**
-heartbeats per second, one paced and one per ping. `[IMPL]`
-
-Whether the panel *requires* the reply is unknown (nobody has a spec for the panel; the
-2026-07-28 registration stall is the suspected symptom of its absence, unproven). This
-library reproduces the behaviour for the Carminat profile only (`SyncProfile::replyToPing`),
-with the reply paced by `AFFA_PING_REPLY_MIN_MS` — an unacknowledged panel repeats `69` at
-line rate (126 copies in 32 ms `[CAP]`), and one reply per copy would be §8's hello storm
-again. What is deliberately NOT reproduced from the legacy handler: the watchdog stays
-re-armed from our own loop, and no `BA` accompanies the reply. `[DERIVED]` — no capture yet
-shows the panel reacting differently; measure on the bench before believing more than
-"wire-identical to the driver that worked".
+The normal captured liveness pair is approximately `3CF 69 ...` and `3AF B9 ...` every
+500 ms. A B9 offered in reply to a received 69 is paced/coalesced so retransmitted 69 frames
+cannot become a transmit storm. No B9 path is allowed to append a BA; BA remains the single
+discovery response to `61 11 01`.
 
 ---
 
@@ -389,7 +412,7 @@ Byte 0 is the length, byte 1 is the opcode.
 
 ```
 02 54 03 00 00 00 00 00        close window / dismiss popup          [CAP][OEM]
-03 52 09 FF FF 00 00 00        display ON        (0x00 = OFF)        [CAP]
+03 52 09 00 00 00 00 00        display ON        (0x00 = OFF)        [CAP]
 05 56 H H M M 00 00            set clock, 4 ASCII digits "HHMM"      [CAP]
 07 29 01 7E 80 00 00 00        highlight row 0   (0x7F = row 1)      [CAP]
 ```
@@ -589,7 +612,7 @@ else:
 
 | | value |
 |---|---|
-| sync tick | 1000 ms |
+| Carminat B9/69 liveness cadence | about 500 ms |
 | peer-alive timeout | 5 ticks ≈ 5 s |
 | per-frame ACK timeout | 2000 ms |
 | retry policy | **none** — no retransmission at any layer |
@@ -691,15 +714,15 @@ Ranked by how much time each has cost.
 
 ## 10. Open questions
 
-- The `0x55` byte at text payload `[4]` and the two `0xFF` in `03 52 09 FF FF` are
-  unexplained constants in every source.
+- The `0x55` byte at text payload `[4]` remains an unexplained constant. The current
+  captured Carminat power form is zero-padded `03 52 09 00 00 00 00 00`; the older
+  MeganeCAN `FF FF` spelling is historical compatibility evidence, not the default wire form.
 - Icon byte values do not decode cleanly against the `[REF]` bitmap: `0x94` shows **no**
   icon and `0x9B` shows traffic, neither of which the bitmap predicts. Codes appear to
   repeat cyclically across `0x00..0xFF`. Not fully decoded.
-- `data[2] == 0x01` means registration is void (§3.3). **What makes the panel decide that
-  is not known** — it has been seen appear spontaneously on a link that had been working.
-  Whether a re-registration alone clears it, or the panel additionally needs `BA` first, is
-  untested: no implementation has ever re-registered in response to it.
+- What makes the panel choose `data[2] == 0x01` is not known. The strict library policy
+  treats it as discovery only and waits for `00`; the captured legacy radio later proceeds
+  differently, so that behavior remains compatibility evidence rather than authorization.
 - The confirm box has **no capture at all**. Every byte of §5.3's confirm layout is
   `[DERIVED]`.
 - `0x1F1` NAV: we register it and never write it. Its 302-byte OEM payload is a field

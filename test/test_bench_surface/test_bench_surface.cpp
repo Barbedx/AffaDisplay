@@ -114,10 +114,10 @@ struct Bench {
     // ACK that would otherwise come from the panel, so the lazy 0x70 registration burst
     // completes and FUNCSREG latches. Same sequence the bench firmware goes through before
     // its first setText, and the reason a render before it returns NoSync.
-    link.inject(affatest::panelSyncRequest());
     d.setSelfAck(true);
-    run(2);
+    affatest::completeCarminatAuth(d, link, clk);
     (void)d.setPower(true);
+    affatest::settleCarminatRegistration(d, clk);
     settle();
     TEST_ASSERT_TRUE_MESSAGE(d.registered(), "FUNCSREG must latch before the bench tests");
   }

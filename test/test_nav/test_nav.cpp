@@ -75,10 +75,11 @@ struct Rig {
 
   void up() {
     d.begin();
-    link.inject(affatest::panelSyncRequest());
-    d.poll();
+    // Self-ACK BEFORE the opening: the 0x70 registrations now leave with the final hello.
     d.setSelfAck(true);
+    affatest::completeCarminatAuth(d, link, clk);
     (void)d.setPower(true);                       // latch FUNCSREG out of the way
+    affatest::settleCarminatRegistration(d, clk);
     pumpUntilIdle(d);
     TEST_ASSERT_TRUE(d.registered());
     drain(link);

@@ -20,6 +20,9 @@
 #include "core/IClock.h"
 #include "core/ICanLink.h"
 #include "link/LoopbackLink.h"
+#if AFFA_PANEL_CARMINAT
+#  include "carminat/CarminatConstants.h"
+#endif
 
 namespace affatest {
 
@@ -62,6 +65,35 @@ inline affa::Frame panelSyncStart() {
 inline affa::Frame panelPeerAlive() {
   return mk(0x3CF, {0x69, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3});
 }
+
+#if AFFA_PANEL_CARMINAT
+// Drives the captured AFFA3 opening exactly as the real panel sees it: full 61 11 00,
+// then B0 #1 at +31 ms and the remaining B0s at +31 ms each.  Delays are protocol timing,
+// not an implementation detail, so host tests must advance their fake clock rather than
+// relying on a number of poll() calls.
+template <class D, class L>
+inline void completeCarminatAuth(D& d, L& l, FakeClock& clk) {
+  l.inject(panelSyncRequest());
+  d.poll();
+  clk.advance(affa::carminat::kHelloFirstDelayMs);
+  d.poll();
+  clk.advance(affa::carminat::kHelloFrameGapMs);
+  d.poll();
+  clk.advance(affa::carminat::kHelloFrameGapMs);
+  d.poll();
+}
+
+// A self-ACK rig has to let both 0x70 registrations complete before the profile's measured
+// 400 ms post-registration quiet period can end.  Keep this in the shared harness so every
+// Carminat builder test starts on a genuinely usable session, not a zero-time shortcut.
+template <class D>
+inline void settleCarminatRegistration(D& d, FakeClock& clk) {
+  for (uint8_t i = 0; i < 8 && !d.registered(); ++i) d.poll();
+  TEST_ASSERT_TRUE_MESSAGE(d.registered(), "Carminat registrations must complete first");
+  clk.advance(affa::carminat::kPayloadAfterRegistrationMs);
+  d.poll();
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Link helpers

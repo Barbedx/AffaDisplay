@@ -45,12 +45,14 @@ const Frame kSetTime1234[] = {
     {0x151, 8, {0x05, 0x56, 0x31, 0x32, 0x33, 0x34, 0x00, 0x00}, false},
 };
 
-// [CAP-VERBATIM] @TX 151 03 52 09 FF FF 00 00 00 (x42) / 03 52 00 .. (x11)
+// The current AFFA3 monitor capture uses a complete zero-padded control frame.  The
+// historical MeganeCAN FF/FF tail remains documented as a compatibility observation, but
+// this profile deliberately pins the monitor-proven bytes.
 const Frame kSetStateEnable[] = {
-    {0x151, 8, {0x03, 0x52, 0x09, 0xFF, 0xFF, 0x00, 0x00, 0x00}, false},
+    {0x151, 8, {0x03, 0x52, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00}, false},
 };
 const Frame kSetStateDisable[] = {
-    {0x151, 8, {0x03, 0x52, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00}, false},
+    {0x151, 8, {0x03, 0x52, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false},
 };
 
 // [CAP-VERBATIM] @TX 151 07 29 01 7E .. (x11) / 07 29 01 7F .. (x12)
@@ -186,12 +188,15 @@ struct Rig {
   // golden vector, and freezing is how a wire test stays a wire test.
   void up() {
     d.begin();
-    link.inject(affatest::panelSyncRequest());
-    d.poll();
+    // PARTIAL while bytes remain, DONE on the last. Armed BEFORE the opening, because on
+    // this family the 0x70 registrations leave with the final hello frame rather than
+    // waiting for the first render.
+    d.setSelfAck(true);
+    affatest::completeCarminatAuth(d, link, clk);
     TEST_ASSERT_TRUE(d.synced());
 
-    d.setSelfAck(true);          // PARTIAL while bytes remain, DONE on the last
     ASSERT_RESULT(Ok, d.setPower(true));
+    affatest::settleCarminatRegistration(d, clk);
     pumpUntilIdle(d);
     TEST_ASSERT_TRUE_MESSAGE(d.registered(), "FUNCSREG must latch before the wire tests");
     drain(link);
@@ -456,22 +461,39 @@ void test_hideInfoPopup_falls_back_to_the_source_banner(void) {
 void test_first_send_after_a_resync_registers_both_functions_in_order(void) {
   Rig r;
   r.d.begin();
-  r.link.inject(affatest::panelSyncRequest());
-  r.d.poll();
-  drain(r.link);
+  // Armed before the opening: the probes now leave WITH the final hello frame, so a rig that
+  // arms the emulator afterwards parks the first one in WaitAck for ever.
   r.d.setSelfAck(true);
+  affatest::completeCarminatAuth(r.d, r.link, r.clk);
 
-  ASSERT_RESULT(Ok, r.d.setPower(true));
-  TEST_ASSERT_FALSE_MESSAGE(r.d.registered(), "FUNCSREG must not latch before the probes");
-  pumpUntilIdle(r.d);
+  // ORDER IS ON THE WIRE, and it is now the OPENING that puts it there — not the first
+  // render. The OEM radio emits 151 70 then 1F1 70 within 0.59 ms of B0#3 with no
+  // application involvement, so the probes are already out before setPower() is called.
+  affatest::settleCarminatRegistration(r.d, r.clk);
 
-  static const Frame kWant[] = {
-      {0x151, 8, {0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false},
+  // The opening's own B0 frames (and any paced B9) sit in the link buffer ahead of the
+  // probes. This test is about the probe ORDER, not the sync channel, so step over 0x3AF
+  // rather than draining indiscriminately and losing the frames under test.
+  Frame got;
+  do {
+    TEST_ASSERT_TRUE_MESSAGE(r.link.takeSent(got), "the opening must emit the first probe");
+  } while (got.id == 0x3AF);
+  TEST_ASSERT_EQUAL_HEX32_MESSAGE(0x151, got.id, "0x151 registers first — order is on the wire");
+  TEST_ASSERT_EQUAL_HEX8(0x70, got.data[0]);
+
+  static const Frame kSecondProbe[] = {
       {0x1F1, 8, {0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false},
-      {0x151, 8, {0x03, 0x52, 0x09, 0xFF, 0xFF, 0x00, 0x00, 0x00}, false},
   };
-  expectFrames(r.link, kWant, 3, "lazy registration walks {0x151, 0x1F1} in table order");
-  TEST_ASSERT_TRUE(r.d.registered());
+  expectFrames(r.link, kSecondProbe, 1, "then 0x1F1, in function-table order");
+  TEST_ASSERT_TRUE_MESSAGE(r.d.registered(), "both 74s latch FUNCSREG without any payload");
+
+  // And the payload that follows is the ordinary one, behind the profile's 400 ms quiet gap.
+  ASSERT_RESULT(Ok, r.d.setPower(true));
+  pumpUntilIdle(r.d);
+  static const Frame kWantPayload[] = {
+      {0x151, 8, {0x03, 0x52, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00}, false},
+  };
+  expectFrames(r.link, kWantPayload, 1, "setPower rides an already-registered session");
 }
 
 // ---------------------------------------------------------------------------

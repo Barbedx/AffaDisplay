@@ -56,18 +56,20 @@ struct Rig {
   CarminatDisplay display;
   Rig() : display(link, clock) {}
 
-  void authorize() {
+  void authorize(bool selfAck = false) {
     display.begin();
-    link.inject(panelSyncRequest());
-    display.poll();
+    // The 0x70 registrations leave with the final hello frame on this family, so a rig that
+    // wants them acknowledged must arm the emulator before the opening, not after.
+    display.setSelfAck(selfAck);
+    affatest::completeCarminatAuth(display, link, clock);
     TEST_ASSERT_TRUE_MESSAGE(display.synced(), "accepted hello authorizes Carminat");
     drain(link);
   }
 
   void registerFunctions() {
-    display.setSelfAck(true);
     TEST_ASSERT_EQUAL(static_cast<uint8_t>(Result::Ok),
                       static_cast<uint8_t>(display.setPower(true)));
+    affatest::settleCarminatRegistration(display, clock);
     pumpUntilIdle(display);
     TEST_ASSERT_TRUE(display.registered());
     display.setSelfAck(false);
@@ -82,7 +84,7 @@ struct Rig {
 // stale cursor's continuation.
 void test_busy_offer_never_commits_payload_bytes_or_started_state(void) {
   Rig r;
-  r.authorize();
+  r.authorize(/*selfAck=*/true);
   r.registerFunctions();
 
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Result::Ok),
@@ -102,7 +104,11 @@ void test_busy_offer_never_commits_payload_bytes_or_started_state(void) {
   r.clock.advance(AFFA_TX_RETRY_MS);
   r.display.poll();
   Frame first;
-  TEST_ASSERT_TRUE_MESSAGE(r.link.takeSent(first), "accepted retry emits a first frame");
+  // The clock advance also reaches the profile's 500 ms heartbeat deadline.  It is not part
+  // of the payload assertion, so discard that legal B9 and take the retry's first 0x151.
+  do {
+    TEST_ASSERT_TRUE_MESSAGE(r.link.takeSent(first), "accepted retry emits a first frame");
+  } while (first.id == 0x3AF && first.data[0] == 0xB9);
   TEST_ASSERT_EQUAL_HEX32(0x151, first.id);
   TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x10, first.data[0],
                                  "retry starts from payload byte zero, not byte eight");
@@ -117,13 +123,28 @@ void test_busy_hello_does_not_authorize_until_the_full_burst_is_accepted(void) {
   r.link.busyOffers = 1;
   r.link.inject(panelSyncRequest());
   r.display.poll();
-  TEST_ASSERT_FALSE_MESSAGE(r.display.synced(), "a busy first hello keeps auth closed");
+  TEST_ASSERT_FALSE_MESSAGE(r.display.synced(), "the 31 ms hello deadline keeps auth closed");
+  TEST_ASSERT_EQUAL_UINT32(0, r.link.sentCount());
+
+  r.clock.advance(carminat::kHelloFirstDelayMs);
+  r.display.poll();
+  TEST_ASSERT_FALSE_MESSAGE(r.display.synced(), "a busy first B0 keeps auth closed");
   TEST_ASSERT_EQUAL_UINT32(0, r.link.sentCount());
 
   r.clock.advance(AFFA_TX_RETRY_MS);
   r.display.poll();
+  TEST_ASSERT_FALSE_MESSAGE(r.display.synced(), "B0 #1 alone is not authorization");
+  r.clock.advance(carminat::kHelloFrameGapMs);
+  r.display.poll();
+  TEST_ASSERT_FALSE_MESSAGE(r.display.synced(), "B0 #2 alone is not authorization");
+  r.clock.advance(carminat::kHelloFrameGapMs);
+  r.display.poll();
   TEST_ASSERT_TRUE_MESSAGE(r.display.synced(), "only the accepted full hello opens auth");
-  TEST_ASSERT_EQUAL_UINT32(3, drainCount(r.link));
+  // FOUR, not three: the three B0 frames plus the first 0x70 registration probe, which the
+  // OEM radio puts on the wire 0.10-0.59 ms after B0#3 with no application involvement at
+  // all (carminat::kSync.registerAfterHello). The second probe follows once this one is
+  // acknowledged, which nothing does on this deliberately unhelpful link.
+  TEST_ASSERT_EQUAL_UINT32(4, drainCount(r.link));
 }
 
 // The one-shot START pair is not issued just because it was scheduled. A Busy B9 leaves the
@@ -132,11 +153,11 @@ void test_busy_hello_does_not_authorize_until_the_full_burst_is_accepted(void) {
 void test_busy_start_pair_is_retried_and_only_marked_issued_after_b9_and_ba(void) {
   Rig r;
   r.display.begin();
-  r.link.busyOnOffer = 4;  // hello x3 accepted; the first bootstrap B9 is locally busy
+  r.link.busyOnOffer = 1;  // the first bootstrap B9 is locally busy
   r.link.inject(panelSyncStart());
   r.display.poll();
   TEST_ASSERT_FALSE(r.display.synced());
-  TEST_ASSERT_EQUAL_UINT32_MESSAGE(3, r.link.sentCount(), "only hello left before busy B9");
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(), "busy B9 does not leave the link");
   drain(r.link);
 
   r.clock.advance(AFFA_TX_RETRY_MS);
@@ -150,8 +171,43 @@ void test_busy_start_pair_is_retried_and_only_marked_issued_after_b9_and_ba(void
 
   r.link.inject(panelSyncStart());
   r.display.poll();
-  // The repeat gets its legacy hello, but never a second one-shot B9 + BA pair.
-  TEST_ASSERT_EQUAL_UINT32(3, drainCount(r.link));
+  // A repeat remains strict-discovery only: it never sends hello or a second B9 + BA pair.
+  TEST_ASSERT_EQUAL_UINT32(0, drainCount(r.link));
+}
+
+// The display's own 1C1 registration must not be lost merely because the controller is
+// locally full between B0 fragments.  Its 5C1 reply gets one bounded retry and then wins the
+// next transmit slot ahead of B0#2, matching the captured interleaving.
+void test_busy_panel_control_ack_retries_before_the_next_b0(void) {
+  Rig r;
+  r.display.begin();
+  r.link.inject(panelSyncRequest());
+  r.display.poll();
+  r.clock.advance(carminat::kHelloFirstDelayMs);
+  r.display.poll();                            // B0 #1
+  drain(r.link);
+
+  r.link.busyOffers = 1;
+  r.link.inject(affatest::mk(0x1C1, {0x70, 0xA3, 0xA3, 0xA3,
+                                      0xA3, 0xA3, 0xA3, 0xA3}));
+  r.display.poll();                            // 5C1 offer is Busy; B0 #2 stays held
+  TEST_ASSERT_EQUAL_UINT32(0, r.link.sentCount());
+  TEST_ASSERT_FALSE(r.display.synced());
+
+  r.clock.advance(AFFA_TX_RETRY_MS);
+  r.display.poll();
+  Frame ack, b0;
+  TEST_ASSERT_TRUE(r.link.takeSent(ack));
+  TEST_ASSERT_TRUE(r.link.takeSent(b0));
+  TEST_ASSERT_EQUAL_HEX32(0x5C1, ack.id);
+  TEST_ASSERT_EQUAL_HEX8(0x74, ack.data[0]);
+  TEST_ASSERT_EQUAL_HEX32(0x3AF, b0.id);
+  TEST_ASSERT_EQUAL_HEX8(0xB0, b0.data[0]);
+  TEST_ASSERT_EQUAL_UINT32(0, r.link.sentCount());
+
+  r.clock.advance(carminat::kHelloFrameGapMs);
+  r.display.poll();                            // B0 #3 completes the opening
+  TEST_ASSERT_TRUE(r.display.synced());
 }
 
 void setUp(void) {}
@@ -162,5 +218,6 @@ int main(int, char**) {
   RUN_TEST(test_busy_offer_never_commits_payload_bytes_or_started_state);
   RUN_TEST(test_busy_hello_does_not_authorize_until_the_full_burst_is_accepted);
   RUN_TEST(test_busy_start_pair_is_retried_and_only_marked_issued_after_b9_and_ba);
+  RUN_TEST(test_busy_panel_control_ack_retries_before_the_next_b0);
   return UNITY_END();
 }

@@ -14,15 +14,15 @@
 // corrected CTX/CRX routing it also runs in stock normal mode, so an outbound controller
 // success requires a physical ACK from the bus.
 //
-// WHAT IT DOES on the protocol (the proven MeganeCAN wire sequence, with the legacy
-// startup storm removed): it is COMPLETELY SILENT until the AFFA3 NAV panel sends a FULL
-// `3CF 61 11 xx` request.  Every such request gets the exact three-frame legacy hello.
-// `61 11 01` is the bootstrap request: it also queues ONE nonblocking `B9` + `BA` control
-// pair, but does NOT authorize any function registration or clock write.  Only a later
-// `61 11 00`, and its hello, opens the application session.  The POC then registers
-// {0x151, 0x1F1} strictly one 70->74 exchange at a time, and finally sends one goal —
-// clock 10:00 (`151 05 56 "1000"`).  A bare `69` ping stays silent before any full 61;
-// after a full request it may receive a paced B9, but it can never authorize output.
+// WHAT IT DOES: it waits for the AFFA3 NAV panel to speak first (`3CF 69` liveness or a
+// full `3CF 61 11 xx` request). The primary opening sequence is taken from the supplied
+// real-radio monitor captures: `69 -> B9`, one `BA` probe, then `B0 14 11 ...` three times
+// about 31 ms apart. `61 11 00` is the normal confirmation. An explicitly enabled legacy
+// compatibility mode may promote a persistent `01` only after BA had a chance to yield `00`;
+// it never creates a BA or hello storm. A raw byte alone never authorizes rendering: the final B0 must TX+
+// and `151/1F1 70 -> 74` must complete. The historical `70/B0/B0` fallback is explicitly
+// disabled by default, so a measurement run never silently changes wire spelling. The POC powers the glass and sends
+// clock 10:00 (`151 05 56 "1000"`). BA is never a periodic keepalive.
 //
 // THE BLACK BOX: every CAN frame, both directions, is captured from the instant CAN is
 // enabled into /can-boot.bin on LittleFS (first history wins; it never wraps), and into a
@@ -63,7 +63,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "06_authclock 0.3.0 (direct TWAI, Carminat auth, CTX4/CRX3 trace)";
+constexpr const char* kVersion = "06_authclock 0.6.0 (captured opening; 61 11 01 authorizes; CAN auto-retry)";
 
 // Board wiring — the one thing that is not a "setting". TWAI's config macro takes TX, then RX;
 // Corrected bench wiring is CRX -> GPIO3 and CTX -> GPIO4; named constants keep the
@@ -75,6 +75,19 @@ constexpr uint32_t   kBitrate = 500000;
 // a physical ACK. The recovery path stays non-blocking if the bus is temporarily unavailable.
 constexpr bool       kNoAckMode = false;
 constexpr bool       kDirectSmokeOnly = false;
+// TRUE, AND THE CAPTURE IS WHY. docs/captures/"aknowledge offed display cONNECT OT POWER.csv"
+// is a real OEM radio meeting a display that had been powered with no radio present. That
+// display repeats `3CF 61 11 01` every ~104 ms and NEVER sends `61 11 00` — not once in
+// sixteen requests — yet the radio answers it with the ordinary B0 burst 30.75 ms later and
+// the session completes: registration, `03 52`, ISO-TP text, and the `01` never reappears.
+// `61 11 01` is the SAME request as `00`; the low bit reports the panel's own state, it is
+// not an authorization grade. Waiting for a `00` that a warm display never sends is exactly
+// how this bench sat at "badAuth" for fifteen seconds at a time.
+constexpr bool       kEnable01Compatibility = true;
+// The monitor-captured B0/B0/B0 is the only automatic opening. Keep the historical
+// MeganeCAN 70/B0/B0 spelling for a deliberate compatibility experiment, but never inject
+// it merely because a registration reply was late or missing.
+constexpr bool       kEnableLegacyHelloFallback = false;
 
 // ---------------------------------------------------------------------------
 // Protocol constants — each one is a line in docs/PROTOCOL.md
@@ -90,19 +103,26 @@ constexpr uint8_t FAILED     = 0x01;                 // initial state
 constexpr uint8_t PEER_ALIVE = 0x02;
 constexpr uint8_t FUNCSREG   = 0x08;
 
-constexpr uint32_t kTickMs      = 1000;   // heartbeat cadence after the panel opens session
+constexpr uint32_t kTickMs      = 500;    // real monitor: sustained 69/B9 cadence is ~500 ms
 constexpr uint32_t kAckMs       = 2000;   // per-frame ACK timeout, no retry
-constexpr uint32_t kPeerAliveMs = 5000;   // 5 ticks without a ping -> FAILED
-// The attached AFFA3 NAV requests `61 11` every ~106 ms after it is alive.  The legacy
-// driver answers every request, so 90 ms preserves that observed cadence; it is still a
-// hard cap against a retransmit storm rather than an unbounded receive-side send.
-constexpr uint32_t kHelloMinMs  = 90;
+constexpr uint32_t kPeerAliveMs = 5000;   // wall-clock peer watchdog, never a call count
+constexpr uint32_t kHelloStepMs = 31;     // monitor: B0-to-B0 30.8..31.2 ms, all scenarios
+constexpr uint32_t kHelloRetryMs = 100;   // local outbox retry only, never a hello storm
+constexpr uint32_t kStartCompatMs = 110;  // BA -> B0 is 112 ms in the 01-only real capture
 constexpr uint32_t kPongMinMs   = 250;    // 126 pings in 32 ms is one ping
 constexpr uint32_t kRetryMs     = 1000;   // between registration passes
 constexpr uint32_t kClockRetryMs = 5000;  // between clock attempts after a failure
+constexpr uint32_t kPostRegisterSettleMs = 400; // monitor: final 5F1/74 -> 03 52 is ~400 ms
+constexpr uint32_t kPowerWarmUpMs = 50;   // short post-power settle before a one-frame clock
 constexpr uint32_t kBootstrapQueueRetryMs = 100; // local outbox retry only; never a BA keepalive
+// A BA that the CONTROLLER could not put on the wire is retried slowly and a bounded number
+// of times. The display asks again every ~104 ms on its own timer, so a fast retry buys
+// nothing and costs arbitration.
+constexpr uint32_t kBootstrapRetryBackoffMs = 500;
+constexpr uint8_t  kBootstrapMaxTxFailures  = 3;
 constexpr uint32_t kTxOutcomeMs = 500;    // a classic 500 kbit/s frame must settle long before this
 constexpr uint32_t kTxRestartRetryMs = 1000; // paced retry if stop/start cannot recover immediately
+constexpr uint8_t  kControlAckMaxRetries = 1; // one immediate retry of the required 5C1 74
 
 // The goal: the panel clock at 10:00. `05 56` + four ASCII digits (§5.1).
 constexpr char kClockHHMM[5] = "1000";
@@ -421,7 +441,14 @@ void tap(uint16_t id, const uint8_t* d, uint8_t len, bool tx) {
 // ---------------------------------------------------------------------------
 // RX FIFO — the direct RX task copies frames; the protocol runs in loop()
 // ---------------------------------------------------------------------------
-struct RxF { uint16_t id; uint8_t len; uint8_t d[8]; };
+struct RxF {
+  uint16_t id;
+  uint8_t  len;
+  uint8_t  d[8];
+  // Captured in the RX task so the reply matcher can reject an old FIFO reply while
+  // still accepting a panel reply that physically arrives before loop() observes TX+.
+  int64_t  rxUs;
+};
 constexpr size_t kFifo = 512;
 RxF          g_fifo[kFifo];
 volatile size_t g_fifoW = 0, g_fifoR = 0;
@@ -493,6 +520,7 @@ void onCanFrame(const twai_message_t& f) {
   if (f.extd || f.rtr) return;                 // 11-bit data frames only
   const uint8_t len = f.data_length_code > 8 ? 8 : f.data_length_code;
   const uint16_t id = static_cast<uint16_t>(f.identifier);
+  const int64_t rxUs = esp_timer_get_time();
 
   // Preserve even a physical self echo in the black box. It is not panel traffic and
   // must never manufacture our own reply, but hiding it would violate the capture claim.
@@ -520,6 +548,7 @@ void onCanFrame(const twai_message_t& f) {
     r.len = len;
     memset(r.d, 0, 8);
     memcpy(r.d, f.data, len);
+    r.rxUs = rxUs;
     g_fifoW = next;
   }
   portEXIT_CRITICAL(&g_fifoMux);
@@ -542,7 +571,7 @@ bool fifoPop(RxF& out) {
 // ---------------------------------------------------------------------------
 bool g_txGate = true;                        // shut only during an OTA write
 
-enum class TxAfter : uint8_t { None, HelloComplete, GoalReply };
+enum class TxAfter : uint8_t { None, Probe, ControlAck, HelloStep, HelloComplete, GoalReply };
 
 struct TxItem {
   uint16_t id = 0;
@@ -550,6 +579,7 @@ struct TxItem {
   TxAfter  after = TxAfter::None;
   uint32_t completionToken = 0;              // auth epoch or goal token
   uint32_t sessionEpoch = 0;                 // 0: sync frame; nonzero: app frame
+  uint8_t  retryCount = 0;                   // bounded retry count for control-plane ACKs
 };
 
 // One bounded, software-owned outbox means an alert can always be attributed to exactly
@@ -557,8 +587,15 @@ struct TxItem {
 constexpr uint8_t kTxOutbox = 48;
 TxItem            g_txOutbox[kTxOutbox];
 uint8_t           g_txOutW = 0, g_txOutR = 0;
+// Control-plane ACKs are allowed to overtake ordinary heartbeat/hello work. In the real
+// trace `1C1 70 -> 5C1 74` lands between B0#1 and B0#2; keeping a tiny separate lane makes
+// that invariant survive an otherwise busy normal outbox.
+constexpr uint8_t kCtrlOutbox = 8;
+TxItem            g_ctrlOutbox[kCtrlOutbox];
+uint8_t           g_ctrlOutW = 0, g_ctrlOutR = 0;
 TxItem            g_txCurrent;
 bool              g_txInFlight = false;
+bool              g_txCurrentIsControl = false;
 uint8_t           g_txCurrentSelfSlot = 0;
 uint32_t          g_txInFlightSince = 0;
 bool              g_txRestartPending = false;
@@ -570,20 +607,29 @@ uint8_t txOutboxUsed() {
 
 uint8_t txOutboxFree() { return static_cast<uint8_t>(kTxOutbox - 1 - txOutboxUsed()); }
 
-bool enqueueTx(uint16_t id, const uint8_t* d, uint8_t n, TxAfter after = TxAfter::None,
-               uint32_t completionToken = 0, uint32_t sessionEpoch = 0) {
-  if (!g_txGate || !g_canReady) { ++g_txRefused; return false; }
-  const uint8_t next = static_cast<uint8_t>((g_txOutW + 1) % kTxOutbox);
-  if (next == g_txOutR) { ++g_txRefused; return false; }
+uint8_t ctrlOutboxUsed() {
+  return static_cast<uint8_t>((g_ctrlOutW + kCtrlOutbox - g_ctrlOutR) % kCtrlOutbox);
+}
 
-  TxItem& item = g_txOutbox[g_txOutW];
+bool enqueueTx(uint16_t id, const uint8_t* d, uint8_t n, TxAfter after = TxAfter::None,
+                uint32_t completionToken = 0, uint32_t sessionEpoch = 0,
+                bool control = false, uint8_t retryCount = 0) {
+  if (!g_txGate || !g_canReady) { ++g_txRefused; return false; }
+  const uint8_t cap = control ? kCtrlOutbox : kTxOutbox;
+  uint8_t& write = control ? g_ctrlOutW : g_txOutW;
+  const uint8_t read = control ? g_ctrlOutR : g_txOutR;
+  const uint8_t next = static_cast<uint8_t>((write + 1) % cap);
+  if (next == read) { ++g_txRefused; return false; }
+
+  TxItem& item = control ? g_ctrlOutbox[write] : g_txOutbox[write];
   item.id = id;
   memset(item.d, 0, sizeof(item.d));
   if (d) memcpy(item.d, d, n > 8 ? 8 : n);
   item.after = after;
   item.completionToken = completionToken;
   item.sessionEpoch = sessionEpoch;
-  g_txOutW = next;
+  item.retryCount = retryCount;
+  write = next;
   ++g_txScheduled;                           // scheduled, not yet in the controller
   return true;
 }
@@ -602,54 +648,87 @@ bool send1(uint16_t id, uint8_t b0) { return sendRaw(id, &b0, 1); }
 // ---------------------------------------------------------------------------
 uint8_t  g_sync = FAILED;
 uint32_t g_lastPingMs = 0, g_lastPongMs = 0, g_nextHelloMs = 0, g_nextTickMs = 0;
-uint32_t g_lastPeerMs = 0;                 // valid 61 11 00 / 69, after authorization starts
-uint32_t g_authEpoch = 0;                  // invalidates queued app traffic on re-auth
-uint32_t g_helloAuthEpochPending = 0;      // epoch whose final hello may open the session
+uint32_t g_lastPeerMs = 0;                 // accepted full 61 / 69, once the opening starts
+uint32_t g_authEpoch = 0;                  // invalidates queued application work on re-opening
+uint32_t g_helloAuthEpochPending = 0;      // epoch whose final opening frame may release output
 bool     g_panelSeen = false;             // diagnostic: any panel sync traffic was observed
 bool     g_syncRequestSeen = false;       // a FULL `61 11 xx` request was observed
-bool     g_authRequestSeen = false;       // a GOOD `61 11 00` request was observed
-bool     g_authHelloPending = false;      // good auth cannot unlock output before its hello
-bool     g_helloPending = false;          // a line-rate requester is coalesced to one later hello
-bool     g_bootstrapControlPending = false;
-bool     g_bootstrapControlIssued = false; // true only after BOTH B9 and BA entered the outbox
+bool     g_authRequestSeen = false;       // accepted 00, or 01 only with explicit compatibility enabled
+bool     g_authHelloPending = false;      // no application output until the final opening frame TX+
+bool     g_helloPending = false;          // exactly one staged opening is waiting to begin
+bool     g_helloActive = false;           // one opening frame queued/in flight; wait for TX outcome
+uint8_t  g_helloIndex = 0;
+enum class HelloStyle : uint8_t { CapturedB0x3, Legacy70B0B0 };
+HelloStyle g_helloStyle = HelloStyle::CapturedB0x3;
+bool     g_legacyFallbackUsed = false;    // at most one legacy greeting per opening epoch
+bool     g_start01Seen = false;            // display's "radio, where are you?" request
+bool     g_syncProbePending = false;       // one BA probe waiting for a normal TX slot
+bool     g_syncProbeAwaitingTx = false;    // BA is queued/in flight; do not send a duplicate
+bool     g_syncProbeIssued = false;        // BA has physically reported TX+
+uint8_t  g_probeTxFailures = 0;            // bounded BA TX- budget, reset on a fresh session
+uint32_t g_probeGeneration = 0;            // rejects a delayed BA result after a new session
 uint32_t g_nextBootstrapQueueMs = 0;       // paced local scheduling retry; never a periodic BA
+uint32_t g_startCompatAtMs = 0;            // let BA yield 00 before accepting persistent 01
 uint32_t g_bootstrapQueueDeferrals = 0;
 
 uint32_t g_pings = 0, g_pongs = 0, g_syncReqs = 0, g_badAuths = 0, g_hellos = 0;
-uint32_t g_bootstraps = 0, g_autoAcks = 0, g_keys = 0, g_replyStray = 0;
-uint32_t g_regOk = 0, g_regFail = 0, g_clockOkCnt = 0, g_clockFail = 0, g_syncLosses = 0;
+uint32_t g_bootstraps = 0, g_autoAcks = 0, g_autoAckRetries = 0, g_autoAckFailures = 0;
+uint32_t g_keys = 0, g_replyStray = 0;
+uint32_t g_regOk = 0, g_regFail = 0, g_powerOkCnt = 0, g_powerFail = 0;
+uint32_t g_clockOkCnt = 0, g_clockFail = 0, g_syncLosses = 0;
+
+// Control replies are valid before the application output gate opens, but they still carry
+// the current auth epoch so a TX- cannot retry an ACK from a previous panel incarnation.
+bool sendControl1(uint16_t id, uint8_t b0, uint8_t retryCount = 0) {
+  return enqueueTx(id, &b0, 1, TxAfter::ControlAck, g_authEpoch, 0, true, retryCount);
+}
 
 // ---------------------------------------------------------------------------
 // Stop-and-wait: one frame in flight, ever (§4.2)
 // ---------------------------------------------------------------------------
 struct Wait {
   bool     active = false;
+  bool     txConfirmed = false;             // TX+ starts the timeout, not TXQ
   uint16_t replyId = 0;
+  int64_t  acceptedAtUs = 0;                // TXQ fence against an old FIFO reply
   uint32_t since = 0;
   bool     got = false;
   uint8_t  code = 0;
 };
 Wait g_wait;
 
-void armWait(uint16_t funcId, uint32_t now) {
+void reserveWait(uint16_t funcId, int64_t acceptedAtUs) {
   g_wait.active  = true;
+  g_wait.txConfirmed = false;
   g_wait.replyId = funcId | kReplyFlag;
-  g_wait.since   = now;
+  g_wait.acceptedAtUs = acceptedAtUs;
+  g_wait.since   = 0;
   g_wait.got     = false;
   g_wait.code    = 0;
 }
 
+void confirmWait(uint16_t funcId, uint32_t now) {
+  if (!g_wait.active || g_wait.replyId != (funcId | kReplyFlag)) return;
+  g_wait.txConfirmed = true;
+  g_wait.since = now;
+}
+
 // ---------------------------------------------------------------------------
-// The goal: authorization, then the clock at 10:00
+// The goal: authorization, display power, then a visible clock at 10:00
 // ---------------------------------------------------------------------------
-enum class Goal : uint8_t { WaitSync, Register, SetClock, Done };
+enum class Goal : uint8_t {
+  WaitSync, Register, SettleBeforePower, PowerOn, WarmUp, SetClock, Done
+};
 
 const char* goalName(Goal g) {
   switch (g) {
-    case Goal::WaitSync: return "wait-sync   no good 3CF 61 11 00 + hello from panel yet";
+    case Goal::WaitSync: return "wait-sync   no accepted full 3CF 61 11 opening yet";
     case Goal::Register: return "register    70 -> 74 on each func id, sequential";
+    case Goal::SettleBeforePower: return "settle      400 ms after registration before display ON";
+    case Goal::PowerOn:  return "power-on    03 52 09 -> 74 before visible proof";
+    case Goal::WarmUp:   return "warm-up     display ON acknowledged; waiting 50 ms";
     case Goal::SetClock: return "set-clock   05 56 '1000' in flight";
-    case Goal::Done:     return "DONE        panel clock reads 10:00";
+    case Goal::Done:     return "DONE        clock command 10:00 acknowledged";
   }
   return "?";
 }
@@ -658,7 +737,7 @@ Goal     g_goal = Goal::WaitSync;
 uint8_t  g_regIdx = 0;
 uint32_t g_retryAt = 0;
 uint32_t g_doneAtMs = 0;
-uint32_t g_goalToken = 1;                  // rejects stale queued registration/clock frames
+uint32_t g_goalToken = 1;                  // rejects stale queued registration/power/clock frames
 bool     g_goalTxPending = false;
 bool     g_goalTxFailed = false;
 
@@ -668,7 +747,7 @@ void goalReset(Goal to, const char* why) {
   g_goal    = to;
   g_regIdx  = 0;
   g_retryAt = ::millis();
-  g_wait.active = false;
+  g_wait = Wait{};
   g_goalTxPending = false;
   g_goalTxFailed = false;
   logmsg("goal -> %.9s: %s", goalName(to), why);
@@ -678,8 +757,9 @@ void goalReset(Goal to, const char* why) {
 // RX handling
 // ---------------------------------------------------------------------------
 bool sendAlive(uint32_t now) {
-  // B9 is the legacy liveness byte. It is used for the one-shot bootstrap control pair
-  // after `61 11 01`, and later for paced heartbeats/pongs in a good session.
+  // B9 is the radio half of the observed 500 ms liveness pair. It is safe before a full
+  // opening request: `69` is the display's proof it is awake, while BA is the one-shot
+  // request that asks it to enter the 61/B0 registration exchange.
   const bool queued = send1(kSyncTx, 0xB9);
   if (queued) g_lastPongMs = now;
   return queued;
@@ -689,8 +769,8 @@ bool appSessionReady() {
   return g_authRequestSeen && !g_authHelloPending && !(g_sync & FAILED);
 }
 
-bool sendApp1(uint16_t id, uint8_t b0) {
-  return sendRawAfter(id, &b0, 1, TxAfter::None, 0, g_authEpoch);
+const char* helloStyleName(HelloStyle s) {
+  return s == HelloStyle::CapturedB0x3 ? "captured B0/B0/B0" : "legacy 70/B0/B0";
 }
 
 void authorizeAfterHello(uint32_t epoch) {
@@ -699,105 +779,177 @@ void authorizeAfterHello(uint32_t epoch) {
   g_authHelloPending = false;
   const bool wasFailed = (g_sync & FAILED) != 0;
   g_sync = static_cast<uint8_t>(g_sync & ~FAILED);
-  if (wasFailed) logmsg("good auth 61 11 00 received - third hello TX+, sync declared up");
+  if (wasFailed)
+    logmsg("%s final opening frame TX+ - session declared up", helloStyleName(g_helloStyle));
 
-  // A panel that re-authenticates after DONE has been reborn: re-issue the clock. If
-  // registration vanished silently, the normal write retry path repairs it.
-  if (g_goal == Goal::Done) goalReset(Goal::SetClock, "panel re-synced after DONE");
+  // A panel that re-authenticates after DONE has been reborn: re-power it before the
+  // visible clock proof. If registration vanished silently, WaitSync routes through the
+  // normal registration pass first.
+  if (g_goal == Goal::Done) goalReset(Goal::PowerOn, "panel re-synced after DONE");
 }
 
-bool sendHelloBurst(uint32_t now, uint32_t authEpoch = 0) {
-  // These are the exact Carminat legacy bytes. The duplicate B0 is deliberate.
-  const uint8_t h1[8] = {0x70, 0x1A, 0x11, 0x00, 0x00, 0x00, 0x00, 0x01};
-  const uint8_t h2[8] = {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00};
-  if (!authEpoch) authEpoch = g_helloAuthEpochPending;
-  if (txOutboxFree() < 3) {
-    g_helloPending = true;
-    return false;
-  }
+// The supplied monitor captures have B0#1, the panel's 1C1 registration, its 5C1 ACK,
+// then B0#2 and B0#3.  Do not prequeue a whole greeting: this state machine leaves a real
+// slot between fragments, so a control ACK cannot be trapped behind the rest of the hello.
+constexpr uint8_t kCapturedHello[3][8] = {
+    {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00},
+    {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00},
+    {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00},
+};
+// This is not the primary path. It preserves the historical MeganeCAN source variant and
+// is attempted once only if the captured variant reaches registration but receives no 74.
+constexpr uint8_t kLegacyHello[3][8] = {
+    {0x70, 0x1A, 0x11, 0x00, 0x00, 0x00, 0x00, 0x01},
+    {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00},
+    {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00},
+};
 
-  // The final B0 carries the completion hook. Authorization remains locked until this
-  // exact third legacy frame receives a controller TX-success alert.
-  if (!sendRaw(kSyncTx, h1, 8) || !sendRaw(kSyncTx, h2, 8) ||
-      !sendRawAfter(kSyncTx, h2, 8, TxAfter::HelloComplete, authEpoch)) {
-    g_helloPending = true;
-    return false;
-  }
-  g_nextHelloMs = now + kHelloMinMs;
-  g_helloPending = false;
-  g_helloAuthEpochPending = 0;
-  return true;
+const uint8_t* helloFrame(uint8_t index) {
+  return g_helloStyle == HelloStyle::CapturedB0x3 ? kCapturedHello[index] : kLegacyHello[index];
 }
 
-void queueHello(uint32_t now, uint32_t authEpoch = 0) {
-  if (authEpoch) g_helloAuthEpochPending = authEpoch;
-  if (expired(now, g_nextHelloMs)) {
-    sendHelloBurst(now, g_helloAuthEpochPending);
-  } else {
-    g_helloPending = true;
+void scheduleHello(uint32_t now, uint32_t authEpoch, HelloStyle style,
+                   uint32_t firstDelayMs = 0) {
+  g_helloStyle = style;
+  g_helloAuthEpochPending = authEpoch;
+  g_helloIndex = 0;
+  g_helloActive = false;
+  g_helloPending = true;
+  g_nextHelloMs = now + firstDelayMs;
+}
+
+void pumpHello(uint32_t now) {
+  // THE DISPLAY'S REQUEST IS THE TRIGGER, NOT OUR BA. Requiring g_syncProbeIssued here was a
+  // deadlock: pumpHello waited for a BA TX+, and while that BA kept failing the bootstrap
+  // retried it at 10 Hz, so the bus filled with BA frames and the opening it was gating never
+  // ran. BA is only our QUESTION — a display already sending a complete `61 11 xx` every
+  // ~104 ms has asked us first, and the captures answer that request with B0 regardless of
+  // how our own probe fared.
+  if (!g_helloPending || g_helloActive || !expired(now, g_nextHelloMs)) {
+    return;
   }
+  const bool last = g_helloIndex + 1u == 3u;
+  const TxAfter after = last ? TxAfter::HelloComplete : TxAfter::HelloStep;
+  const uint32_t token = g_helloAuthEpochPending;
+  // Tag every opening fragment with its auth epoch. A new `01` / watchdog / bus recovery
+  // can then discard stale B0 traffic before it reaches the controller.
+  if (!sendRawAfter(kSyncTx, helloFrame(g_helloIndex), 8, after, token, token)) {
+    g_nextHelloMs = now + kHelloRetryMs;
+    return;
+  }
+  // Do not queue B0#2 merely because 31 ms elapsed: first establish that B0#1 actually
+  // left the controller. This makes a TX- restart the whole bounded opening cleanly.
+  g_helloActive = true;
 }
 
 void invalidateAuthorization(const char* why) {
-  if (!g_authRequestSeen && !g_authHelloPending) {
-    g_helloAuthEpochPending = 0;
-    return;
-  }
+  // App work and control ACKs waiting from the old incarnation must not leak through a
+  // fresh `61 11 01`. An already in-flight CAN frame cannot be recalled; its epoch/ticket
+  // makes its eventual result harmless.
+  g_txOutR = g_txOutW;
+  g_ctrlOutR = g_ctrlOutW;
   ++g_authEpoch;
   if (g_authEpoch == 0) ++g_authEpoch;
   g_sync = FAILED;                           // assignment drops PEER_ALIVE/FUNCSREG too
   g_authRequestSeen = false;
   g_authHelloPending = false;
   g_helloAuthEpochPending = 0;
+  g_helloPending = false;
+  g_helloActive = false;
+  g_helloIndex = 0;
+  g_start01Seen = false;
+  g_syncProbePending = false;
+  g_syncProbeAwaitingTx = false;
+  g_syncProbeIssued = false;
+  g_probeTxFailures = 0;
+  ++g_probeGeneration;
+  if (g_probeGeneration == 0) ++g_probeGeneration;
+  g_startCompatAtMs = 0;
   g_lastPeerMs = 0;
-  g_wait.active = false;                     // never complete a transaction from old auth
+  g_wait = Wait{};                            // never complete a transaction from old auth
   goalReset(Goal::WaitSync, why);
 }
 
 void sendBootstrapControl(uint32_t now) {
-  // The legacy START control is one atomic *outbox* pair. A pair that has entered the
-  // outbox is never retried, even if its controller outcome later fails. The only retry
-  // below is the harmless local case where neither byte could be scheduled yet.
-  if (!g_bootstrapControlPending || g_bootstrapControlIssued ||
+  // BA is the radio's one-shot "I am here / begin discovery" probe. The display's 61
+  // response is its answer. It is deliberately not tied to a periodic FAILED tick.
+  if (!g_syncProbePending || g_syncProbeAwaitingTx || g_syncProbeIssued ||
       !expired(now, g_nextBootstrapQueueMs)) {
     return;
   }
-  // Preserve the proven legacy order if a paced hello from this same 61 11 request is
-  // still waiting for its slot: 70/B0/B0 must enter the outbox before B9/BA.
-  if (g_helloPending) return;
-
-  if (!g_txGate || !g_canReady || g_canRecovering || txOutboxFree() < 2) {
+  if (!g_txGate || !g_canReady || g_canRecovering || txOutboxFree() < 1) {
     g_nextBootstrapQueueMs = now + kBootstrapQueueRetryMs;
     ++g_bootstrapQueueDeferrals;
     if (g_bootstrapQueueDeferrals == 1 || (g_bootstrapQueueDeferrals % 25u) == 0) {
-      logmsg("bootstrap B9/BA local queue busy; retrying scheduling in %lums",
+      logmsg("BA probe local queue busy; retrying scheduling in %lums",
              static_cast<unsigned long>(kBootstrapQueueRetryMs));
     }
     return;
   }
 
-  // loop() is the sole outbox writer. Reserving both slots first makes this all-or-nothing;
-  // retain a rollback guard in case an asynchronous TX gate changes between the two calls.
-  const uint8_t outWBefore = g_txOutW;
-  const uint32_t scheduledBefore = g_txScheduled;
-  const uint8_t b9 = 0xB9, ba = 0xBA;
-  if (enqueueTx(kSyncTx, &b9, 1) && enqueueTx(kSyncTx, &ba, 1)) {
-    g_lastPongMs = now;
-    g_bootstrapControlPending = false;
-    g_bootstrapControlIssued = true;
+  const uint8_t ba = 0xBA;
+  if (enqueueTx(kSyncTx, &ba, 1, TxAfter::Probe, g_probeGeneration)) {
+    g_syncProbePending = false;
+    g_syncProbeAwaitingTx = true;
     g_nextBootstrapQueueMs = 0;
-    ++g_bootstraps;
-    logmsg("bootstrap 61 11 01 -> B9 + BA queued once; waiting for 61 11 00");
+    logmsg("BA probe TXQ pending; waiting for TX+ before opening an auth path");
     return;
   }
 
-  // No partially scheduled control pair may leak out. No TX submit happens until pumpTx(),
-  // so rewinding the software producer here is safe and preserves the B9-before-BA order.
-  g_txOutW = outWBefore;
-  g_txScheduled = scheduledBefore;
   g_nextBootstrapQueueMs = now + kBootstrapQueueRetryMs;
   ++g_bootstrapQueueDeferrals;
-  logmsg("bootstrap B9/BA local scheduling failed; pair deferred (no BA sent)");
+  logmsg("BA probe local scheduling failed; deferred (no BA sent)");
+}
+
+void requestSyncProbe(uint32_t now, const char* why) {
+  if (g_syncProbeIssued || g_syncProbePending || g_syncProbeAwaitingTx) return;
+  ++g_probeGeneration;
+  if (g_probeGeneration == 0) ++g_probeGeneration;
+  g_syncProbePending = true;
+  g_nextBootstrapQueueMs = now;
+  g_bootstrapQueueDeferrals = 0;
+  logmsg("%s -> BA probe armed", why);
+}
+
+void startCapabilityOpening(uint32_t now, bool compatibility01) {
+  if (g_authHelloPending) return;          // repeated 61 traffic is one opening, not a storm
+  ++g_authEpoch;
+  if (g_authEpoch == 0) ++g_authEpoch;
+  g_sync = FAILED;                          // every capability pass must re-register 151/1F1
+  g_authRequestSeen = true;
+  g_authHelloPending = true;
+  g_lastPeerMs = now ? now : 1;
+  g_nextTickMs = now + kTickMs;
+  g_legacyFallbackUsed = false;
+  // Every captured good-00 session waits about 31 ms before B0#1. The 01 compatibility
+  // route has already waited BA+110 ms, so it intentionally starts its first B0 promptly.
+  scheduleHello(now, g_authEpoch, HelloStyle::CapturedB0x3,
+                compatibility01 ? 0 : kHelloStepMs);
+  ++g_syncReqs;
+  goalReset(Goal::WaitSync, compatibility01 ?
+      "persistent 61 11 01 after BA; running captured compatibility opening" :
+      "display confirmed 61 11 00; running captured opening");
+  logmsg("%s -> staged B0/B0/B0; output waits for final B0 TX+ and 74 registrations",
+         compatibility01 ? "61 11 01 compatibility" : "61 11 00");
+}
+
+bool startLegacyHelloFallback(uint32_t now, const char* why) {
+  if (!kEnableLegacyHelloFallback || g_legacyFallbackUsed ||
+      g_helloStyle != HelloStyle::CapturedB0x3 ||
+      !g_authRequestSeen || !g_syncProbeIssued) {
+    return false;
+  }
+  // The monitor profile gets first refusal. This one compatibility retry preserves the
+  // historical MeganeCAN 70/B0/B0 variant without turning either form into periodic noise.
+  g_legacyFallbackUsed = true;
+  ++g_authEpoch;
+  if (g_authEpoch == 0) ++g_authEpoch;
+  g_sync = FAILED;
+  g_authHelloPending = true;
+  scheduleHello(now, g_authEpoch, HelloStyle::Legacy70B0B0);
+  goalReset(Goal::WaitSync, why);
+  logmsg("captured opening got no registration ACK -> one legacy 70/B0/B0 fallback");
+  return true;
 }
 
 void handleSyncRx(const RxF& f, uint32_t now) {
@@ -813,75 +965,61 @@ void handleSyncRx(const RxF& f, uint32_t now) {
       return;
     }
 
-    // The legacy handler replies with the exact hello to EVERY full `61 11 xx`, including
-    // bootstrap 01 and unknown values. Pacing protects us from an unacknowledged panel's
-    // retransmit storm; a deferred hello keeps the latest request represented.
+    // A complete `61 11 xx` opens the inbound control plane. `01` is the display asking
+    // for a radio; BA is our request for its `00` confirmation. The supplied 01-only trace
+    // is available only through the explicit compatibility flag after BA has had time to
+    // yield 00.
     g_syncRequestSeen = true;
     const uint8_t auth = f.d[2];
-
-    if (auth == 0x00) {
-      ++g_syncReqs;
-      // A retransmitted good request still gets a paced hello, but it must not repeatedly
-      // close an already usable session. Otherwise a no-ACK requester could starve the
-      // very registration/clock traffic the POC is trying to prove.
-      const bool needsHelloBeforeAuth =
-          !g_authRequestSeen || g_authHelloPending || (g_sync & FAILED);
-      const bool firstAuthRequest = !g_authRequestSeen;
-      g_authRequestSeen = true;
-      uint32_t helloEpoch = 0;
-      if (needsHelloBeforeAuth) {
-        g_authHelloPending = true;
-        ++g_authEpoch;
-        if (g_authEpoch == 0) ++g_authEpoch;
-        helloEpoch = g_authEpoch;
-      }
-      if (firstAuthRequest) g_nextTickMs = now + kTickMs;
+    if (auth == 0x01) {
+      // A persistent `01`-only display is still alive. Keep the wall-clock watchdog from
+      // tearing down its one bounded compatibility attempt while it continues speaking.
       g_lastPeerMs = now ? now : 1;
-
-      // A successful auth starts a new unauthorised epoch for a future panel reboot. A
-      // B9+BA that a preceding 01 already queued is deliberately left pending: `01` owns
-      // that one-shot legacy control pair.
-      g_bootstrapControlIssued = false;
-      queueHello(now, helloEpoch);
+      // A fresh 01 after a usable session means the panel forgot registrations. Do not let
+      // old 151/1F1/time frames cross that boundary; begin from a new BA probe instead.
+      if (appSessionReady()) {
+        invalidateAuthorization("fresh display 61 11 01 - registrations are void");
+        g_syncRequestSeen = true;
+      }
+      if (kEnable01Compatibility) g_start01Seen = true;
+      requestSyncProbe(now, "display 61 11 01");
       return;
     }
 
-    ++g_badAuths;
-    if (auth == 0x01) {
-      // `01` is bootstrap, not authorization. It gets hello plus exactly one B9/BA.
-      // Repeated 01 frames cannot form the old BA-every-second failure loop.
-      if (!g_bootstrapControlIssued && !g_bootstrapControlPending) {
-        g_bootstrapControlPending = true;
-        g_nextBootstrapQueueMs = now;
-        g_bootstrapQueueDeferrals = 0;
-        logmsg("bootstrap auth 61 11 01 received - hello queued; B9+BA pending");
+    if (auth == 0x00) {
+      // BA -> 61 11 00 is the normal captured discovery confirmation. A duplicate 00
+      // merely refreshes liveness; it must not tear down a working registration pass.
+      if (g_authRequestSeen || g_authHelloPending) {
+        g_lastPeerMs = now ? now : 1;
+        return;
       }
-      invalidateAuthorization("bootstrap 61 11 01 - waiting for good 61 11 00");
-    } else {
-      if (g_badAuths == 1 || (g_badAuths % 100u) == 0)
-        logmsg("unknown auth 61 11 %02X - hello only; waiting for 61 11 00", auth);
-      invalidateAuthorization("non-good auth - waiting for good 61 11 00");
+      requestSyncProbe(now, "display 61 11 00 without a visible BA");
+      startCapabilityOpening(now, /*compatibility01=*/false);
+      return;
     }
-    queueHello(now);
-    return;
+
+    {
+      ++g_badAuths;
+      if (g_badAuths == 1 || (g_badAuths % 100u) == 0)
+        logmsg("unknown opening 61 11 %02X - control ACK only, no output", auth);
+      return;
+    }
   }
 
   if (f.len >= 1 && f.d[0] == 0x69) {          // ping: d[0] only, DLC may be 1
     ++g_pings;
     g_panelSeen = true;
     g_lastPingMs = now ? now : 1;
+    g_lastPeerMs = g_lastPingMs;
+    g_nextTickMs = now + kTickMs;
 
-    // `69` alone MUST NOT stand in for a full `61 11 xx` request. After a full request,
-    // it can receive a paced B9 (useful during bootstrap), but it never opens output. A
-    // queued bootstrap pair supplies its own B9 first.
-    if (!g_syncRequestSeen) return;
-
-    if (appSessionReady()) {
-      g_lastPeerMs = g_lastPingMs;
+    // `69` is enough to prove the display is awake, so it starts the B9 heartbeat and a
+    // single BA discovery probe. It is NOT enough to send B0/151/power/time.
+    if (g_authRequestSeen || g_authHelloPending) {
       g_sync |= PEER_ALIVE;
     }
-    if (g_bootstrapControlPending) return;
-    // The pong is paced against a retransmitting panel.
+    requestSyncProbe(now, "display 69 liveness");
+    // The pong is paced against a retransmitting panel, including before discovery.
     if (now - g_lastPongMs >= kPongMinMs || g_lastPongMs == 0) {
       if (sendAlive(now)) ++g_pongs;
     }
@@ -890,7 +1028,11 @@ void handleSyncRx(const RxF& f, uint32_t now) {
 }
 
 void handleReply(const RxF& f) {
-  if (g_wait.active && f.id == g_wait.replyId && !g_wait.got) {
+  // Reserve the expected reply at TXQ, not TX+, because a fast panel can physically answer
+  // before loop() has drained the controller's TX-success alert. The RX-task timestamp
+  // keeps a late FIFO record from a previous command from satisfying this transaction.
+  if (g_wait.active && f.id == g_wait.replyId && !g_wait.got &&
+      f.rxUs >= g_wait.acceptedAtUs) {
     g_wait.code = f.d[0];
     g_wait.got  = true;
     return;
@@ -900,10 +1042,25 @@ void handleReply(const RxF& f) {
 
 void handleAppFrame(const RxF& f, uint32_t now) {
   (void)now;
-  if (!appSessionReady()) return;                // no auto-ACK before GOOD auth + hello
+  // A full `61 11 xx` opens the panel control-plane reply path independently from our
+  // application-output gate. In particular `1C1 70` needs `5C1 74` during bootstrap.
+  // This reply stays untagged: an epoch-tagged application command is correctly rejected
+  // before the good 00 + hello authorization is complete.
+  // Scope control ACKs to the proven Carminat channel. A complete 61 must never grant
+  // permission to ACK arbitrary vehicle CAN IDs on a busy shared bus.
+  if (!g_syncRequestSeen || f.id != 0x1C1) return;
   // Every frame is individually acknowledged (§4.2): 74 on id|0x400, our filler. This is
   // what lets the panel register its 0x1C1 channel and have its keys answered.
-  if (sendApp1(f.id | kReplyFlag, 0x74)) ++g_autoAcks;
+  if (!sendControl1(f.id | kReplyFlag, 0x74)) {
+    ++g_autoAckFailures;
+    if (g_autoAckFailures <= 3 || (g_autoAckFailures % 25u) == 0) {
+      logmsg("panel ACK 0x%03X could not enter control outbox", f.id | kReplyFlag);
+    }
+  }
+
+  // Key delivery is application-facing and waits for the completed opening. The generic ACK
+  // above is protocol control traffic, not an authorization shortcut.
+  if (!appSessionReady()) return;
 
   if (f.d[0] == 0x70) {
     logmsg("panel registered its channel 0x%03X - acked 74 on 0x%03X",
@@ -937,39 +1094,56 @@ void pumpRx(uint32_t now) {
 }
 
 // ---------------------------------------------------------------------------
-// 1 Hz tick + watchdog
+// 500 ms liveness + opening + watchdog
 // ---------------------------------------------------------------------------
 void pumpTick(uint32_t now) {
-  // A line-rate requester gets at most one 3-frame hello every kHelloMinMs. The queued
-  // reply is emitted before any application state can become ready.
-  if (g_helloPending && expired(now, g_nextHelloMs)) sendHelloBurst(now);
+  // The display speaks first (`69` or `61`). BA is one bounded discovery probe, never a
+  // periodic FAILED-state resend.
+  if (g_syncProbePending) sendBootstrapControl(now);
 
-  // `61 11 01` owns one nonblocking control pair. No periodic FAILED-state BA retry is
-  // allowed; after this one emission we wait for the panel to choose its next request.
-  if (g_bootstrapControlPending) {
-    sendBootstrapControl(now);
-    return;
+  // Normal path: BA -> 61 11 00. The observed 01-only radio path is an explicit opt-in;
+  // the strict default keeps `01` in bootstrap and waits for the panel's good `00`.
+  if (kEnable01Compatibility && g_start01Seen && !g_authRequestSeen &&
+      !g_authHelloPending && g_syncProbeIssued &&
+      expired(now, g_startCompatAtMs)) {
+    startCapabilityOpening(now, /*compatibility01=*/true);
   }
 
-  // No GOOD `61 11 00` plus its matching hello yet: a `69` can never open a session.
-  if (!appSessionReady()) return;
-  if (!expired(now, g_nextTickMs)) return;
-  g_nextTickMs = now + kTickMs;
-  sendAlive(now);
+  pumpHello(now);
 
-  if (g_lastPeerMs && !(g_sync & FAILED) && now - g_lastPeerMs > kPeerAliveMs) {
+  // A B9 already queued as a 69 reply satisfies this 500 ms cadence too; this prevents a
+  // ping arriving on a heartbeat boundary from creating two B9 frames.
+  if (g_panelSeen && expired(now, g_nextTickMs)) {
+    g_nextTickMs = now + kTickMs;
+    if (now - g_lastPongMs >= kTickMs || g_lastPongMs == 0) sendAlive(now);
+  }
+
+  if (g_lastPeerMs && now - g_lastPeerMs > kPeerAliveMs) {
+    // No queued sync/protocol frame from the vanished peer may emerge after recovery. This
+    // also removes a BA whose generation was invalidated below before it reaches TWAI.
+    g_txOutR = g_txOutW;
+    g_ctrlOutR = g_ctrlOutW;
+    ++g_authEpoch;
+    if (g_authEpoch == 0) ++g_authEpoch;
     g_sync = FAILED;                           // ASSIGNED: drops FUNCSREG too (§3.6)
     g_panelSeen = false;
-    g_syncRequestSeen = false;                 // recovery needs a fresh full 61 11 xx
+    g_syncRequestSeen = false;                 // recovery needs fresh liveness / a full 61
     g_authRequestSeen = false;
     g_authHelloPending = false;
     g_helloPending = false;
-    g_bootstrapControlPending = false;
-    g_bootstrapControlIssued = false;
+    g_helloActive = false;
+    g_helloIndex = 0;
+    g_start01Seen = false;
+    g_syncProbePending = false;
+    g_syncProbeAwaitingTx = false;
+    g_syncProbeIssued = false;
+    ++g_probeGeneration;
+    if (g_probeGeneration == 0) ++g_probeGeneration;
     g_nextBootstrapQueueMs = 0;
+    g_startCompatAtMs = 0;
     g_lastPeerMs = 0;
     ++g_syncLosses;
-    logmsg("peer-alive expired - state = FAILED, all flags dropped");
+    logmsg("peer-alive expired - state = FAILED, all opening state dropped");
     goalReset(Goal::WaitSync, "peer-alive watchdog expired");
   }
 }
@@ -1088,6 +1262,11 @@ void pumpGoal(uint32_t now) {
       g_regIdx = 0;
       g_retryAt = now + kRetryMs;
       logmsg("registration TX- - retrying from index 0");
+    } else if (g_goal == Goal::PowerOn) {
+      ++g_powerFail;
+      g_retryAt = now + kClockRetryMs;
+      logmsg("display ON TX- - retrying in %lus",
+             static_cast<unsigned long>(kClockRetryMs / 1000));
     } else if (g_goal == Goal::SetClock) {
       ++g_clockFail;
       g_retryAt = now + kClockRetryMs;
@@ -1098,6 +1277,9 @@ void pumpGoal(uint32_t now) {
   }
 
   if (g_wait.active) {
+    // A reply may already be buffered (the RX task timestamps independently), but TX+
+    // remains the CAN-layer proof that starts this command's ACK timeout.
+    if (!g_wait.txConfirmed) return;
     if (g_wait.got) {
       const uint8_t code = g_wait.code;
       g_wait.active = false;
@@ -1109,13 +1291,26 @@ void pumpGoal(uint32_t now) {
             g_sync |= FUNCSREG;
             ++g_regOk;
             logmsg("FUNCSREG latched - authorization complete");
-            goalReset(Goal::SetClock, "registration complete");
+            goalReset(Goal::SettleBeforePower, "registration complete");
+            g_retryAt = now + kPostRegisterSettleMs;
           }
         } else {
           ++g_regFail;
+          if (startLegacyHelloFallback(now, "captured registration was explicitly rejected")) return;
           g_regIdx  = 0;                       // any failure aborts the pass (§3.5)
           g_retryAt = now + kRetryMs;
           logmsg("registration rejected (0x%02X) - retrying from index 0", code);
+        }
+      } else if (g_goal == Goal::PowerOn) {
+        if (code == 0x74) {
+          ++g_powerOkCnt;
+          goalReset(Goal::WarmUp, "display ON acknowledged");
+          g_retryAt = now + kPowerWarmUpMs;
+        } else {
+          ++g_powerFail;
+          g_retryAt = now + kClockRetryMs;
+          logmsg("display ON rejected (0x%02X) - retrying in %lus", code,
+                 static_cast<unsigned long>(kClockRetryMs / 1000));
         }
       } else if (g_goal == Goal::SetClock) {
         // This is a one-frame command.  Only 74 is a terminal ACK; 30 01 00 is a
@@ -1124,7 +1319,7 @@ void pumpGoal(uint32_t now) {
           ++g_clockOkCnt;
           g_goal = Goal::Done;
           g_doneAtMs = now ? now : 1;
-          logmsg(">>> panel clock reads %c%c:%c%c <<<",
+          logmsg(">>> clock command acknowledged for %c%c:%c%c; verify glass <<<",
                  kClockHHMM[0], kClockHHMM[1], kClockHHMM[2], kClockHHMM[3]);
         } else {
           ++g_clockFail;
@@ -1140,10 +1335,17 @@ void pumpGoal(uint32_t now) {
       if (g_goal == Goal::Register) {
         ++g_regFail;
         const uint16_t func = kFuncs[g_regIdx];
+        if (startLegacyHelloFallback(now, "captured registration timed out")) return;
         g_regIdx  = 0;
         g_retryAt = now + kRetryMs;
         logmsg("no 74 within %lums for func 0x%03X - pass aborted",
                static_cast<unsigned long>(kAckMs), func);
+      } else if (g_goal == Goal::PowerOn) {
+        ++g_powerFail;
+        // A command-channel timeout means the panel may have forgotten our function
+        // registration. Restart it rather than blindly queuing display writes forever.
+        g_sync = static_cast<uint8_t>(g_sync & ~FUNCSREG);
+        goalReset(Goal::Register, "display ON unACKed - assuming registration lost");
       } else if (g_goal == Goal::SetClock) {
         ++g_clockFail;
         // A clock the panel never ACKs means the registration is probably gone even
@@ -1155,19 +1357,23 @@ void pumpGoal(uint32_t now) {
     return;
   }
 
-  // A registration/clock frame was accepted by the software outbox but has not yet
+  // A registration/power/clock frame was accepted by the software outbox but has not yet
   // received TX+ or TX-. Its reply timeout deliberately has not started yet.
   if (g_goalTxPending) return;
 
   switch (g_goal) {
     case Goal::WaitSync:
       if (!appSessionReady()) break;
-      goalReset((g_sync & FUNCSREG) ? Goal::SetClock : Goal::Register, "sync is up");
+      goalReset((g_sync & FUNCSREG) ? Goal::SettleBeforePower : Goal::Register, "sync is up");
       break;
 
     case Goal::Register:
       if (!appSessionReady()) break;
-      if (g_sync & FUNCSREG) { goalReset(Goal::SetClock, "already registered"); break; }
+      if (g_sync & FUNCSREG) {
+        goalReset(Goal::SettleBeforePower, "already registered");
+        g_retryAt = now + kPostRegisterSettleMs;
+        break;
+      }
       if (!expired(now, g_retryAt)) break;
       if (sendRawAfter(kFuncs[g_regIdx], kRegisterCommand, sizeof(kRegisterCommand),
                        TxAfter::GoalReply, g_goalToken, g_authEpoch)) {
@@ -1177,8 +1383,40 @@ void pumpGoal(uint32_t now) {
       }
       break;
 
+    case Goal::SettleBeforePower:
+      if (!appSessionReady()) break;
+      if (!(g_sync & FUNCSREG)) {
+        goalReset(Goal::Register, "pre-power settle lost registration");
+        break;
+      }
+      if (expired(now, g_retryAt)) goalReset(Goal::PowerOn, "400 ms post-registration settle complete");
+      break;
+
+    case Goal::PowerOn: {
+      if (!appSessionReady()) break;
+      if (!(g_sync & FUNCSREG)) { goalReset(Goal::Register, "display ON needs registration"); break; }
+      if (!expired(now, g_retryAt)) break;
+      // The live-radio monitor uses zero padding for the captured profile. The state byte
+      // is the semantic part (09 = ON); legacy FF padding is reserved for the one fallback
+      // path, never silently claimed to be the captured wire form.
+      const uint8_t on[8] = {0x03, 0x52, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00};
+      if (sendRawAfter(kFuncs[0], on, 8, TxAfter::GoalReply, g_goalToken, g_authEpoch)) {
+        g_goalTxPending = true;
+      } else {
+        g_retryAt = now + kClockRetryMs;
+      }
+      break;
+    }
+
+    case Goal::WarmUp:
+      if (!appSessionReady()) break;
+      if (!(g_sync & FUNCSREG)) { goalReset(Goal::Register, "warm-up lost registration"); break; }
+      if (expired(now, g_retryAt)) goalReset(Goal::SetClock, "display ON warm-up complete");
+      break;
+
     case Goal::SetClock: {
       if (!appSessionReady()) break;
+      if (!(g_sync & FUNCSREG)) { goalReset(Goal::Register, "clock needs registration"); break; }
       if (!expired(now, g_retryAt)) break;
       const uint8_t clk[8] = {0x05, 0x56,
                               static_cast<uint8_t>(kClockHHMM[0]),
@@ -1206,21 +1444,103 @@ void pumpGoal(uint32_t now) {
 // mistake an application scheduling attempt for a CAN transmission.
 void dispatchTxResult(const TxItem& item, bool success, uint32_t now) {
   switch (item.after) {
-    case TxAfter::HelloComplete:
+    case TxAfter::Probe:
+      if (item.completionToken != g_probeGeneration || !g_syncProbeAwaitingTx) break;
+      g_syncProbeAwaitingTx = false;
       if (success) {
+        g_syncProbeIssued = true;
+        g_startCompatAtMs = now + kStartCompatMs;
+        ++g_bootstraps;
+        if (kEnable01Compatibility) {
+          logmsg("BA probe TX+ once; awaiting 61 11 00 (01 compatibility after %lums)",
+                 static_cast<unsigned long>(kStartCompatMs));
+        } else {
+          logmsg("BA probe TX+ once; awaiting 61 11 00 (01 remains bootstrap-only)");
+        }
+      } else if (++g_probeTxFailures <= kBootstrapMaxTxFailures) {
+        // BOUNDED, AND SLOWLY. An unbounded 10 Hz retry of an undeliverable BA is a transmit
+        // storm that makes the very collisions it is failing on more likely. The display
+        // repeats its own request on its own timer; we do not have to shout.
+        g_syncProbePending = true;
+        g_nextBootstrapQueueMs = now + kBootstrapRetryBackoffMs;
+        logmsg("BA probe TX- (%u/%u); retrying in %lums",
+               static_cast<unsigned>(g_probeTxFailures),
+               static_cast<unsigned>(kBootstrapMaxTxFailures),
+               static_cast<unsigned long>(kBootstrapRetryBackoffMs));
+      } else {
+        logmsg("BA probe TX- x%u - giving up; the opening runs off the display's own 61 11",
+               static_cast<unsigned>(g_probeTxFailures));
+      }
+      break;
+
+    case TxAfter::ControlAck:
+      if (success) {
+        ++g_autoAcks;                         // count only a physical controller TX+
+        break;
+      }
+      // A reset/re-auth makes a formerly useful 5C1 response dangerous. Do not revive it
+      // after its epoch or inbound control-plane permission disappeared.
+      if (item.completionToken != g_authEpoch || !g_syncRequestSeen) break;
+      if (item.retryCount >= kControlAckMaxRetries) {
+        ++g_autoAckFailures;
+        logmsg("panel ACK %03X TX- after %u attempt(s); awaiting a fresh panel frame",
+               static_cast<unsigned>(item.id), static_cast<unsigned>(item.retryCount + 1u));
+        break;
+      }
+      if (sendControl1(item.id, item.d[0], static_cast<uint8_t>(item.retryCount + 1u))) {
+        ++g_autoAckRetries;
+        logmsg("panel ACK %03X TX-; retrying once", static_cast<unsigned>(item.id));
+      } else {
+        ++g_autoAckFailures;
+        logmsg("panel ACK %03X TX-; retry could not enter control outbox",
+               static_cast<unsigned>(item.id));
+      }
+      break;
+
+    case TxAfter::HelloStep:
+      if (item.completionToken != g_authEpoch || !g_authHelloPending) break;
+      g_helloActive = false;
+      if (success) {
+        ++g_helloIndex;
+        g_nextHelloMs = now + kHelloStepMs;
+      } else {
+        g_helloIndex = 0;
+        g_helloPending = true;
+        g_nextHelloMs = now + kHelloRetryMs;
+        logmsg("opening B0 TX- - restarting %s in %lums", helloStyleName(g_helloStyle),
+               static_cast<unsigned long>(kHelloRetryMs));
+      }
+      break;
+
+    case TxAfter::HelloComplete:
+      if (item.completionToken != g_authEpoch || !g_authHelloPending) break;
+      g_helloActive = false;
+      if (success) {
+        g_helloPending = false;
+        g_helloAuthEpochPending = 0;
         ++g_hellos;
         authorizeAfterHello(item.completionToken);
-      } else if (item.completionToken == g_authEpoch && g_authHelloPending) {
-        logmsg("legacy hello TX- - app session remains locked awaiting a fresh 61 11 00");
+      } else {
+        // One lost final fragment cannot leave the POC permanently half-open. Re-run the
+        // three-frame captured/legacy greeting once the controller is available again.
+        g_helloIndex = 0;
+        g_helloPending = true;
+        g_nextHelloMs = now + kHelloRetryMs;
+        logmsg("final opening frame TX- - restarting %s in %lums", helloStyleName(g_helloStyle),
+               static_cast<unsigned long>(kHelloRetryMs));
       }
       break;
 
     case TxAfter::GoalReply:
       if (item.completionToken != g_goalToken) break;  // obsolete queued application work
       g_goalTxPending = false;
-      if (success && item.sessionEpoch == g_authEpoch && appSessionReady()) {
-        armWait(item.id, now);                          // reply timer starts at TX+, not queue
+      if (success && item.sessionEpoch == g_authEpoch && appSessionReady() &&
+          g_wait.active && g_wait.replyId == (item.id | kReplyFlag)) {
+        // The expected reply was reserved at TXQ so a fast panel reply cannot be dropped;
+        // only now, at controller TX+, does its application timeout start.
+        confirmWait(item.id, now);
       } else {
+        g_wait = Wait{};
         g_goalTxFailed = true;
       }
       break;
@@ -1248,6 +1568,7 @@ void finishInFlight(bool success, uint32_t now, bool controllerAlert = true) {
   if (!g_txInFlight) return;
   const TxItem item = g_txCurrent;
   g_txInFlight = false;
+  g_txCurrentIsControl = false;
   g_txInFlightSince = 0;
   if (controllerAlert && success) {
     ++g_txSuccessAlerts;
@@ -1266,6 +1587,7 @@ void finishInFlight(bool success, uint32_t now, bool controllerAlert = true) {
 // this is intentionally more conservative than guessing whether an old clock write escaped.
 void invalidateForTxTransportFault(const char* why) {
   g_txOutR = g_txOutW;
+  g_ctrlOutR = g_ctrlOutW;
   // The capture retains every received row, but protocol work must not consume a response
   // that was queued before the controller restart and call it a fresh authorization.
   portENTER_CRITICAL(&g_fifoMux);
@@ -1279,12 +1601,20 @@ void invalidateForTxTransportFault(const char* why) {
   g_authRequestSeen = false;
   g_authHelloPending = false;
   g_helloPending = false;
+  g_helloActive = false;
+  g_helloIndex = 0;
   g_helloAuthEpochPending = 0;
-  g_bootstrapControlPending = false;
-  g_bootstrapControlIssued = false;
+  g_start01Seen = false;
+  g_syncProbePending = false;
+  g_syncProbeAwaitingTx = false;
+  g_syncProbeIssued = false;
+  g_probeTxFailures = 0;
+  ++g_probeGeneration;
+  if (g_probeGeneration == 0) ++g_probeGeneration;
   g_nextBootstrapQueueMs = 0;
+  g_startCompatAtMs = 0;
   g_lastPeerMs = 0;
-  g_wait.active = false;
+  g_wait = Wait{};
   ++g_syncLosses;
   goalReset(Goal::WaitSync, why);
 }
@@ -1301,15 +1631,24 @@ void handleBusOff(uint32_t now) {
   // Nothing queued before a bus-off may silently emerge after recovery. Start clean and
   // demand a brand-new full panel authorization request.
   g_txOutR = g_txOutW;
+  g_ctrlOutR = g_ctrlOutW;
   portENTER_CRITICAL(&g_fifoMux);
   g_fifoR = g_fifoW;
   portEXIT_CRITICAL(&g_fifoMux);
   g_panelSeen = false;
   g_syncRequestSeen = false;
   g_helloPending = false;
-  g_bootstrapControlPending = false;
-  g_bootstrapControlIssued = false;
+  g_helloActive = false;
+  g_helloIndex = 0;
+  g_start01Seen = false;
+  g_syncProbePending = false;
+  g_syncProbeAwaitingTx = false;
+  g_syncProbeIssued = false;
+  g_probeTxFailures = 0;
+  ++g_probeGeneration;
+  if (g_probeGeneration == 0) ++g_probeGeneration;
   g_nextBootstrapQueueMs = 0;
+  g_startCompatAtMs = 0;
   invalidateAuthorization("TWAI bus-off - fresh panel auth required after recovery");
 
   const esp_err_t err = twai_initiate_recovery();
@@ -1332,7 +1671,7 @@ void handleBusRecovered() {
     g_canRecovering = false;
     g_txRestartPending = false;
     ++g_busRecoveries;
-    logmsg("TWAI recovered and restarted - waiting for fresh 61 11 00");
+    logmsg("TWAI recovered and restarted - waiting for fresh 69 / 61 11 opening");
   } else {
     g_canReady = false;
     g_txRestartPending = true;
@@ -1377,7 +1716,7 @@ void pumpTxRestart(uint32_t now) {
     g_canRecovering = false;
     g_txRestartPending = false;
     ++g_txRestarts;
-    logmsg("TWAI outcome watchdog restarted controller - waiting for fresh 61 11 00");
+    logmsg("TWAI outcome watchdog restarted controller - waiting for fresh 69 / 61 opening");
     return;
   }
 
@@ -1463,18 +1802,33 @@ void pumpCanAlerts() {
 
 void pumpTx() {
   if (!g_txGate || !g_canReady || g_canRecovering || g_txRestartPending || g_txInFlight ||
-      g_txOutR == g_txOutW)
+      (g_ctrlOutR == g_ctrlOutW && g_txOutR == g_txOutW))
     return;
 
-  TxItem& head = g_txOutbox[g_txOutR];
-  const uint8_t next = static_cast<uint8_t>((g_txOutR + 1) % kTxOutbox);
+  // The control lane is deliberately examined first. It contains only generic panel ACKs,
+  // so `1C1 70 -> 5C1 74` can land between B0#1 and B0#2 even if ordinary liveness work
+  // is waiting in the normal lane.
+  const bool control = g_ctrlOutR != g_ctrlOutW;
+  const uint8_t cap = control ? kCtrlOutbox : kTxOutbox;
+  uint8_t& read = control ? g_ctrlOutR : g_txOutR;
+  TxItem& head = control ? g_ctrlOutbox[read] : g_txOutbox[read];
+  const uint8_t next = static_cast<uint8_t>((read + 1) % cap);
 
   // Never let a reply/registration/time frame queued in an old session leak into a new
-  // bootstrap phase. Sync frames deliberately have sessionEpoch 0 and are still eligible.
-  if (head.sessionEpoch &&
-      (head.sessionEpoch != g_authEpoch || !appSessionReady())) {
+  // bootstrap phase. Opening frames have a special tag: they must transmit while output is
+  // intentionally locked, but only for the auth epoch that scheduled them.
+  const bool probeFrame = head.after == TxAfter::Probe;
+  const bool openingFrame = head.after == TxAfter::HelloStep ||
+                            head.after == TxAfter::HelloComplete;
+  const bool stale = probeFrame
+      ? (head.completionToken != g_probeGeneration || !g_syncProbeAwaitingTx)
+      : openingFrame
+      ? (head.sessionEpoch != g_authEpoch || !g_authHelloPending)
+      : (head.sessionEpoch &&
+         (head.sessionEpoch != g_authEpoch || !appSessionReady()));
+  if (stale) {
     const TxItem stale = head;
-    g_txOutR = next;
+    read = next;
     ++g_txRefused;
     recordTxResult(stale, false, /*queued=*/false, millis());
     dispatchTxResult(stale, false, millis());
@@ -1485,7 +1839,15 @@ void pumpTx() {
   frame.identifier = head.id;
   frame.extd = 0;
   frame.rtr = 0;
-  frame.ss = 1;                              // TX- rather than an unbounded retry wedge
+  // NOT single-shot. `ss = 1` turns every transient CAN error into a permanent failure: one
+  // disturbed ACK bit, one lost arbitration, and the frame is gone with no hardware retry.
+  // Measured on the bench at 0.5.0 against a live display: TX+ 43 vs TX- 334, an 89% failure
+  // rate, while the display was plainly there (it opened 1C1 and we acked it six times).
+  // Automatic retransmission is what CAN is FOR, and it is what the OEM radio's controller
+  // does. The wedge this flag was defending against is already covered — kTxOutcomeMs (500
+  // ms) restarts the controller if a frame never settles, so a genuinely stuck arbitration
+  // is bounded by the watchdog rather than by throwing away every recoverable collision.
+  frame.ss = 0;
   frame.self = 0;                            // never ask the controller to manufacture RX
   frame.data_length_code = 8;
   memcpy(frame.data, head.d, sizeof(frame.data));
@@ -1493,12 +1855,20 @@ void pumpTx() {
   // Establish ownership before the nonblocking driver call. Alerts are consumed only by
   // loop(), but this order is still correct if an interrupt completes the frame instantly.
   g_txCurrent = head;
+  g_txCurrentIsControl = control;
   g_txInFlight = true;
   g_txInFlightSince = millis();
   g_txCurrentSelfSlot = noteSelfTx(head.id, head.d, 8);
   const esp_err_t err = twai_transmit(&frame, 0);
   if (err == ESP_OK) {
-    g_txOutR = next;
+    // A real display can answer before this loop pass records TX+. Reserve this precise
+    // reply at controller acceptance, fenced by the RX-task timestamp, then let TX+
+    // start the timeout in dispatchTxResult().
+    if (head.after == TxAfter::GoalReply && head.completionToken == g_goalToken &&
+        head.sessionEpoch == g_authEpoch && appSessionReady()) {
+      reserveWait(head.id, esp_timer_get_time());
+    }
+    read = next;
     ++g_txCount;                            // TXQ: controller accepted it
     bootPush(1, head.id, 8, head.d);
     capturePush(1, head.id, 8, head.d);
@@ -1507,6 +1877,7 @@ void pumpTx() {
   }
 
   g_txInFlight = false;
+  g_txCurrentIsControl = false;
   g_txInFlightSince = 0;
   cancelSelfTx(g_txCurrentSelfSlot);
   if (err == ESP_ERR_TIMEOUT || err == ESP_FAIL) {
@@ -1519,12 +1890,27 @@ void pumpTx() {
   // A real local refusal (for example a stopped driver) has no controller TX- alert.
   // Remove it, record TX!, and let the appropriate protocol layer choose its bounded retry.
   const TxItem refused = head;
-  g_txOutR = next;
+  read = next;
   ++g_txRefused;
   recordTxResult(refused, false, /*queued=*/false, millis());
   dispatchTxResult(refused, false, millis());
   if (g_txRefused <= 5 || (g_txRefused % 50u) == 0)
     logmsg("TWAI refused TXQ %03X: %s", refused.id, esp_err_to_name(err));
+}
+
+// This pump is deliberately usable before setup() has completed Wi-Fi association. CAN
+// starts first and the panel may have begun its `61 11` request already; joining a network
+// must never create an RX-only auth gap. It has no blocking call and bounds every drain.
+void pumpProtocol(uint32_t now) {
+  pumpCanAlerts();
+  pumpTxOutcomeWatchdog(now);
+  pumpRx(now);
+  pumpTick(now);
+  pumpGoal(now);
+  pumpTx();
+  pumpCanAlerts();
+  pumpCapture();
+  pumpStat(now);
 }
 
 }  // namespace
@@ -1642,36 +2028,43 @@ void routes() {
     n += snprintf(out + n, sizeof(out) - n, "%s  up %lus\n", kVersion,
                   static_cast<unsigned long>(now / 1000));
     n += snprintf(out + n, sizeof(out) - n,
-                  "driver  direct ESP-IDF TWAI: install+start 500k, accept-all, single-shot; "
+                  "driver  direct ESP-IDF TWAI: install+start 500k, accept-all, auto-retry; "
                   "mode %s\n",
                   kNoAckMode ? "NO_ACK experiment" : "normal");
     n += snprintf(out + n, sizeof(out) - n,
-                  "session panel %s; full61 %s; auth %s%s (01=hello+B9/BA; 00+hello unlocks)\n",
+                  "session panel %s; full61 %s (enables panel 1C1->5C1); opening %s%s "
+                  "(69->B9+one BA; 00 normal; %s)\n",
                   g_panelSeen ? "seen" : "not seen",
                   g_syncRequestSeen ? "seen" : "waiting",
                   g_authRequestSeen ? "OPEN" : "WAITING",
-                  g_authHelloPending ? " (hello pending)" : "");
+                  g_authHelloPending ? " (hello pending)" : "",
+                  kEnable01Compatibility ? "persistent 01 compatibility ENABLED" :
+                                            "01 bootstrap-only; waiting for 00");
     n += snprintf(out + n, sizeof(out) - n, "sync    0x%02X %s%s%s\n", g_sync,
                   (g_sync & FAILED)     ? "FAILED "     : "",
                   (g_sync & PEER_ALIVE) ? "PEER_ALIVE " : "",
                   (g_sync & FUNCSREG)   ? "FUNCSREG "   : "");
     n += snprintf(out + n, sizeof(out) - n, "goal    %s\n", goalName(g_goal));
     n += snprintf(out + n, sizeof(out) - n,
-                  "panel   pings %lu (last %ld ms ago) goodAuth %lu badAuth %lu keys %lu\n",
+                  "panel   pings %lu (last %ld ms ago) openings %lu unknown61 %lu keys %lu\n",
                   static_cast<unsigned long>(g_pings),
                   g_lastPingMs ? static_cast<long>(now - g_lastPingMs) : -1,
                   static_cast<unsigned long>(g_syncReqs),
                   static_cast<unsigned long>(g_badAuths),
                   static_cast<unsigned long>(g_keys));
     n += snprintf(out + n, sizeof(out) - n,
-                  "us      pongs-queued %lu hellos-TX+ %lu bootstrap-queued %lu autoAcks %lu "
-                  "reg %lu/%lu clock %lu/%lu\n",
+                  "us      pongs-queued %lu hellos-TX+ %lu BA-TX+ %lu autoAcks-TX+ %lu "
+                  "retry %lu fail %lu reg %lu/%lu power %lu/%lu clock %lu/%lu\n",
                   static_cast<unsigned long>(g_pongs),
                   static_cast<unsigned long>(g_hellos),
                   static_cast<unsigned long>(g_bootstraps),
                   static_cast<unsigned long>(g_autoAcks),
+                  static_cast<unsigned long>(g_autoAckRetries),
+                  static_cast<unsigned long>(g_autoAckFailures),
                   static_cast<unsigned long>(g_regOk),
                   static_cast<unsigned long>(g_regOk + g_regFail),
+                  static_cast<unsigned long>(g_powerOkCnt),
+                  static_cast<unsigned long>(g_powerOkCnt + g_powerFail),
                   static_cast<unsigned long>(g_clockOkCnt),
                   static_cast<unsigned long>(g_clockOkCnt + g_clockFail));
     n += snprintf(out + n, sizeof(out) - n,
@@ -1681,8 +2074,8 @@ void routes() {
                   static_cast<unsigned long>(g_fifoDrop),
                   static_cast<unsigned long>(g_syncLosses));
     n += snprintf(out + n, sizeof(out) - n,
-                   "tx      scheduled %lu TXQ %lu TX+ %lu TX- %lu TX! %lu busy %lu outbox %u "
-                   "inflight %s age %lums\n",
+                  "tx      scheduled %lu TXQ %lu TX+ %lu TX- %lu TX! %lu busy %lu outbox n%u/c%u "
+                   "inflight %s%s age %lums\n",
                   static_cast<unsigned long>(g_txScheduled),
                   static_cast<unsigned long>(g_txCount),
                   static_cast<unsigned long>(g_txSuccessAlerts),
@@ -1690,7 +2083,9 @@ void routes() {
                   static_cast<unsigned long>(g_txRefused),
                   static_cast<unsigned long>(g_txBusy),
                    static_cast<unsigned>(txOutboxUsed()),
+                   static_cast<unsigned>(ctrlOutboxUsed()),
                    g_txInFlight ? "yes" : "no",
+                   g_txInFlight ? (g_txCurrentIsControl ? "(control)" : "(normal)") : "",
                    static_cast<unsigned long>(g_txInFlight ? now - g_txInFlightSince : 0));
     n += snprintf(out + n, sizeof(out) - n,
                   "txwatch outcomeTimeouts %lu restarts %lu restartFailures %lu%s\n",
@@ -1835,12 +2230,19 @@ void startNetwork() {
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid.c_str(), pass.c_str());
     const uint32_t t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < kStaJoinMs) delay(100);
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < kStaJoinMs) {
+      // CAN has already been armed. Keep the whole bounded protocol/recovery pump alive
+      // while association proceeds so the display never waits for Wi-Fi before its hello.
+      pumpProtocol(millis());
+      delay(5);
+    }
     sta = (WiFi.status() == WL_CONNECTED);
   }
   if (!sta) {
+    pumpProtocol(millis());
     WiFi.mode(WIFI_AP);
     WiFi.softAP(kApSsid, kApPass);
+    pumpProtocol(millis());
   }
   if (MDNS.begin(kMdnsName)) MDNS.addService("http", "tcp", 80);
 
@@ -1908,10 +2310,11 @@ void setup() {
   startNetwork();
   startHttp();
 
-  logmsg("%s: 01 bootstrap/BA; 00+hello opens", kVersion);
+  logmsg("%s: display liveness -> B9 + one BA; 00 primary; 01 compatibility %s", kVersion,
+         kEnable01Compatibility ? "ENABLED" : "disabled (bootstrap-only)");
   logmsg("black box recording: first %u events (frames both ways + drv state 1/s)",
          static_cast<unsigned>(kBoot));
-  logmsg("goal: authorize (hello, register 151/1F1), then clock %c%c:%c%c",
+  logmsg("goal: 69/61->BA->B0x3 + panel ACK->register 151/1F1->power ON->clock %c%c:%c%c",
          kClockHHMM[0], kClockHHMM[1], kClockHHMM[2], kClockHHMM[3]);
 }
 
@@ -1922,15 +2325,7 @@ void loop() {
   if (g_rebootAt && expired(now, g_rebootAt)) ESP.restart();
   if (g_otaRunning) { pumpCapture(); delay(10); return; }
 
-  pumpCanAlerts();                            // completes only the one known in-flight TX
-  pumpTxOutcomeWatchdog(now);                 // bounded outcome + nonblocking controller recovery
-  pumpRx(now);
-  pumpTick(now);
-  pumpGoal(now);
-  pumpTx();                                   // zero-timeout controller submit (TXQ)
-  pumpCanAlerts();                            // catch an immediate TX+ / TX-
-  pumpCapture();                              // drain RX task + TX outcome records to flash
-  pumpStat(now);
+  pumpProtocol(now);                          // same bounded FSM used during Wi-Fi association
   pumpSerial();                                // narrate the black box to USB
 
   delay(5);                                    // IDLE must eat or the single-core C3 panics
