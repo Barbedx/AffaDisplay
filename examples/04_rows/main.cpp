@@ -574,6 +574,10 @@ bool readTwaiRegs(RegSnapshot& out, bool maskBeie) {
 // hands the interrupt back and busErr resumes.
 volatile bool g_maskBeie = true;
 
+// Opt-in. The probe preempts the poll task and touches BEIE on a live driver; see the note
+// at its start() call site for the measurement that demoted it.
+constexpr bool kEnableEccProbe = false;
+
 void taskFn(void*) {
   uint32_t standoffMs = 0;
   for (;;) {
@@ -1564,9 +1568,20 @@ void setup() {
   if (!g_link.begin(kPins, kBitrate))
     Serial.println("[can] controller did not come up");
 
-  // The ECC probe watches from the first moment: the SEED error of a storm is worth more
-  // than any amount of steady-state histogram.
-  ecc::start();
+  // THE ECC PROBE IS OFF BY DEFAULT NOW, AND THAT IS A RESULT, NOT A REGRESSION.
+  //
+  // It existed to find a fault that is now settled: the bench's chronic transmit failures
+  // were `frame.ss = 1` (single-shot) discarding every recoverable collision, not anything
+  // the ECC register could see. See docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md.
+  //
+  // Left running it is no longer an instrument, it is the fault. The task polls the TWAI
+  // peripheral every millisecond at priority 3 — ABOVE the library's poll task at 2, so it
+  // preempts the code that drains the RX FIFO — and it clears BEIE underneath a live driver.
+  // Measured 2026-08-04: with the probe on, this example went deaf inside four seconds
+  // ("2 frames heard"); with it off, the identical library ran the full opening and put text
+  // on the glass. Turn it on only to diagnose a NEW fault, and expect it to cost reception
+  // while it is on.
+  if (ecc::kEnableEccProbe) ecc::start();
 
   // AND THE GATE STARTS OPEN, which reverses the previous build deliberately.
   //
@@ -1671,17 +1686,32 @@ void loop() {
   // ---- losing sync invalidates everything behind it -----------------------
   // The panel forgets its registration, and it may have been powered down entirely. Start
   // from the top rather than carrying on drawing into a screen that is not there.
-  if (g_step != Step::WaitPanel && affa::hasFlag(st.sync, affa::SyncState::Failed)) {
+  // Losing FUNCSREG counts too, and not only Failed: a panel that re-opened with `61 11`
+  // drops our registrations without necessarily parking sync in Failed long enough for a
+  // 2 ms poll to see it. Drawing into a session whose functions are gone is the flood above.
+  if (g_step != Step::WaitPanel &&
+      (affa::hasFlag(st.sync, affa::SyncState::Failed) ||
+       !affa::hasFlag(st.sync, affa::SyncState::FuncsReg))) {
     ++g_syncLosses;
     restart("panel stopped answering");
   }
 
   switch (g_step) {
     case Step::WaitPanel:
-      // NOT waiting for registration: it is lazy and happens ON the first render, so waiting
-      // for it here would wait for ever.
       if (affa::hasFlag(st.sync, affa::SyncState::Failed)) break;
-      logmsg("panel answering - powering the display on");
+      // AND WAIT FOR REGISTRATION, WHICH IS NO LONGER LAZY. It used to happen on the first
+      // render, so waiting here would have waited for ever — that is why this used not to.
+      // The captured opening emits `151 70` / `1F1 70` with the final B0 frame
+      // (carminat::kSync.registerAfterHello), so FUNCSREG latches by itself a few
+      // milliseconds after sync clears, with no render required.
+      //
+      // Painting before it latches is not merely early, it is ACTIVELY HARMFUL: each
+      // fullscreen is fourteen frames, they queue faster than an unregistered panel will
+      // take them, and the flood costs the handshake the arbitration it needs to finish.
+      // Measured on the bench 2026-08-04 without this gate: arbLost 5577, drop 2117,
+      // txErr pinned 128 (BUS-OFF), syncLost 29, and `registered 0` for ever.
+      if (!affa::hasFlag(st.sync, affa::SyncState::FuncsReg)) break;
+      logmsg("panel registered - powering the display on");
       g_step = Step::PowerOn;
       break;
 
