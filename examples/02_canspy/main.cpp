@@ -33,6 +33,7 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#include <LittleFS.h>
 #include <PsychicHttp.h>
 #include <ElegantOTA.h>
 
@@ -45,17 +46,18 @@
 
 namespace {
 
-// ESP32-C3 SuperMini on the bench rig: rx = GPIO4, tx = GPIO3. Swapping these produces a
-// silent bus with no error anywhere, so they are named, not positional.
+// ESP32-C3 SuperMini on the current bench rig: CRX/RXD -> GPIO3, CTX/TXD -> GPIO4.
+// Swapping these produces a silent bus with no error anywhere, so they are named, not positional.
 #ifndef CANSPY_PINS_MIRRORED
 #  define CANSPY_PINS_MIRRORED 0
 #endif
 #if CANSPY_PINS_MIRRORED
-constexpr gpio_num_t kRxPin = GPIO_NUM_3;
-constexpr gpio_num_t kTxPin = GPIO_NUM_4;
-#else
+// Pre-2026-08-03 bench wiring only.
 constexpr gpio_num_t kRxPin = GPIO_NUM_4;
 constexpr gpio_num_t kTxPin = GPIO_NUM_3;
+#else
+constexpr gpio_num_t kRxPin = GPIO_NUM_3;
+constexpr gpio_num_t kTxPin = GPIO_NUM_4;
 #endif
 
 constexpr const char* kWifiNamespace = "megaopen";   // read-only: ssid / pass
@@ -122,6 +124,119 @@ uint32_t g_rxCount = 0;
 uint32_t g_txCount = 0;
 uint32_t g_lastRxMs = 0;
 
+// ---------------------------------------------------------------------------
+// Persistent listener capture — first history wins
+// ---------------------------------------------------------------------------
+// The controller callback runs in task_CAN, so it only copies a record into RAM. `loop()`
+// writes batches to LittleFS. This preserves the beginning of the next panel boot (including
+// bad `61 11 01` followed by good `61 11 00`) even if the panel retransmits at line rate.
+// The file freezes when full instead of wrapping over the opening exchange.
+struct CaptureHeader {
+  char     magic[8];       // "CANSCPY1"
+  uint32_t version;        // 2: 29-bit id + ext/RTR flags retained
+  uint32_t bitrate;
+};
+struct __attribute__((packed)) CaptureRec {
+  uint32_t ms;
+  uint32_t id;
+  uint8_t  flags;          // bit 0 TX, bit 1 extended, bit 2 RTR
+  uint8_t  len;
+  uint8_t  d[8];
+};
+static_assert(sizeof(CaptureRec) == 18, "capture records must stay fixed-size");
+
+constexpr char     kCapturePath[] = "/can-listener.bin";
+constexpr uint16_t kCaptureFifo   = 2048;
+CaptureRec         g_captureFifo[kCaptureFifo];
+volatile uint16_t  g_captureW = 0;
+volatile uint16_t  g_captureR = 0;
+uint32_t           g_captureDrop = 0;
+uint32_t           g_captureRows = 0;
+uint32_t           g_captureBytes = 0;
+bool               g_captureOpen = false;
+bool               g_captureFull = false;
+File               g_capture;
+portMUX_TYPE       g_captureMux = portMUX_INITIALIZER_UNLOCKED;
+
+void capturePush(uint32_t id, const uint8_t* d, uint8_t len, uint8_t ext, uint8_t rtr,
+                 bool tx) {
+  if (!g_captureOpen || g_captureFull) return;
+  portENTER_CRITICAL(&g_captureMux);
+  const uint16_t next = static_cast<uint16_t>((g_captureW + 1) % kCaptureFifo);
+  if (next == g_captureR) {
+    ++g_captureDrop;
+  } else {
+    CaptureRec& r = g_captureFifo[g_captureW];
+    r.ms = ::millis();
+    r.id = id;
+    r.flags = static_cast<uint8_t>((tx ? 0x01 : 0x00) | (ext ? 0x02 : 0x00) |
+                                   (rtr ? 0x04 : 0x00));
+    r.len = len > 8 ? 8 : len;
+    memset(r.d, 0, sizeof(r.d));
+    if (d) memcpy(r.d, d, r.len);
+    g_captureW = next;
+  }
+  portEXIT_CRITICAL(&g_captureMux);
+}
+
+bool capturePop(CaptureRec& out) {
+  bool got = false;
+  portENTER_CRITICAL(&g_captureMux);
+  if (g_captureR != g_captureW) {
+    out = g_captureFifo[g_captureR];
+    g_captureR = static_cast<uint16_t>((g_captureR + 1) % kCaptureFifo);
+    got = true;
+  }
+  portEXIT_CRITICAL(&g_captureMux);
+  return got;
+}
+
+void startCapture() {
+  // This is deliberately before CAN starts. The panel is attached only after the listener
+  // announces it is armed, so formatting/mounting cannot steal the first auth request.
+  if (!LittleFS.begin(true, "/littlefs", 10, "littlefs")) {
+    Serial.println("[capture] LittleFS mount failed; RAM ring remains available");
+    return;
+  }
+  if (LittleFS.exists(kCapturePath)) LittleFS.remove(kCapturePath);
+  g_capture = LittleFS.open(kCapturePath, FILE_WRITE);
+  if (!g_capture) {
+    Serial.println("[capture] cannot open /can-listener.bin; RAM ring remains available");
+    return;
+  }
+  const CaptureHeader h{{'C', 'A', 'N', 'S', 'C', 'P', 'Y', '1'}, 2, kDefaultRate};
+  if (g_capture.write(reinterpret_cast<const uint8_t*>(&h), sizeof(h)) != sizeof(h)) {
+    g_capture.close();
+    Serial.println("[capture] cannot write header; persistent capture disabled");
+    return;
+  }
+  g_capture.flush();
+  g_captureBytes = sizeof(h);
+  g_captureOpen = true;
+  Serial.println("[capture] /can-listener.bin armed before CAN (GET /api/capture)");
+}
+
+void pumpCapture() {
+  if (!g_captureOpen || g_captureFull) return;
+  CaptureRec batch[48];
+  size_t n = 0;
+  while (n < (sizeof(batch) / sizeof(batch[0])) && capturePop(batch[n])) ++n;
+  if (!n) return;
+
+  const size_t bytes = n * sizeof(batch[0]);
+  const size_t wrote = g_capture.write(reinterpret_cast<const uint8_t*>(batch), bytes);
+  g_captureBytes += static_cast<uint32_t>(wrote);
+  g_captureRows += static_cast<uint32_t>(wrote / sizeof(batch[0]));
+  if (wrote != bytes) {
+    g_capture.flush();
+    g_capture.close();
+    g_captureFull = true;
+    Serial.println("[capture] filesystem full/write failed; beginning of trace preserved");
+    return;
+  }
+  if ((g_captureRows & 0x7Fu) == 0) g_capture.flush();
+}
+
 void push(uint32_t id, const uint8_t* d, uint8_t len, uint8_t ext, uint8_t rtr, bool tx) {
   portENTER_CRITICAL(&g_mux);
   FrameRec& r = g_ring[g_head];
@@ -137,6 +252,7 @@ void push(uint32_t id, const uint8_t* d, uint8_t len, uint8_t ext, uint8_t rtr, 
   ++g_seq;
   if (tx) { ++g_txCount; } else { ++g_rxCount; g_lastRxMs = r.ms; }
   portEXIT_CRITICAL(&g_mux);
+  capturePush(id, d, len, ext, rtr, tx);
 }
 
 // RUNS IN task_CAN (priority 15), on the critical path of every frame, behind a 16-entry
@@ -468,7 +584,7 @@ void runLoopback(int pin) {
 // ---------------------------------------------------------------------------
 // The pin-level transmit test — drive CTX by hand, watch CRX
 // ---------------------------------------------------------------------------
-// TWAI released, GPIO3 driven directly, GPIO4 sampled. Hold CTX recessive (HIGH) and CRX
+// TWAI released, kTxPin driven directly and kRxPin sampled. Hold CTX recessive (HIGH) and CRX
 // should show the panel's traffic — a mixture of highs and lows. Hold CTX dominant (LOW)
 // and, if our transmit path reaches the bus at all, we are jamming it: CRX must read solidly
 // LOW. It is the one thing every other test in this file leaves unproven.
@@ -876,14 +992,14 @@ void runRateSweep() {
 // The jam test — does OUR dominant actually reach the bus?
 // ---------------------------------------------------------------------------
 // This is the question the handoff left open, and /api/pintest cannot answer it. Pintest
-// tears the TWAI driver down so it can own GPIO3, which leaves digitalRead() on CRX as the
+// tears the TWAI driver down so it can own kTxPin, which leaves digitalRead() on CRX as the
 // only detector — and that detector lied: it reported "CRX high 100%" over an 8 ms window
 // while the panel was demonstrably transmitting 1500 frames/s. A sampler that cannot see a
 // fully busy bus cannot be trusted to tell us what our own dominant did to it.
 //
 // So keep the DECODER alive and use IT as the detector. The trick is to install the TWAI
-// driver with its TX parked on an unconnected pin: the controller receives on GPIO4 exactly
-// as it does now, drives nothing anyone can hear, and leaves GPIO3 free for us to bit-bang.
+// driver with its TX parked on an unconnected pin: the controller receives on GPIO3 exactly
+// as it does now, drives nothing anyone can hear, and leaves GPIO4 free for us to bit-bang.
 //
 // Then the measurement is three windows of two seconds:
 //
@@ -971,7 +1087,7 @@ void runJam() {
     logmsg("jam: could not install the listen-only decoder - test aborted, nothing measured");
     twai_driver_uninstall();
   } else {
-    // The peripheral has GPIO10 and GPIO4. GPIO3 is still matrix-attached to the OLD TWAI TX
+    // The peripheral has GPIO10 and GPIO3. GPIO4 is still matrix-attached to the OLD TWAI TX
     // until it is reset by hand — the same trap documented on runPinTest(), and the reason
     // INPUT_OUTPUT is used: it keeps the input buffer alive so the level can be read back.
     gpio_reset_pin(kTxPin);
@@ -1035,21 +1151,21 @@ void runJam() {
 }
 
 // ---------------------------------------------------------------------------
-// The jam sweep — if GPIO3 is not TXD, which pin is?
+// The jam sweep — if GPIO4 is not TXD, which pin is?
 // ---------------------------------------------------------------------------
-// runJam() proves the bus ignores GPIO3. There are two ways that happens: the transceiver
-// cannot drive (dead output stage, or a standby/silent pin asserted), or GPIO3 is simply not
+// runJam() proves the bus ignores GPIO4. There are two ways that happens: the transceiver
+// cannot drive (dead output stage, or a standby/silent pin asserted), or GPIO4 is simply not
 // the pin soldered to TXD. The second one is free to rule out, and the rig's own history says
 // to take it seriously — the memory of this board records that MeganeCAN's otherwise identical
 // module is wired with rx and tx the other way round.
 //
 // So run the jam measurement once per candidate pin. Any pin that collapses the decoded frame
-// count IS the transmit path, whatever the silkscreen says. GPIO4 is excluded because it is
+// count IS the transmit path, whatever the silkscreen says. GPIO3 is excluded because it is
 // proven to be RXD; GPIO18/19 are the C3's USB pins and would disconnect the console; GPIO21
 // parks the controller's own transmitter, which in listen-only never drives dominant and so
 // cannot affect the measurement.
 const gpio_num_t kSweepPins[] = {
-  GPIO_NUM_0, GPIO_NUM_1, GPIO_NUM_2,  GPIO_NUM_3,  GPIO_NUM_5, GPIO_NUM_6,
+  GPIO_NUM_0, GPIO_NUM_1, GPIO_NUM_2,  GPIO_NUM_4,  GPIO_NUM_5, GPIO_NUM_6,
   GPIO_NUM_7, GPIO_NUM_8, GPIO_NUM_9,  GPIO_NUM_10, GPIO_NUM_20,
 };
 constexpr size_t kSweepCount = sizeof(kSweepPins) / sizeof(kSweepPins[0]);
@@ -1214,6 +1330,13 @@ void jStatus() {
   jf("\"rx\":%lu,\"tx\":%lu,", static_cast<unsigned long>(g_rxCount),
      static_cast<unsigned long>(g_txCount));
   jf("\"sinceRxMs\":%ld,", g_lastRxMs ? static_cast<long>(millis() - g_lastRxMs) : -1L);
+
+  // This recorder is deliberately first-history-only.  The first auth exchange is the
+  // evidence we need; a later storm must never overwrite it.
+  jf("\"capture\":{\"open\":%s,\"full\":%s,\"rows\":%lu,\"drops\":%lu,\"bytes\":%lu},",
+     g_captureOpen ? "true" : "false", g_captureFull ? "true" : "false",
+     static_cast<unsigned long>(g_captureRows), static_cast<unsigned long>(g_captureDrop),
+     static_cast<unsigned long>(g_captureBytes));
 
   jf("\"autospeed\":{\"ran\":%s,\"found\":%lu,\"busy\":%s},",
      g_autoRan ? "true" : "false", static_cast<unsigned long>(g_autoResult),
@@ -1408,6 +1531,10 @@ void routes() {
   g_server.on("/api/log", HTTP_GET, [](PsychicRequest* r) {
     jLog(); return replyJson(r);
   });
+
+  // Available only after startCapture() has mounted LittleFS.  This is the complete,
+  // chronological capture from before CAN was started, rather than the short web ring.
+  if (g_captureOpen) g_server.serveStatic("/api/capture", LittleFS, kCapturePath);
 
   g_server.on("/api/clear", HTTP_GET, [](PsychicRequest* r) {
     portENTER_CRITICAL(&g_mux);
@@ -1619,7 +1746,7 @@ void startHttp() {
 void setup() {
   // THE VERY FIRST INSTRUCTION, AND IT HAS TO BE.
   //
-  // Nothing drives GPIO3 between reset and twai_driver_install(). The pad comes out of reset
+  // Nothing drives GPIO4 between reset and twai_driver_install(). The pad comes out of reset
   // as a floating input, and a floating TXD is NOT guaranteed recessive — if it sits low the
   // transceiver drives the bus dominant and we jam the whole bus while doing nothing at all.
   // Every other node then sees a permanently dominant bus for as long as the window lasts.
@@ -1640,9 +1767,9 @@ void setup() {
   delay(300);
   Serial.println("\n02_canspy — bare esp32_can, no AffaDisplay");
 
-  // NETWORK AND OTA FIRST. Everything after this may fail without costing us the board.
+  // NETWORK FIRST.  There is still no CAN driver at this point, so mounting the recorder
+  // cannot lose the first panel frame.
   startNetwork();
-  startHttp();
 
   {
     Preferences p;
@@ -1663,12 +1790,12 @@ void setup() {
   // which deadlocks on exactly the silent bus this probe exists to explain.
   //
   //   pull-up 1, pull-down 0  -> FLOATING. Nothing is driving CRX at all: the transceiver is
-  //                             unpowered or its receiver output is not reaching GPIO4.
+  //                             unpowered or its receiver output is not reaching GPIO3.
   //                             There is no "bus" to speak of and no frame can ever arrive.
   //   pull-up 0, pull-down 0  -> driven LOW. Something really is holding the bus dominant.
   //   pull-up 1, pull-down 1  -> driven HIGH. Bus idle and recessive, i.e. simply quiet.
   {
-    // FIRST, TAKE OURSELVES OUT OF THE PICTURE. Until the driver installs, GPIO3 sits in its
+    // FIRST, TAKE OURSELVES OUT OF THE PICTURE. Until the driver installs, GPIO4 sits in its
     // power-on default — floating — and a floating TXD is not guaranteed recessive. If it
     // drifts low the transceiver drives the bus dominant and WE are the jam, which would make
     // the probe below blame the bus for our own pin. Hold it hard high first.
@@ -1692,7 +1819,7 @@ void setup() {
       : (withPullUp == 0 && withPullDown == 0) ? "driven LOW - bus really is held dominant"
       : (withPullUp == 1 && withPullDown == 1) ? "driven HIGH - bus idle and recessive"
                                                : "inconsistent";
-    gpio_reset_pin(kTxPin);              // hand GPIO3 back for canStart()
+    gpio_reset_pin(kTxPin);              // hand GPIO4 back for canStart()
     snprintf(g_rxProbe, sizeof(g_rxProbe), "CTX forced recessive; pullup=%d pulldown=%d : %s",
              withPullUp, withPullDown, verdict);
     Serial.printf("[rxprobe] %s\n", g_rxProbe);
@@ -1706,6 +1833,14 @@ void setup() {
     }
   }
 
+  // This run is a passive timing baseline.  Do not let a previous web-console choice
+  // start the controller in normal mode before the panel has been captured.
+  g_rate = kDefaultRate;
+  g_listen = true;
+
+  // This has to precede canStart(): the trace begins before the controller can receive.
+  startCapture();
+  startHttp();
   g_canUp = canStart(g_rate, g_listen);
 }
 
@@ -1773,6 +1908,7 @@ void loop() {
     runAutoSpeed();
   }
 
+  pumpCapture();
   ElegantOTA.loop();
   if (g_rebootAt && static_cast<int32_t>(now - g_rebootAt) >= 0) ESP.restart();
 

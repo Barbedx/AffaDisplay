@@ -1,0 +1,19 @@
+rows 0..17 of 18
+    7478.326  STAT running   txErr   0 rxErr 129 busErr 23616
+    8478.261  STAT running   txErr   0 rxErr 129 busErr 23616
+    9483.259  STAT running   txErr   0 rxErr 129 busErr 23616
+   10483.261  STAT running   txErr   0 rxErr 129 busErr 23616
+   11488.275  STAT running   txErr   0 rxErr 129 busErr 23616
+   12490.261  STAT running   txErr   0 rxErr 129 busErr 23616
+   13490.259  STAT running   txErr   0 rxErr 129 busErr 23616
+   14490.261  STAT running   txErr   0 rxErr 129 busErr 23616
+   15495.259  STAT running   txErr   0 rxErr 129 busErr 23616
+   16495.261  STAT running   txErr   0 rxErr 129 busErr 23616
+   17500.259  STAT running   txErr   0 rxErr 129 busErr 23616
+   18500.261  STAT running   txErr   0 rxErr 129 busErr 23616
+   19505.259  STAT running   txErr   0 rxErr 129 busErr 23616
+   20505.261  STAT running   txErr   0 rxErr 129 busErr 23616
+   21510.263  STAT running   txErr   0 rxErr 129 busErr 23616
+   22510.270  STAT running   txErr   0 rxErr 129 busErr 23616
+   23515.264  STAT running   txErr   0 rxErr 129 busErr 23616
+   24515.261  STAT running   txErr   0 rxErr 129 busErr 23616

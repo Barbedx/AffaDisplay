@@ -39,6 +39,45 @@ struct SyncProfile {
                           // Paced by AFFA_PING_REPLY_MIN_MS: a storming panel repeats 69
                           // at line rate, and one pong per ping is the 4400-frames/s trap
                           // all over again. Carminat true, UpdateList/Cluster false.
+  // A Carminat panel is the session initiator.  While this is true the library is a
+  // completely silent CAN participant after begin(): no heartbeat and, importantly, no
+  // `BA` probe leave until a valid message from the panel arrives on syncReplyId.  The
+  // legacy polling driver happened to start in FAILED and therefore emitted BA once a
+  // second before the panel had said anything.  That is not part of the panel-initiated
+  // authorization exchange and is actively harmful on a shared or waking bus.
+  bool waitForPanel = false;
+
+  // Whether this profile is allowed to initiate recovery with requestByte once it has
+  // observed the panel.  AFFA3 NAV does not: a fresh `61 11` is the authoritative request
+  // to which we answer hello and then register.  Kept profile-specific because the older
+  // UpdateList family has a different, separately validated startup contract.
+  bool sendSyncRequest = true;
+
+  // `69` is only a liveness ping on profiles with this set. It is evidence that a panel
+  // is present, but it is NOT permission to register functions or render. A complete
+  // `61 11 <authRequestByte2>` must arrive before application traffic is released. A
+  // profile may still answer a ping after a different complete `61 11 xx` bootstrap; that
+  // is separate from authorization. AFFA3 NAV sets this true. Keeping it separate from
+  // waitForPanel matters: the latter suppresses boot traffic, whereas this keeps an early
+  // or stray ping from impersonating authorization.
+  bool requireAuthRequest = false;
+
+  // data[2] required by the above authorization gate. It is ignored unless
+  // requireAuthRequest is true. Carminat releases registration and rendering only after
+  // `61 11 00`. Its legacy driver still answers every complete `61 11 xx` with hello.
+  uint8_t authRequestByte2 = 0x00;
+
+  // Some panel-initiated profiles use `61 11 01` as a bootstrap / START indication. If
+  // set, the base sends ONE bounded alive + request pair after that indication. This is
+  // deliberately independent of sendSyncRequest: it preserves Carminat's proven bootstrap
+  // without restoring the old BA-every-second recovery storm. It never authorizes payload
+  // traffic; only authRequestByte2 above does that.
+  bool oneShotResyncOnStart = false;
+
+  // Minimum spacing between complete hello bursts. Zero uses the conservative generic
+  // AFFA_HELLO_MIN_MS. A panel with a proven faster startup cadence carries that measured
+  // floor here instead of changing the policy for other panel families.
+  uint32_t helloMinMs = 0;
 };
 
 } // namespace affa

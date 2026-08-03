@@ -216,8 +216,8 @@ switch so a virtual figure can never be mistaken for a hardware one.
 
 | Signal | ESP32-C3 pin | Notes |
 | --- | --- | --- |
-| CAN **RX** | `GPIO_NUM_4` | transceiver `RXD` / `R` |
-| CAN **TX** | `GPIO_NUM_3` | transceiver `TXD` / `D` |
+| CAN **RX** | `GPIO_NUM_3` | transceiver `CRX` / `RXD` / `R` |
+| CAN **TX** | `GPIO_NUM_4` | transceiver `CTX` / `TXD` / `D` |
 | `CANH` / `CANL` | — | to the panel |
 | Bit rate | **500 000** | fixed by the car |
 | Termination | 120 Ω | one at each physical end; on a short bench harness one resistor is usually right |
@@ -228,14 +228,13 @@ is not a 3.3 V device — and share the ground.
 ### 3.2 The (rx, tx) trap
 
 ```cpp
-g_link.begin(affa::CanPins{.rx = GPIO_NUM_4, .tx = GPIO_NUM_3}, 500000);   // this board
+g_link.begin(affa::CanPins{.rx = GPIO_NUM_3, .tx = GPIO_NUM_4}, 500000);   // this board
 ```
 
 Swap those two and there is **no error at all**: no TX failure, no RX frame, no log line,
 just silence. `CanPins` is a named struct for exactly this reason. The reference project
-**MeganeCAN** uses the mirrored assignment on its own board (`rx = GPIO_NUM_3,
-tx = GPIO_NUM_4`) — copying its `setCANPins()` line onto this board is the single most
-common way to get a dead bus.
+Earlier bench wiring used the mirrored assignment (`rx = GPIO_NUM_4, tx = GPIO_NUM_3`).
+Those older logs are historical evidence only; the current bench rig uses the assignment above.
 
 ### 3.3 The panel opens the conversation
 

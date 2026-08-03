@@ -118,7 +118,7 @@ void setup() {
 #endif
 #if AFFA_ENABLE_ESP32CAN_LINK
   static affa::Esp32CanLink real;
-  bite(real.begin(affa::CanPins{.rx = GPIO_NUM_4, .tx = GPIO_NUM_3}, 500000));
+  bite(real.begin(affa::CanPins{.rx = GPIO_NUM_3, .tx = GPIO_NUM_4}, 500000));
   bite(real.isLive());
 #endif
   // The vpanel twin probe was here. src/vpanel/ is gone; what AFFA_ENABLE_ISOTP_RX buys

@@ -6,7 +6,7 @@
 **[English](#english) · [Українська](#українська)**
 
 MIT · ESP32 / ESP32-C3 · Arduino + PlatformIO · no heap after `begin()` · no `delay()` anywhere ·
-200 host tests, no hardware required
+244 host tests, no hardware required
 
 ---
 
@@ -24,7 +24,7 @@ MIT · ESP32 / ESP32-C3 · Arduino + PlatformIO · no heap after `begin()` · no
 * [Latency and preemption](#latency-and-preemption)
 * [Key codes](#key-codes)
 * [Developing without a car](#developing-without-a-car)
-* [Three ways to break the link from outside](#three-ways-to-break-the-link-from-outside)
+* [Keep ownership of the controller](#keep-ownership-of-the-controller)
 * [Documents and tests](#documents-and-tests)
 
 ### What it is and what it is not
@@ -81,9 +81,9 @@ static void onKey(affa::Key k, affa::KeyEdge e, void*) {
 
 void setup() {
   // Named struct: the two pins cannot be swapped at the call site, and they have been.
-  g_link.begin(affa::CanPins{.rx = GPIO_NUM_4, .tx = GPIO_NUM_3}, 500000);
+  g_link.begin(affa::CanPins{.rx = GPIO_NUM_3, .tx = GPIO_NUM_4}, 500000);
   g_display.onKey(&onKey, nullptr);
-  g_display.begin();                                  // TRANSMITS — read the warning below
+  g_display.begin();                                  // Carminat stays silent until the panel asks
 }
 
 void loop() {
@@ -95,24 +95,19 @@ void loop() {
 the message was *accepted*, never whether the panel *displayed* it — that verdict arrives
 later through `onComplete(cb, ctx)`, carrying the same `TxTicket` the call issued.
 
-> ### ⚠️ `begin()` TRANSMITS — never do this first on a vehicle bus
+> ### ⚠️ Vehicle-bus session ownership
 >
-> The first sync heartbeat leaves on the first `poll()`, on `0x3AF` (Carminat) or `0x3DF`
-> (UpdateList), and the library answers registration requests with `0x74` on `id | 0x400`.
-> On a bench with one panel that is exactly right. On a **live vehicle bus** you are
-> injecting frames a real head unit may also be sending: two nodes answering the same
-> registration is not a scenario anyone has characterised, and the panel is not the only
-> thing listening. Know what else is on those identifiers before you power it up, and
-> prefer a bench harness — see [Developing without a car](#developing-without-a-car).
+> Carminat/AFFA3 NAV is silent after `begin()` until the display starts its `0x3CF: 61 11 xx`
+> session request. Other panel profiles have their own session cadence. Once a session is
+> active the library can answer registration with `0x74` on `id | 0x400`; on a live vehicle
+> bus, make sure no factory node owns the same role. Prefer a bench harness — see
+> [Developing without a car](#developing-without-a-car).
 
 Installation, `platformio.ini`:
 
 ```ini
 lib_deps =
   https://github.com/andruxa/AffaDisplay.git
-  collin80/can_common@0.4.0
-  ; PINNED. docs/ESP32CAN-CONTRACT.md is a file:line reading of exactly this commit.
-  https://github.com/collin80/esp32_can.git#c329e6be6931e86f82e38e0f982c9ed951c45cca
 
 build_flags =
   -std=gnu++17
@@ -121,39 +116,30 @@ build_unflags =
   -std=gnu++11        ; the ESP32-C3 Arduino core still defaults to gnu++11
 ```
 
-**The CAN driver is pinned on purpose.** `esp32_can` is taken at commit
-`c329e6be6931e86f82e38e0f982c9ed951c45cca` (its `library.properties` says `0.3.1`, which
-has not moved in years and identifies nothing) and `can_common` at `0.4.0`, because
-[`docs/ESP32CAN-CONTRACT.md`](docs/ESP32CAN-CONTRACT.md) is 800 lines of `file:line`
-citations against those two revisions. With a bare git URL a clean build takes whatever
-`master` is that day and every citation in that document rots silently. `library.json`
-pins the same pair; bumping either means re-verifying that document, which is its own
-rule 21.
+**No third-party CAN wrapper is required.** `Esp32CanLink` uses the ESP32 Arduino core's
+built-in ESP-IDF TWAI driver directly. The transport owns its RX task and driver lifecycle;
+this library does not install `ESP32_CAN` or `can_common`.
 
 #### Building without a CAN driver at all
 
-`-D AFFA_ENABLE_ESP32CAN_LINK=0` and your own `ICanLink` (three methods) is a supported
-configuration: `src/link/Esp32CanLink.cpp` is the only file in the library that includes a
-driver header, and its entire body is behind that gate. **What the gate cannot do is
-un-declare a PlatformIO dependency.** `library.json` lists `can_common` and `esp32_can`
-unconditionally because a manifest has no way to say "only if this `-D` is set", so both
-are *installed* whatever you build. What follows from the gate is narrower, and it is
-what actually matters:
+`-D AFFA_ENABLE_ESP32CAN_LINK=0` plus your own `ICanLink` is a supported configuration.
+The gate removes the direct-TWAI link from the build; no `lib_ignore` or manifest surgery
+is needed because the package has no external CAN dependency.
 
-* **Neither library reaches your image.** Measured on `tools/footprint/gate_probe` with
-  `AFFA_ENABLE_ESP32CAN_LINK=0`, an ESP32-C3 build is byte-identical — **263 278 B flash /
-  18 596 B RAM** — whether the two dependencies are declared, not declared, or declared
-  and `lib_ignore`d. PlatformIO archives each library and the linker pulls no object file
-  nothing references. (That is today's absolute figure for the gate-off probe build; it is
-  not comparable with the deltas in *[What each gate is actually
-  worth](#what-each-gate-is-actually-worth)*, which predate the menu migration.)
-* **To keep them out of the build graph as well**, add `lib_ignore = ESP32_CAN,
-  can_common` to your env. Same bytes; it just stops the LDF compiling two libraries whose
-  objects are then discarded.
-* **To stop them being downloaded at all**, vendor this library — copy it into your
-  project's `lib/AffaDisplay/` and delete the two entries from its `library.json`. That is
-  the only mechanism PlatformIO offers, and it is a fork of the manifest, so say so in
-  your own README.
+> ### Carminat/AFFA3 NAV session rule
+>
+> The display, not the ESP32, starts the session. The Carminat profile transmits **nothing**
+> after `begin()` until the display sends a complete `0x3CF: 61 11 xx` request (DLC at
+> least 3). Every such request receives the proven three-frame Carminat hello burst:
+> `70 1A 11`, then `B0 14 11`, then the identical `B0 14 11` again.
+>
+> `61 11 01` is the **bootstrap** request: it receives that hello burst and exactly one,
+> bounded `B9` + `BA` control sequence. It does **not** authorize function registration,
+> rendering, display power, text, or the clock. Only a later `61 11 00` authorizes those
+> operations; the library then registers functions sequentially and releases queued output.
+> A bare `69` is liveness only and cannot start a session. In particular, Carminat never
+> polls `BA` periodically: repeated/retransmitted `01` frames are coalesced and cannot
+> create a `BA` stream.
 
 ### Wiring
 
@@ -162,8 +148,8 @@ The bench board is an **ESP32-C3 SuperMini** plus a 3.3 V CAN transceiver
 
 | Signal | ESP32-C3 pin | Notes |
 | --- | --- | --- |
-| CAN **RX** | `GPIO_NUM_4` | transceiver `RXD` / `R` |
-| CAN **TX** | `GPIO_NUM_3` | transceiver `TXD` / `D` |
+| CAN **RX** | `GPIO_NUM_3` | transceiver `CRX` / `RXD` / `R` |
+| CAN **TX** | `GPIO_NUM_4` | transceiver `CTX` / `TXD` / `D` |
 | `CANH` / `CANL` | — | to the panel harness |
 | Bit rate | **500 000** | fixed by the car; not negotiable |
 | Termination | 120 Ω | one at each physical end of the bus — with a panel plus your board on a short bench harness, one 120 Ω resistor is usually right; two if the harness is long |
@@ -174,18 +160,17 @@ The bench board is an **ESP32-C3 SuperMini** plus a 3.3 V CAN transceiver
 > not an error — it is **silence**. No TX error, no RX frame, no log line, nothing:
 >
 > ```cpp
-> g_link.begin(affa::CanPins{.rx = GPIO_NUM_4, .tx = GPIO_NUM_3}, 500000);   // this board
+> g_link.begin(affa::CanPins{.rx = GPIO_NUM_3, .tx = GPIO_NUM_4}, 500000);   // this board
 > ```
 >
-> The reference project **MeganeCAN** uses the mirrored assignment (`rx = GPIO_NUM_3,
-> tx = GPIO_NUM_4`) on its own board. Copying its `setCANPins()` line onto this one is the
-> single most common way to get a dead bus, and `examples/01_link_check` exists mainly to
-> tell you which of the two you are looking at.
+> The current rig now uses the same assignment as **MeganeCAN**. Older bench logs and images
+> used the mirrored `rx = GPIO_NUM_4, tx = GPIO_NUM_3` wiring; they are historical evidence,
+> not a wiring recipe. `examples/01_bringup` carries an explicit legacy override only for
+> an older, differently soldered rig.
 
-**The panel opens the conversation.** Nothing appears until the panel pings: it announces
-itself with `61 11` on `0x3CF`, the library answers with the hello burst, and only then
-does registration and rendering become possible. A bench with power but no panel produces
-a heartbeat every second and nothing else — that is correct behaviour, not a fault.
+**Carminat/AFFA3 NAV is opened by the panel.** Nothing appears until it sends a complete
+`0x3CF: 61 11 xx` request; the library then answers with the hello burst. A powered bench
+with no panel stays silent — that is correct behaviour, not a fault.
 
 ### Supported panels
 
@@ -291,7 +276,7 @@ defaults.
 | `AFFA_ENABLE_TRANSLITERATION` | `1` | `toAscii` + its table (~1.2 kB). **0 is dangerous**: UTF-8 then reaches the wire unchanged and renders as garbage — a visual failure, not a compile error. |
 | `AFFA_ENABLE_LOG` | `1` | the `AFFA_LOG*` macros. 0: no format strings enter flash at all, so never put a side effect in a log argument. |
 | `AFFA_LOG_LEVEL` | `3` | 0 off, 1 error, 2 warn, 3 info, 4 debug, 5 trace. Compile-time. |
-| `AFFA_ENABLE_ESP32CAN_LINK` | `1` on Arduino, `0` on host | `Esp32CanLink` and the `<esp32_can.h>` dependency |
+| `AFFA_ENABLE_ESP32CAN_LINK` | `1` on Arduino, `0` on host | `Esp32CanLink` and the direct `<driver/twai.h>` transport |
 | `AFFA_ENABLE_ISOTP_RX` | `0` on target, `1` on host | the ISO-TP reassembler, the screen decoder, and `onText()`. For reading a channel somebody else writes; the radio role never needs it. |
 | `AFFA_ENABLE_MARQUEE` | `1` | `widget::Marquee` and `UpdateListDisplay`'s `setScrollText` / `setScrollActive` / `reassert`. A widget, not protocol — but a small one, and eight cells do not hold a track title. |
 | `AFFA_TX_COALESCE` | `1` | latest-value-wins per `RenderSlot`. 0 reproduces the "panel keeps counting after Pause" defect. |
@@ -342,12 +327,9 @@ pinned, so they are expected to hold.</sub>
 
 Read those numbers with three corrections, or they will mislead you:
 
-1. **Most of the delta is the CAN driver, not this library.** A bare sketch that only links
-   `esp32_can` + `can_common`, opens `Serial` and calls `CAN0.begin(500000)` — no
-   AffaDisplay at all — is **257 724 B / 14 564 B** on the same toolchain. Against *that*
-   floor the library costs **+8 354 B flash / +1 816 B RAM** fully enabled, **+6 474 B /
-   +1 488 B** minimal, **+14 052 B / +1 896 B** with the inbound decoder, and **+19 102 B /
-   +5 328 B** with the menu widget compiled in and used. That is the number to quote.
+1. **The CAN transport is part of the image.** These absolute figures predate the
+   direct-TWAI migration; remeasure `tools/footprint/` before quoting a transport or gate
+   delta.
 2. **`size_all` and `size_carminat` are byte-identical, and that is the result, not a
    defect.** Both build `examples/01_link_check`, which instantiates its own minimal
    `AffaDisplayBase` subclass and references no panel class, so `--gc-sections` removes
@@ -432,7 +414,7 @@ bug the previous `g_no_menu` row had.
 
 | Flag | Flash | RAM | Symbol evidence in `firmware.elf` |
 | --- | ---: | ---: | --- |
-| `AFFA_ENABLE_ESP32CAN_LINK=0` | **−12 816 B** | −1 392 B | `Esp32CanLink::begin` and all 28 `CAN0`/driver symbols gone; the env drops `lib_deps` entirely and still links |
+| `AFFA_ENABLE_ESP32CAN_LINK=0` | re-measure | re-measure | `Esp32CanLink` and direct-TWAI symbols gone |
 | `AFFA_PANEL_CARMINAT=0` | −2 574 B | −1 168 B | every `CarminatDisplay::*` symbol gone |
 | `AFFA_PANEL_UPDATELIST=0` (with `_MENU=0`) | −2 492 B | −2 560 B | every `UpdateList*` symbol gone |
 | `AFFA_ENABLE_TRANSLITERATION=0` | −2 148 B | 0 | `affa::toAscii` gone (inlined bounded copy replaces it) |
@@ -615,37 +597,22 @@ commands is **[`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HA
 The same document also covers capturing your own traffic, diffing it against
 `docs/WIRE-SPEC.md`, and adding a fourth panel family.
 
-### Three ways to break the link from outside
+### Keep ownership of the controller
 
-All three are the application reaching past this library into the CAN driver, and all three
-are verified against `collin80/esp32_can` with file:line citations in
-`docs/ESP32CAN-CONTRACT.md`.
+`Esp32CanLink` owns one ESP-IDF TWAI controller and its RX task. Do not call
+`twai_driver_install`, `twai_start`, `twai_stop`, `twai_driver_uninstall`, mode changes,
+or `twai_transmit` for that controller from application code. Use `setTxEnabled()` for
+quiet periods and `setListenOnly()` only through the link; recovery is driven by the
+library poll backoff.
 
-1. **A per-mailbox callback on mailbox 0 or 1.** `processFrame()` prefers a per-mailbox
-   callback over the general one, and `watchFor()` puts its match-everything filter in
-   exactly those two slots — so registering there **silently steals every standard frame**
-   from the library. Symptom: the bus looks alive, the library never receives anything.
-2. **A second `watchFor()` (or a second `CAN0.begin()`).** It reinstalls the driver on a live
-   bus, leaks both queues while `task_CAN` is blocked on the old one, and wipes all 32 filter
-   slots.
-3. **Any driver mode setter** — `setListenOnlyMode`, `setNoACKMode`, `enable`, `disable`,
-   `set_baudrate`, `beginAutoSpeed`, `forceDriverRestart`, `setDebuggingMode(true)`. Every
-   one is implemented as `disable()` + assignment + `enable()`, i.e. `twai_stop` mid-frame,
-   `vTaskDelete` of both RX tasks, driver uninstall, reinstall. Called from inside the
-   general callback, any of them deletes its own caller. This is what repeatedly left the
-   controller stopped in the previous project.
-
-Two more worth knowing: **never test the return value of `CAN0.sendFrame()`** (it is a
-literal `true` on every path, including timeout-and-drop and driver-not-installed), and if
-you want automatic bus-off recovery call `CAN0.setForceRecovery(true)` **before**
-`link.begin()` and accept its 2-second outage. The library adds no recovery of its own —
-two initiators racing `twai_initiate_recovery()` on one controller is how a half-recovered
-peripheral happens.
+`send()` is non-blocking: accepted means queued, not that the display processed the frame.
+The display's protocol `0x74` reply is delivery proof; controller TX counters are
+diagnostic only.
 
 ### Documents and tests
 
 ```
-pio test -e native      # 200 host test cases across 13 suites, no hardware
+pio test -e native      # 244 host test cases across 14 suites, no hardware
 pio run                 # all 15: two host environments plus 13 ESP32-C3 targets
 ```
 
@@ -654,17 +621,15 @@ pio run                 # all 15: two host environments plus 13 ESP32-C3 targets
 | [`docs/API.md`](docs/API.md) | The specification the implementation is written against. Where any other document disagrees with it, it wins. |
 | [`docs/WIRE-SPEC.md`](docs/WIRE-SPEC.md) | The byte-level oracle: every frame layout, ready-to-paste golden vectors each tagged with the strongest witness that attests it, and the arithmetic for every frame count. **Where the code and this document disagree about a byte, the code is wrong.** |
 | [`docs/PROTOCOL-NOTES.md`](docs/PROTOCOL-NOTES.md) | Provenance: every byte traced to a capture, an OEM log or a third-party reference, plus the open questions each phrased as the experiment that closes it. |
-| [`docs/ESP32CAN-CONTRACT.md`](docs/ESP32CAN-CONTRACT.md) | What `collin80/esp32_can` actually guarantees, with citations, and the 21 rules that follow. |
+| [`docs/ESP32CAN-CONTRACT.md`](docs/ESP32CAN-CONTRACT.md) | Direct ESP-IDF TWAI ownership, RX/TX, lifecycle, and recovery contract. |
 | [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md) | The optional, display-agnostic menu: what `MenuModel` owns, what a renderer owns, the `MenuGeometry` fields, the `IMenuRenderer` contract, and a worked adapter for a display the library has never seen. |
 | [`docs/PORTING.md`](docs/PORTING.md) | Moving an application off the old classes — and how to drop this library entirely, including which files are panel-specific and which are the reusable transport core. |
 | [`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HARDWARE.md) | The three tiers above, in full, plus capturing traffic and adding a panel. |
 
 `core/`, `util/`, `link/LoopbackLink.h`, `proto/` and `widget/` must all compile for
 `platform = native` with nothing but the C++17 standard library. If a change breaks that
-build, the change is wrong, not the test. **`<esp32_can.h>` appears exactly once in the
-library**, in `src/link/Esp32CanLink.cpp` — the only other occurrence in the repository is
-`tools/footprint/baseline_can`, a two-line sketch that links the driver *without*
-AffaDisplay to establish the footprint floor.
+build, the change is wrong, not the test. `<driver/twai.h>` is confined to
+`src/link/Esp32CanLink.cpp`; the library uses no `ESP32_CAN` or `can_common` wrapper.
 
 Licence: **MIT**, see [`LICENSE`](LICENSE).
 
@@ -684,7 +649,7 @@ Licence: **MIT**, see [`LICENSE`](LICENSE).
 * [Затримка і витіснення](#затримка-і-витіснення)
 * [Коди кнопок](#коди-кнопок)
 * [Розробка без автомобіля](#розробка-без-автомобіля)
-* [Три способи зламати лінк ззовні](#три-способи-зламати-лінк-ззовні)
+* [Власник контролера](#власник-контролера)
 * [Документи і тести](#документи-і-тести)
 
 ### Що це таке і чим воно не є
@@ -741,9 +706,9 @@ static void onKey(affa::Key k, affa::KeyEdge e, void*) {
 
 void setup() {
   // Іменована структура: два піни неможливо переплутати на місці виклику, а їх плутали.
-  g_link.begin(affa::CanPins{.rx = GPIO_NUM_4, .tx = GPIO_NUM_3}, 500000);
+  g_link.begin(affa::CanPins{.rx = GPIO_NUM_3, .tx = GPIO_NUM_4}, 500000);
   g_display.onKey(&onKey, nullptr);
-  g_display.begin();                                  // ПЕРЕДАЄ — прочитайте попередження
+  g_display.begin();                                  // Carminat мовчить, доки не запитає панель
 }
 
 void loop() {
@@ -755,25 +720,19 @@ void loop() {
 чи повідомлення *прийнято*, і ніколи — чи панель його *показала*: цей вердикт приходить
 пізніше через `onComplete(cb, ctx)` із тим самим `TxTicket`, який видав виклик.
 
-> ### ⚠️ `begin()` ПЕРЕДАЄ — ніколи не робіть цього першим на шині автомобіля
+> ### ⚠️ Хто починає сесію на шині автомобіля
 >
-> Перший sync heartbeat вилітає на першому `poll()` — на `0x3AF` (Carminat) або `0x3DF`
-> (UpdateList), і бібліотека відповідає на запити реєстрації байтом `0x74` на `id | 0x400`.
-> На столі з однією панеллю це саме те, що треба. На **живій шині автомобіля** ви вкидаєте
-> кадри, які може надсилати і штатна магнітола: два вузли, що відповідають на одну
-> реєстрацію, — це сценарій, який ніхто не досліджував, і панель там не єдиний слухач.
-> З'ясуйте, хто ще сидить на цих ідентифікаторах, перш ніж подавати живлення, і краще
-> починайте зі стенда — див. [Розробка без автомобіля](#розробка-без-автомобіля).
+> Carminat/AFFA3 NAV після `begin()` мовчить, доки дисплей не почне сесію запитом
+> `0x3CF: 61 11 xx`. Інші профілі панелей мають власний ритм сесії. Коли сесія активна,
+> бібліотека може відповісти на реєстрацію `0x74` на `id | 0x400`; на живій шині автомобіля
+> переконайтеся, що цю саму роль не виконує штатний вузол. Краще починати зі стенда — див.
+> [Розробка без автомобіля](#розробка-без-автомобіля).
 
 Встановлення, `platformio.ini`:
 
 ```ini
 lib_deps =
   https://github.com/andruxa/AffaDisplay.git
-  collin80/can_common@0.4.0
-  ; ЗАФІКСОВАНО. docs/ESP32CAN-CONTRACT.md — це читання саме цього коміту з посиланнями
-  ; на файл і рядок.
-  https://github.com/collin80/esp32_can.git#c329e6be6931e86f82e38e0f982c9ed951c45cca
 
 build_flags =
   -std=gnu++17
@@ -782,36 +741,15 @@ build_unflags =
   -std=gnu++11        ; ядро Arduino для ESP32-C3 досі стоїть на gnu++11
 ```
 
-**Драйвер CAN зафіксовано навмисне.** `esp32_can` береться на коміті
-`c329e6be6931e86f82e38e0f982c9ed951c45cca` (у його `library.properties` стоїть `0.3.1`,
-яка не рухалася роками й не означає нічого), а `can_common` — на `0.4.0`, бо
-[`docs/ESP32CAN-CONTRACT.md`](docs/ESP32CAN-CONTRACT.md) — це 800 рядків посилань
-`файл:рядок` саме на ці дві ревізії. З «голим» git-URL чиста збірка бере той `master`,
-який трапиться того дня, і кожне посилання в тому документі тихо протухає. `library.json`
-фіксує ту саму пару; підняти версію — означає перевірити документ наново, і це його
-власне правило 21.
+**Сторонній CAN-wrapper не потрібен.** `Esp32CanLink` напряму використовує вбудований у
+ядро Arduino для ESP32 драйвер ESP-IDF TWAI. Транспорт володіє своєю RX-задачею та життєвим
+циклом драйвера; бібліотека не встановлює `ESP32_CAN` чи `can_common`.
 
 #### Збірка взагалі без драйвера CAN
 
-`-D AFFA_ENABLE_ESP32CAN_LINK=0` плюс власний `ICanLink` (три методи) — підтримувана
-конфігурація: `src/link/Esp32CanLink.cpp` — єдиний файл бібліотеки, що підключає заголовок
-драйвера, і все його тіло стоїть за цим перемикачем. **Чого перемикач не може — це
-скасувати залежність PlatformIO.** `library.json` перелічує `can_common` і `esp32_can`
-беззастережно, бо маніфест не вміє сказати «лише якщо задано цей `-D`», тож обидві
-бібліотеки *встановлюються* за будь-якої збірки. З перемикача випливає менше — і саме те,
-що має значення:
-
-* **Жодна з них не потрапляє у ваш образ.** Виміряно на `tools/footprint/gate_probe` з
-  `AFFA_ENABLE_ESP32CAN_LINK=0`: збірка для ESP32-C3 байт у байт однакова — **263 278 Б
-  флеш / 18 596 Б RAM** — байдуже, чи ці дві залежності оголошені, не оголошені, чи
-  оголошені разом із `lib_ignore`. PlatformIO пакує кожну бібліотеку в архів, а лінкер не
-  тягне об'єктний файл, на який ніхто не посилається.
-* **Щоб їх не було і в графі збірки**, додайте у своє середовище
-  `lib_ignore = ESP32_CAN, can_common`. Байти ті самі; просто LDF більше не компілює дві
-  бібліотеки, чиї об'єктні файли все одно відкидаються.
-* **Щоб вони взагалі не завантажувалися**, візьміть бібліотеку до себе: скопіюйте її в
-  `lib/AffaDisplay/` свого проєкту й видаліть ці два записи з її `library.json`. Іншого
-  механізму PlatformIO не дає, і це форк маніфесту — напишіть про це у власному README.
+`-D AFFA_ENABLE_ESP32CAN_LINK=0` плюс власний `ICanLink` — підтримувана конфігурація.
+Перемикач прибирає direct-TWAI link зі збірки; `lib_ignore` чи зміна маніфесту не потрібні,
+бо пакет не має зовнішньої CAN-залежності.
 
 ### Підключення
 
@@ -820,8 +758,8 @@ TJA1051T-3, *не* 5 В TJA1050 без узгодження рівнів).
 
 | Сигнал | Пін ESP32-C3 | Примітки |
 | --- | --- | --- |
-| CAN **RX** | `GPIO_NUM_4` | `RXD` / `R` трансивера |
-| CAN **TX** | `GPIO_NUM_3` | `TXD` / `D` трансивера |
+| CAN **RX** | `GPIO_NUM_3` | `CRX` / `RXD` / `R` трансивера |
+| CAN **TX** | `GPIO_NUM_4` | `CTX` / `TXD` / `D` трансивера |
 | `CANH` / `CANL` | — | у джгут панелі |
 | Швидкість | **500 000** | задана автомобілем, не обговорюється |
 | Термінація | 120 Ом | по одному на кожному фізичному кінці шини; на короткому стенді з панеллю і вашою платою зазвичай достатньо одного резистора, двох — якщо джгут довгий |
@@ -832,18 +770,22 @@ TJA1051T-3, *не* 5 В TJA1050 без узгодження рівнів).
 > не помилка, а **тиша**. Ні TX error, ні жодного кадру, ні рядка в логу:
 >
 > ```cpp
-> g_link.begin(affa::CanPins{.rx = GPIO_NUM_4, .tx = GPIO_NUM_3}, 500000);   // ця плата
+> g_link.begin(affa::CanPins{.rx = GPIO_NUM_3, .tx = GPIO_NUM_4}, 500000);   // ця плата
 > ```
 >
-> Референсний проєкт **MeganeCAN** на своїй платі використовує дзеркальне призначення
-> (`rx = GPIO_NUM_3, tx = GPIO_NUM_4`). Скопіювати звідти рядок `setCANPins()` — найпоширеніший
-> спосіб отримати мертву шину, і `examples/01_link_check` існує здебільшого для того, щоб
-> сказати вам, який із двох випадків перед вами.
+> Поточний стенд тепер має те саме призначення, що й **MeganeCAN**. Старі стендові логи та
+> прошивки використовували дзеркальне `rx = GPIO_NUM_4, tx = GPIO_NUM_3`; це історичні дані,
+> а не схема підключення. `examples/01_bringup` має явний legacy-перемикач лише для старого
+> стенду з іншим паянням.
 
-**Розмову починає панель.** Доки панель не подасть голос, не буде нічого: вона оголошує себе
-кадром `61 11` на `0x3CF`, бібліотека відповідає серією hello, і лише після цього стають
-можливими реєстрація і рендер. Стенд із живленням, але без панелі, видає heartbeat раз на
-секунду і більше нічого — це коректна поведінка, а не несправність.
+**Carminat/AFFA3 NAV починає розмову сам.** Після `begin()` бібліотека не передає, доки
+дисплей не надішле повний `0x3CF: 61 11 xx`. На кожен такий запит приходить перевірений
+три-кадровий Carminat hello: `70 1A 11`, `B0 14 11`, `B0 14 11`.
+
+`61 11 01` — лише bootstrap: він запускає hello і один обмежений `B9` + `BA`, але не
+дозволяє реєстрацію, рендер, живлення дисплея чи годинник. Лише пізній `61 11 00` дозволяє
+послідовну реєстрацію функцій та виведення з черги. Окремий `69` — це liveness, не старт
+сесії; Carminat не опитує `BA` періодично.
 
 ### Підтримувані панелі
 
@@ -950,7 +892,7 @@ OLED 6 × 20. Модель оперує *індексом рядка* і від�
 | `AFFA_ENABLE_TRANSLITERATION` | `1` | `toAscii` і його таблиця (~1.2 кБ). **0 — небезпечно**: UTF-8 тоді потрапляє на шину як є і малюється сміттям — це візуальна помилка, а не помилка компіляції. |
 | `AFFA_ENABLE_LOG` | `1` | макроси `AFFA_LOG*`. При 0 жоден формат-рядок не потрапляє у флеш, тому ніколи не ховайте побічний ефект в аргументі логу. |
 | `AFFA_LOG_LEVEL` | `3` | 0 off, 1 error, 2 warn, 3 info, 4 debug, 5 trace. На етапі компіляції. |
-| `AFFA_ENABLE_ESP32CAN_LINK` | `1` на Arduino, `0` на хості | `Esp32CanLink` і залежність `<esp32_can.h>` |
+| `AFFA_ENABLE_ESP32CAN_LINK` | `1` на Arduino, `0` на хості | `Esp32CanLink` і direct transport `<driver/twai.h>` |
 | `AFFA_ENABLE_ISOTP_RX` | `0` на платі, `1` на хості | збирач ISO-TP, декодер екрана і `onText()`. Щоб читати канал, у який пише хтось інший; ролі радіо це не потрібно. |
 | `AFFA_ENABLE_MARQUEE` | `1` | `widget::Marquee` і `setScrollText` / `setScrollActive` / `reassert` в `UpdateListDisplay`. Віджет, а не протокол — але маленький, а вісім комірок не вміщають назву треку. |
 | `AFFA_TX_COALESCE` | `1` | «перемагає найновіше» в межах `RenderSlot`. 0 відтворює дефект «панель рахує далі після Pause». |
@@ -1001,13 +943,9 @@ ESP32-C3 (`board = esp32-c3-devkitm-1`, ядро Arduino 2.0.17), release, пр�
 
 Ці числа треба читати з трьома поправками, інакше вони введуть в оману:
 
-1. **Більшість дельти — це драйвер CAN, а не ця бібліотека.** Голий скетч, який лише лінкує
-   `esp32_can` + `can_common`, відкриває `Serial` і викликає `CAN0.begin(500000)` — узагалі
-   без AffaDisplay — важить **257 724 Б / 14 564 Б** на тому самому тулчейні. Відносно
-   *цієї* підлоги бібліотека коштує **+8 354 Б флеш / +1 816 Б RAM** у повній комплектації,
-   **+6 474 Б / +1 488 Б** у мінімальній, **+14 052 Б / +1 896 Б** із вхідним декодером і
-   **+19 102 Б / +5 328 Б** із віджетом меню, який реально використовується. Саме ці числа
-   варто цитувати.
+1. **CAN transport є частиною образу.** Ці абсолютні цифри передують переходу на
+   direct-TWAI; перед цитуванням різниці transport або gate перевиміряйте
+   `tools/footprint/`.
 2. **`size_all` і `size_carminat` байт у байт однакові — і це результат, а не дефект.** Обидві
    збирають `examples/01_link_check`, який створює власний мінімальний нащадок
    `AffaDisplayBase` і не згадує жодного класу панелі, тож `--gc-sections` викидає кожну
@@ -1087,7 +1025,7 @@ platformio_footprint.ini` відтворює всі числа звідси, в�
 
 | Прапорець | Флеш | RAM | Підтвердження в символах `firmware.elf` |
 | --- | ---: | ---: | --- |
-| `AFFA_ENABLE_ESP32CAN_LINK=0` | **−12 816 Б** | −1 392 Б | зникають `Esp32CanLink::begin` і всі 28 символів `CAN0`/драйвера; env узагалі без `lib_deps` і все одно лінкується |
+| `AFFA_ENABLE_ESP32CAN_LINK=0` | перевиміряти | перевиміряти | зникають `Esp32CanLink` і direct-TWAI symbols |
 | `AFFA_PANEL_CARMINAT=0` | −2 574 Б | −1 168 Б | зникають усі `CarminatDisplay::*` |
 | `AFFA_PANEL_UPDATELIST=0` (разом із `_MENU=0`) | −2 492 Б | −2 560 Б | зникають усі `UpdateList*` |
 | `AFFA_ENABLE_TRANSLITERATION=0` | −2 148 Б | 0 | зникає `affa::toAscii` (його заміняє вбудована обмежена копія) |
@@ -1269,33 +1207,17 @@ platformio_footprint.ini` відтворює всі числа звідси, в�
 Той самий документ описує, як зняти власний трафік, як звірити його з `docs/WIRE-SPEC.md` і
 як додати четверту родину панелей.
 
-### Три способи зламати лінк ззовні
+### Власник контролера
 
-Усі три — це застосунок, що тягнеться повз бібліотеку прямо в драйвер CAN, і всі три
-перевірені проти `collin80/esp32_can` із посиланнями на файл і рядок у
-`docs/ESP32CAN-CONTRACT.md`.
+`Esp32CanLink` володіє одним контролером ESP-IDF TWAI і його RX-задачею. Не викликайте з
+коду застосунку `twai_driver_install`, `twai_start`, `twai_stop`,
+`twai_driver_uninstall`, зміну режиму або `twai_transmit` для цього контролера. Для тихого
+періоду використовуйте `setTxEnabled()`, а `setListenOnly()` — лише через link; recovery
+веде poll-backoff бібліотеки.
 
-1. **Callback на поштову скриньку 0 або 1.** `processFrame()` віддає перевагу callback-у
-   скриньки перед загальним, а `watchFor()` кладе свій фільтр «усе підряд» саме в ці дві
-   скриньки — тож реєстрація там **тихо краде в бібліотеки всі стандартні кадри**. Симптом:
-   шина виглядає живою, а бібліотека нічого не отримує.
-2. **Другий `watchFor()` (або другий `CAN0.begin()`).** Він перевстановлює драйвер на живій
-   шині, губить обидві черги, поки `task_CAN` заблокована на старій, і стирає всі 32 слоти
-   фільтрів.
-3. **Будь-який сеттер режиму драйвера** — `setListenOnlyMode`, `setNoACKMode`, `enable`,
-   `disable`, `set_baudrate`, `beginAutoSpeed`, `forceDriverRestart`, `setDebuggingMode(true)`.
-   Кожен реалізовано як `disable()` + присвоєння + `enable()`, тобто `twai_stop` посеред
-   кадру, `vTaskDelete` обох RX-задач, видалення драйвера і встановлення заново. Викликаний
-   із загального callback-у, будь-який із них видаляє власного викликача. Саме це раз за
-   разом лишало контролер зупиненим у попередньому проєкті.
-
-Ще два корисні факти: **ніколи не перевіряйте значення, яке повертає `CAN0.sendFrame()`** (це
-буквальний `true` на будь-якому шляху, включно з «таймаут і відкинули» та «драйвер не
-встановлено»), і якщо вам потрібне автоматичне відновлення після bus-off, викличте
-`CAN0.setForceRecovery(true)` **до** `link.begin()` і змиріться з дводесятковою паузою.
-Бібліотека не додає власного відновлення: два ініціатори, що змагаються за
-`twai_initiate_recovery()` на одному контролері, — це і є спосіб отримати напіввідновлену
-периферію.
+`send()` не блокує: accepted означає «поставлено в чергу», а не «дисплей опрацював кадр».
+Відповідь протоколу дисплея `0x74` є доказом доставки; лічильники TX контролера лише
+діагностичні.
 
 ### Документи і тести
 
@@ -1309,17 +1231,15 @@ pio run                 # усі 15: два хостові середовища 
 | [`docs/API.md`](docs/API.md) | Специфікація, під яку написано реалізацію. Якщо будь-який інший документ їй суперечить — перемагає вона. |
 | [`docs/WIRE-SPEC.md`](docs/WIRE-SPEC.md) | Побайтовий оракул: усі розкладки кадрів, готові до вставки золоті вектори з позначкою найсильнішого свідка і арифметика для кожної кількості кадрів. **Якщо код і цей документ розходяться щодо байта — помиляється код.** |
 | [`docs/PROTOCOL-NOTES.md`](docs/PROTOCOL-NOTES.md) | Походження: кожен байт зведено до захоплення шини, OEM-логу або сторонньої реалізації, плюс відкриті питання, кожне сформульоване як експеримент, що його закриває. |
-| [`docs/ESP32CAN-CONTRACT.md`](docs/ESP32CAN-CONTRACT.md) | Що насправді гарантує `collin80/esp32_can`, з посиланнями, і 21 правило, яке з цього випливає. |
+| [`docs/ESP32CAN-CONTRACT.md`](docs/ESP32CAN-CONTRACT.md) | Контракт direct ESP-IDF TWAI: володіння, RX/TX, життєвий цикл і recovery. |
 | [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md) | Опціональне меню, незалежне від дисплея: що належить `MenuModel`, що — рендереру, поля `MenuGeometry`, контракт `IMenuRenderer` і готовий приклад адаптера для дисплея, якого бібліотека ніколи не бачила. |
 | [`docs/PORTING.md`](docs/PORTING.md) | Як перевести застосунок зі старих класів — і як відмовитися від цієї бібліотеки взагалі, включно з тим, які файли специфічні для панелі, а які є придатним до повторного використання транспортним ядром. |
 | [`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HARDWARE.md) | Три рівні вище, докладно, плюс зняття трафіку і додавання панелі. |
 
 `core/`, `util/`, `link/LoopbackLink.h`, `proto/` і `widget/` мають збиратися для
 `platform = native` з нічим, окрім стандартної бібліотеки C++17. Якщо зміна ламає цю збірку —
-неправа зміна, а не тест. **`<esp32_can.h>` зустрічається в бібліотеці рівно один раз** —
-у `src/link/Esp32CanLink.cpp`; єдине інше входження в репозиторії — це
-`tools/footprint/baseline_can`, дворядковий скетч, який лінкує драйвер *без* AffaDisplay,
-щоб задати підлогу для таблиці обсягу.
+неправа зміна, а не тест. `<driver/twai.h>` обмежений
+`src/link/Esp32CanLink.cpp`; бібліотека не використовує wrapper `ESP32_CAN` чи `can_common`.
 
 Ліцензія: **MIT**, див. [`LICENSE`](LICENSE).
 

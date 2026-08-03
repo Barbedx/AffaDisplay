@@ -24,11 +24,20 @@ bool AffaDisplayBase::begin() {
                                          // transition, and firing SyncCb from inside
                                          // setup() would surprise every application
   const uint32_t now = _clock.millis();
-  _nextSyncMs     = now;                 // the first heartbeat leaves on the first poll()
+  _nextSyncMs     = now;                 // proactive profiles may heartbeat on the first poll;
+                                         // panel-initiated profiles remain silent until auth
   _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
   _ackDeadlineMs  = now;
   _nextHelloMs    = now;                 // pacing floors, not schedules: a re-begin() must
   _nextPongMs     = now;                 // not inherit a stale deadline across a clock wrap
+  _panelObserved          = false;       // profiles that wait for their panel start silent
+  _syncRequestObserved    = false;       // a bare 69 cannot open a Carminat session
+  _authRequestObserved    = false;       // `01` bootstrap cannot authorize app traffic
+  _authHelloPending       = false;
+  _helloPending           = false;
+  _unauthControlPending   = false;
+  _unauthControlIssued    = false;
+  _nextUnauthControlMs    = now;
   _lastCompleted  = kNoTicket;
   _lastEnqueued   = kNoTicket;
   _lastResult     = Result::Ok;
@@ -182,19 +191,20 @@ void AffaDisplayBase::reportLinkError(LinkErrorKind k, uint32_t count) {
   emit(ev);
 }
 
-bool AffaDisplayBase::txFrame(Frame f) {
+TxDisposition AffaDisplayBase::txFrame(Frame f, bool observeAccepted) {
   // The stamp is applied to our copy, never to the caller's buffer: a panel builder may
   // reuse its frame struct, and a stray fromSelf on a frame we later treat as inbound
   // would be silently ignored by the whole receive path.
   f.fromSelf = true;
-  if (!_link.send(f)) {
+  const TxDisposition disposition = _link.trySend(f);
+  if (disposition == TxDisposition::Rejected) {
     ++_txDropCount;
     reportLinkError(LinkErrorKind::TxDropped, _txDropCount);
-    return false;
+    return disposition;
   }
-  // A frame the link REFUSED is deliberately not observed: it never existed on the bus.
-  observe(f, Direction::Tx);
-  return true;
+  // A Busy or Rejected frame is deliberately not observed: it never existed on the bus.
+  if (disposition == TxDisposition::Accepted && observeAccepted) observe(f, Direction::Tx);
+  return disposition;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +242,12 @@ void AffaDisplayBase::pumpRx() {
     // 0x1C1 before it validated the key bytes. Never for the sync ids (that channel has
     // no ACK semantics) and never for an id we transmit on (an inbound frame there is an
     // echo or another node's traffic, and we owe it nothing).
-    if (!_passive && !isOurTxId(static_cast<uint16_t>(f.id)) && shouldAutoAck(f))
+    // A Carminat `69` is not authorization.  Until its `61 11` arrived, leave even
+    // unrelated panel frames observable to the application but do not answer them: a
+    // generic 0x74 would be traffic before the profile's opening exchange.
+    if (!_passive && (!_profile.requireAuthRequest ||
+                      (_authRequestObserved && !_authHelloPending)) &&
+        !isOurTxId(static_cast<uint16_t>(f.id)) && shouldAutoAck(f))
       sendGenericAck(static_cast<uint16_t>(f.id));
 
 #if AFFA_ENABLE_ISOTP_RX
@@ -292,6 +307,75 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
   if (f.len < 1) return true;
 
   if (f.data[0] == kSyncRequestByte0 && f.len >= 2 && f.data[1] == kSyncRequestByte1) {
+    // Carminat keeps two stages separate. Every full `61 11 xx` gets the proven hello
+    // response, but only `00` releases registration and payload traffic. `01` asks for
+    // one control bootstrap; it never becomes an authorization shortcut.
+    if (_profile.requireAuthRequest) {
+      // A short 61 11 has no byte 2 on the wire. Do not read stale storage or answer it.
+      if (f.len < 3) return true;
+
+      const uint32_t now = _clock.millis();
+      const bool firstSyncRequest = !_syncRequestObserved;
+      _panelObserved = true;
+      _syncRequestObserved = true;
+      _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
+
+      if (f.data[2] == _profile.authRequestByte2) {
+        // The good request may arrive while the previous hello burst is still inside its
+        // rate floor. Keep application TX closed until the hello that answers THIS phase
+        // has actually been emitted.
+        const bool needsHelloBeforeAuth =
+            !_authRequestObserved || _authHelloPending || hasFlag(_sync, SyncState::Failed);
+        _authRequestObserved = true;
+        if (needsHelloBeforeAuth) _authHelloPending = true;
+        // Do not cancel a START pair that was queued by a preceding 01 in this same RX
+        // drain. Legacy leaves START set across the later 00 until tick() emits B9+BA.
+        // Keeping that one pair preserves the wire exchange without allowing retries.
+        _unauthControlIssued = false;
+        if (firstSyncRequest || needsHelloBeforeAuth)
+          _nextSyncMs = now + AFFA_SYNC_INTERVAL_MS;
+        queueHello(now);
+        return true;
+      }
+
+      // A non-good request tears down any old registration. We still reply with hello:
+      // that is the legacy Carminat wire sequence, and it lets the panel progress to 00.
+      const bool wasAuthorized = _authRequestObserved || _authHelloPending ||
+                                 !hasFlag(_sync, SyncState::Failed);
+      _authRequestObserved = false;
+      _authHelloPending = false;
+      setSync(SyncState::Failed, EventKind::SyncChanged);
+      if (wasAuthorized) {
+        dropRegistrations();
+        for (uint8_t i = 0; i < _qCount; ++i) {
+          if (_queue[i].kind == JobKind::Payload && !_queue[i].started)
+            _queue[i].holdUntilMs = now + AFFA_TX_HOLD_MS;
+        }
+      }
+      queueHello(now);
+
+      // Only the observed START spelling gets the single control pair. Unknown xx values
+      // are hello-only; retransmitted 01 frames cannot rebuild a BA-per-second stream.
+      if (f.data[2] == kSyncStartFlag && _profile.oneShotResyncOnStart &&
+          !_unauthControlIssued) {
+        _unauthControlPending = true;
+        _nextUnauthControlMs = now;
+      }
+      return true;
+    }
+
+    const uint32_t now = _clock.millis();
+    const bool firstSyncRequest = !_syncRequestObserved;
+    _panelObserved = true;
+    _syncRequestObserved = true;
+    _authRequestObserved = true;          // retained for generic profiles; they have no gate
+    // Do not append a B9 to the three-frame hello response.  The first paced heartbeat is
+    // a full interval later; this keeps the opening exchange exactly hello -> registration.
+    if (firstSyncRequest) _nextSyncMs = now + AFFA_SYNC_INTERVAL_MS;
+    // A 61 11 is as conclusive a panel signal as a 69 for session startup.  Re-arm the
+    // wall-clock watchdog here so a display that takes a moment to start its 1 Hz pings
+    // cannot be declared lost immediately after it just asked us to authorize.
+    _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
     // THE ANSWER IS PACED, THE STATE IS NOT. An unacknowledged panel repeats this request
     // back to back at line rate — 1472 frames/s measured on the bench — and answering each
     // one with helloCount frames is ~4400 transmit attempts per second, far beyond what the
@@ -299,24 +383,15 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
     // TWAI transmit queue permanently, blocks the poll task inside sendFrame(), and starves
     // every render behind it, which is what a panel frozen in half-finished authorisation
     // actually looks like from the outside. See AFFA_HELLO_MIN_MS.
-    const uint32_t now = _clock.millis();
-    if (expired(now, _nextHelloMs)) {
-      _nextHelloMs = now + AFFA_HELLO_MIN_MS;
-      for (uint8_t i = 0; i < _profile.helloCount; ++i) {
-        Frame h;
-        h.id  = _profile.syncId;
-        h.len = kPacketLength;
-        std::memcpy(h.data, _profile.hello[i], kPacketLength);
-        txFrame(h);
-      }
-    }
+    queueHello(now);
     SyncState s = _sync & ~SyncState::Failed;
 
-    // data[2] == 0x01 IS THE PANEL SAYING OUR REGISTRATION IS VOID, and under-reacting to
-    // it is how a link deadlocks until somebody power-cycles the rig.
+    // For profiles without an explicit auth-byte gate, data[2] == 0x01 says registration
+    // is void, and under-reacting to it is how a link deadlocks until somebody power-cycles
+    // the rig. Carminat rejects 01 above; it never reaches this compatibility path.
     //
-    // Every implementation of this protocol latches Start here — which re-arms the 0xBA
-    // sync request — and LEAVES FUNCSREG SET. So we go on believing we are registered, the
+    // The legacy compatibility path latched Start here — which re-arms the 0xBA sync
+    // request — and LEAVES FUNCSREG SET. So we go on believing we are registered, the
     // lazy registration in pumpTx() never runs again, and the panel goes on asking. At line
     // rate: 1472 frames/s measured on the bench 2026-07-29, for hours, which is what a
     // panel that has given up on us looks like.
@@ -362,6 +437,18 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
   }
 
   if (f.data[0] == kSyncPeerAlive) {
+    const uint32_t now = _clock.millis();
+    const bool firstPanelFrame = !_panelObserved;
+    _panelObserved = true;
+
+    // The Carminat panel's `69` is just an alive ping.  In particular, it is not a
+    // substitute for `61 11`: it may arrive before, after, or independently of the
+    // bootstrap. A bare ping never creates a session or puts a B9 on the wire. Once a
+    // complete 61 11 was seen, a paced B9 is allowed even while we still wait for 00.
+    if (_profile.requireAuthRequest && !_syncRequestObserved) return true;
+
+    if (firstPanelFrame) _nextSyncMs = now + AFFA_SYNC_INTERVAL_MS;
+    _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
     // PeerAlive is a transient the watchdog consumes on the next heartbeat, not a state
     // an application cares about, so it is set directly and fires no event: it toggles
     // at the panel's ~1 Hz ping rate and would be pure noise on the event sink.
@@ -377,11 +464,15 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
     // from OUR loop (pumpSync consumes PeerAlive), and no BA rides along. Only the alive
     // frame, and only at AFFA_PING_REPLY_MIN_MS — an unacknowledged panel repeats this
     // ping at line rate, and a reply per copy would be the hello storm's twin.
-    if (_profile.replyToPing) {
-      const uint32_t now = _clock.millis();
+    if (_profile.replyToPing && !_unauthControlPending) {
       if (expired(now, _nextPongMs)) {
-        _nextPongMs = now + AFFA_PING_REPLY_MIN_MS;
-        sendAlive();
+        // Rate-limit unsuccessful offers too: a no-ACK listener can repeat 69 at line
+        // rate while the local TX queue is full. The next panel ping retries after the
+        // same bounded floor, but a Busy offer is never claimed as an emitted pong.
+        const TxDisposition pong = sendAlive();
+        _nextPongMs = now + (pong == TxDisposition::Accepted
+                                  ? AFFA_PING_REPLY_MIN_MS
+                                  : AFFA_TX_RETRY_MS);
       }
     }
     return true;
@@ -495,10 +586,10 @@ void AffaDisplayBase::pumpLink() {
   if (_health.downSince == 0) {
     _health.downSince = now;
     ++_health.flaps;
-    // The FIRST attempt is a full AFFA_LINK_RECOVER_MS away, not immediate. A controller
-    // that has just gone bus-off with forceRecoveryMs armed is ALREADY being restarted by
-    // the driver's own watchdog task, and a second restart racing that one is how a clean
-    // recovery becomes a wedge. Let the cheap path have its chance first.
+    // The FIRST attempt is a full AFFA_LINK_RECOVER_MS away, not immediate. Direct TWAI
+    // needs a short bus-free interval after BUS_OFF before recover() can restart it; a
+    // second lifecycle transition during that interval is how a clean recovery becomes a
+    // wedge. Let the driver finish its cheap path first.
     _recoverBackoffMs = AFFA_LINK_RECOVER_MS;
     _health.nextTryMs = now + AFFA_LINK_RECOVER_MS;
   }
@@ -564,8 +655,21 @@ void AffaDisplayBase::pumpLink() {
   // from.
   setSync(SyncState::Failed | SyncState::Start, EventKind::PeerLost);
   dropRegistrations();
+  // A newly installed controller must not resurrect an old Carminat session by itself.
+  // The panel owns the opening message; wait for its next 61 11 and keep this node silent
+  // until then.  Other profiles retain their existing proactive behavior.
+  if (_profile.waitForPanel) _panelObserved = false;
+  _syncRequestObserved  = false;
+  _authRequestObserved  = false;
+  _authHelloPending     = false;
+  _helloPending         = false;
+  _unauthControlPending = false;
+  _unauthControlIssued  = false;
+  _nextUnauthControlMs  = now;
   _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
   _nextSyncMs     = now;                      // handshake on the very next poll()
+  _nextHelloMs    = now;
+  _nextPongMs     = now;
   for (uint8_t i = 0; i < _qCount; ++i) {
     if (_queue[i].kind == JobKind::Payload && !_queue[i].started)
       _queue[i].holdUntilMs = now + AFFA_TX_HOLD_MS;
@@ -577,7 +681,7 @@ void AffaDisplayBase::pumpLink() {
 // Sync FSM — ONE copy, parameterised by SyncProfile
 // ---------------------------------------------------------------------------
 
-void AffaDisplayBase::sendAlive() {
+TxDisposition AffaDisplayBase::sendAlive() {
   Frame alive;
   alive.id      = _profile.syncId;
   alive.len     = kPacketLength;
@@ -585,18 +689,94 @@ void AffaDisplayBase::sendAlive() {
   alive.data[1] = 0x00;                   // a literal 0x00 in BOTH families, NOT the
                                           // filler: UpdateList sends 79 00 81 81 …
   for (uint8_t i = 2; i < kPacketLength; ++i) alive.data[i] = _profile.filler;
-  txFrame(alive);
+  return txFrame(alive);
+}
+
+TxDisposition AffaDisplayBase::sendSyncRequest() {
+  Frame req;
+  req.id      = _profile.syncId;
+  req.len     = kPacketLength;
+  req.data[0] = _profile.requestByte;
+  req.data[1] = _profile.requestArg;
+  for (uint8_t i = 2; i < kPacketLength; ++i) req.data[i] = _profile.filler;
+  return txFrame(req);
+}
+
+void AffaDisplayBase::queueHello(uint32_t now) {
+  // A listener with no CAN ACK makes the panel retry the same request at line rate. One
+  // pending response is enough: all full 61 11 variants share the exact hello bytes.
+  if (expired(now, _nextHelloMs)) {
+    sendHelloBurst(now);
+  } else {
+    _helloPending = true;
+  }
+}
+
+bool AffaDisplayBase::sendHelloBurst(uint32_t now) {
+  for (uint8_t i = 0; i < _profile.helloCount; ++i) {
+    Frame h;
+    h.id  = _profile.syncId;
+    h.len = kPacketLength;
+    std::memcpy(h.data, _profile.hello[i], kPacketLength);
+    if (txFrame(h) != TxDisposition::Accepted) {
+      // The already accepted prefix is harmless: the legacy hello is idempotent. Start the
+      // next burst over after a short floor, but never let a partial one release auth.
+      _helloPending = true;
+      _nextHelloMs = now + AFFA_TX_RETRY_MS;
+      return false;
+    }
+  }
+
+  const uint32_t helloFloor = _profile.helloMinMs ? _profile.helloMinMs : AFFA_HELLO_MIN_MS;
+  _nextHelloMs = now + helloFloor;
+  _helloPending = false;
+
+  // The good 00 may have arrived inside the hello rate floor after an 01 bootstrap. It is
+  // authorized only after this burst has been emitted; that prevents registration/time
+  // from overtaking the hello sequence in the same poll.
+  if (_authHelloPending) {
+    _authHelloPending = false;
+    setSync((_sync & ~SyncState::Failed & ~SyncState::Start), EventKind::SyncChanged);
+  }
+  return true;
 }
 
 void AffaDisplayBase::pumpSync() {
   if (_passive) return;                   // the radio owns the handshake
 
   const uint32_t now = _clock.millis();
-  if (!expired(now, _nextSyncMs)) return;
 
-  // `= now + interval`, never `+= interval`: a caller that stalled for ten seconds must
-  // not produce a catch-up burst of ten heartbeats.
-  _nextSyncMs = now + AFFA_SYNC_INTERVAL_MS;
+  // Coalesce a line-rate 61 11 retry storm to one pending hello burst. This happens before
+  // the authorization gate: a deferred good 00 must be able to finish its own handshake.
+  if (_helloPending && expired(now, _nextHelloMs)) sendHelloBurst(now);
+
+  // The Carminat START / 01 bootstrap is intentional but bounded: exactly B9 then BA,
+  // once, after RX has drained. It is neither a periodic failure retry nor authorization.
+  if (_unauthControlPending) {
+    if (!expired(now, _nextUnauthControlMs)) return;
+    // The pair is a transaction at the protocol layer: neither a locally busy B9 nor a
+    // locally busy BA may consume the one-shot. If B9 was accepted but BA was not, retry
+    // the complete idempotent pair after a bounded delay rather than claiming START ended.
+    if (sendAlive() != TxDisposition::Accepted ||
+        sendSyncRequest() != TxDisposition::Accepted) {
+      _nextUnauthControlMs = now + AFFA_TX_RETRY_MS;
+      return;
+    }
+    _unauthControlPending = false;
+    _unauthControlIssued  = true;
+    _nextSyncMs = now + AFFA_SYNC_INTERVAL_MS;
+    _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
+    return;
+  }
+
+  // AFFA3 NAV is panel-initiated.  `begin()` is deliberately quiet: treating the initial
+  // FAILED state as permission to send BA was the source of a BA frame every second before
+  // a display was even attached.  A valid panel frame flips this latch in handleSyncFrame().
+  if (_profile.waitForPanel && !_panelObserved) return;
+  // On AFFA3 NAV a `69` only says the panel is alive. Only the completed good `61 11 00`
+  // authorization (and its hello) allows normal heartbeat, registration and rendering.
+  if (_profile.requireAuthRequest && (!_authRequestObserved || _authHelloPending)) return;
+  if (!expired(now, _nextSyncMs)) return;
 
   // THE PACING FLOORS MUST NOT GO WRAP-STALE. Each is re-armed only by the event it gates
   // (a hello burst, a pong), so 2^31 ms without that event flips expired()'s signed
@@ -607,16 +787,18 @@ void AffaDisplayBase::pumpSync() {
   if (expired(now, _nextHelloMs)) _nextHelloMs = now;
   if (expired(now, _nextPongMs))  _nextPongMs  = now;
 
-  sendAlive();
+  if (sendAlive() != TxDisposition::Accepted) {
+    // A running controller may only be locally queue-full. No sync state changes until its
+    // raw B9 offer was accepted, and the short retry floor keeps a tight poll loop benign.
+    _nextSyncMs = now + AFFA_TX_RETRY_MS;
+    return;
+  }
 
   if (hasFlag(_sync, SyncState::Failed) || hasFlag(_sync, SyncState::Start)) {
-    Frame req;
-    req.id      = _profile.syncId;
-    req.len     = kPacketLength;
-    req.data[0] = _profile.requestByte;
-    req.data[1] = _profile.requestArg;
-    for (uint8_t i = 2; i < kPacketLength; ++i) req.data[i] = _profile.filler;
-    txFrame(req);
+    if (_profile.sendSyncRequest && sendSyncRequest() != TxDisposition::Accepted) {
+      _nextSyncMs = now + AFFA_TX_RETRY_MS;
+      return;
+    }
 
     _sync &= ~SyncState::Start;
     // Re-arm the peer window on leaving this branch, so a link that has just been asked
@@ -638,6 +820,14 @@ void AffaDisplayBase::pumpSync() {
               static_cast<unsigned>(kSyncPeerAlive), static_cast<int>(AFFA_PEER_TIMEOUT_MS));
     setSync(SyncState::Failed, EventKind::PeerLost);   // every other bit, FuncsReg
                                                        // included, is dropped
+    if (_profile.waitForPanel) _panelObserved = false; // wait for its next 61 11, silently
+    _syncRequestObserved  = false;
+    _authRequestObserved  = false;
+    _authHelloPending     = false;
+    _helloPending         = false;
+    _unauthControlPending = false;
+    _unauthControlIssued  = false;
+    _nextUnauthControlMs  = now;
     _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
 
     // THE QUEUE SURVIVES THE PEER NOW. This used to be dropUnstarted(Cancelled) — the panel
@@ -654,6 +844,11 @@ void AffaDisplayBase::pumpSync() {
         _queue[i].holdUntilMs = now + AFFA_TX_HOLD_MS;
     }
   }
+
+  // `= now + interval`, never `+= interval`: a caller that stalled for ten seconds must
+  // not produce a catch-up burst of ten heartbeats. It happens only after the raw work
+  // above was accepted; a Busy offer gets the shorter retry floor instead.
+  _nextSyncMs = now + AFFA_SYNC_INTERVAL_MS;
 }
 
 void AffaDisplayBase::setSync(SyncState s, EventKind extra) {
@@ -897,6 +1092,7 @@ void AffaDisplayBase::armRetry(TxJob& job, uint32_t now, bool torn, bool extendH
 bool AffaDisplayBase::linkReady() const {
   if (!_link.isLive()) return false;
   if (_passive) return true;
+  if (_profile.requireAuthRequest && (!_authRequestObserved || _authHelloPending)) return false;
   return !hasFlag(_sync, SyncState::Failed);
 }
 
@@ -982,8 +1178,13 @@ void AffaDisplayBase::pumpTx() {
   f.len = kPacketLength;
   uint8_t i = 0;
   if (job.frameIndex > 0) f.data[i++] = isoTpCf(job.frameIndex);
-  while (i < kPacketLength && job.sent < job.len) f.data[i++] = job.data[job.sent++];
-  const bool more = (job.sent < job.len);
+  // Build against a local cursor. `job.sent` is protocol state, not a staging cursor: a
+  // locally full controller has not accepted any bytes, so it stays unchanged until the
+  // link accepts this frame.
+  uint8_t proposedSent = job.sent;
+  while (i < kPacketLength && proposedSent < job.len)
+    f.data[i++] = job.data[proposedSent++];
+  const bool more = (proposedSent < job.len);
   const uint8_t filler = packetFiller();
   while (i < kPacketLength) f.data[i++] = filler;
 
@@ -997,23 +1198,34 @@ void AffaDisplayBase::pumpTx() {
   // already past zero, and an Urgent enqueue spliced itself in at index 0 and inherited
   // the WaitAck. Set first, and the send failure path below clears it again via
   // finishJob().
-  job.started = true;         // from here this job is no longer preemptable
+  // Offer before committing. A transient local queue-full is not a wire failure and must
+  // not consume a byte, start a job, emit a Tx tap, or spend a protocol retry. The bounded
+  // ready deadline makes a busy driver benign even when poll() is called in a tight loop.
+  const TxDisposition offered = txFrame(f, /*observeAccepted=*/false);
+  if (offered == TxDisposition::Busy) {
+    job.readyAtMs = now + AFFA_TX_RETRY_MS;
+    return;
+  }
 
-  // A REFUSAL BY A LINK THAT SAYS IT IS DOWN IS LinkDown, NOT SendFailed. The distinction
-  // decides whether this job is retried: the TX gate shut for an OTA, or a controller
-  // mid-bus-off recovery, is silence and will pass; a live link refusing a frame is the
-  // driver's queue and is reported as it always was.
-  if (!txFrame(f)) {
+  // A hard refusal by a link that says it is down is LinkDown, not SendFailed. The
+  // distinction decides whether this job is held for recovery; a live hard refusal remains
+  // the existing terminal driver verdict for legacy boolean links.
+  if (offered != TxDisposition::Accepted) {
     finishJob(_link.isLive() ? Result::SendFailed : Result::LinkDown);
     return;
   }
 
+  // Commit only AFTER acceptance, but BEFORE the Tx observation callback. Callbacks may
+  // enqueue, coalesce, abortPending or abortAll, and all of them must see this frame as an
+  // in-flight, non-preemptable job. Set WaitAck before observe for the same reason; no
+  // reference into _queue is used after observe because callbacks may move the queue.
+  job.sent    = proposedSent;
+  job.started = true;
   _ackDeadlineMs = now + AFFA_ACK_TIMEOUT_MS;
   _tx            = TxState::WaitAck;
-
-  // Bench self-ACK stays in WaitAck for exactly one pass so the frame sequence is
-  // identical to a real send.
   if (_selfAck) _selfAckPending = more ? SelfAck::Partial : SelfAck::Done;
+  f.fromSelf = true;
+  observe(f, Direction::Tx);
 }
 
 void AffaDisplayBase::creditAck(bool done) {
@@ -1255,6 +1467,9 @@ Result AffaDisplayBase::transmitKey(Key k, KeyEdge e) {
     return Result::NotSupported;
   }
   if (!_link.isLive()) return Result::LinkDown;
+  if (!_passive && _profile.requireAuthRequest &&
+      (!_authRequestObserved || _authHelloPending))
+    return Result::NoSync;
 
   Frame f;
   f.id      = id;
@@ -1267,7 +1482,11 @@ Result AffaDisplayBase::transmitKey(Key k, KeyEdge e) {
   // Bytes 4..7 stay literal zero and are NOT packetFiller(): that is what the capture of
   // our own emulated key frame shows.
 
-  return txFrame(f) ? Result::Ok : Result::SendFailed;
+  // A wire key is intentionally not queued behind display traffic, so there is no public
+  // Busy result to return. Its immediate caller sees the historical SendFailed on either a
+  // temporary local-busy or a hard refusal; only queued display payloads get automatic
+  // Busy retry semantics.
+  return txFrame(f) == TxDisposition::Accepted ? Result::Ok : Result::SendFailed;
 }
 
 Result AffaDisplayBase::pressKey(Key k, KeyEdge e, KeySource src) {
@@ -1362,6 +1581,7 @@ void AffaDisplayBase::setPassive(bool on) {
     _nextSyncMs     = now;
     _nextHelloMs    = now;
     _nextPongMs     = now;
+    _nextUnauthControlMs = now;
     _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
   }
   _passive = on;
@@ -1370,7 +1590,10 @@ bool AffaDisplayBase::passive() const { return _passive; }
 void AffaDisplayBase::setSelfAck(bool on) { _selfAck = on; }
 
 SyncState AffaDisplayBase::syncState() const { return _sync; }
-bool      AffaDisplayBase::synced() const { return !hasFlag(_sync, SyncState::Failed); }
+bool AffaDisplayBase::synced() const {
+  if (hasFlag(_sync, SyncState::Failed)) return false;
+  return !_profile.requireAuthRequest || (_authRequestObserved && !_authHelloPending);
+}
 bool      AffaDisplayBase::registered() const { return hasFlag(_sync, SyncState::FuncsReg); }
 bool      AffaDisplayBase::busy() const { return _qCount > 0; }
 Result    AffaDisplayBase::lastResult() const { return _lastResult; }

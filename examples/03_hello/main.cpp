@@ -43,12 +43,8 @@ namespace {
 
 // ESP32-C3 SuperMini + transceiver. RX FIRST — the named fields are what stop the swap
 // from becoming a silent bus with no error anywhere.
-constexpr affa::CanPins kPins{ .rx = GPIO_NUM_4, .tx = GPIO_NUM_3 };
+constexpr affa::CanPins kPins{ .rx = GPIO_NUM_3, .tx = GPIO_NUM_4 };
 constexpr uint32_t      kBitrate = 500000;
-
-// Bus-off auto-recovery. 250 ms, measured: 0 leaves a bus-off in TWAI_STATE_STOPPED for
-// ever and reads exactly like a dead transceiver; 2000 accumulates inside setup().
-constexpr uint32_t kForceRecoveryMs = 250;
 
 // The panel needs a moment after power-on before anything drawn on it is visible.
 constexpr uint32_t kWarmUpMs = 750;
@@ -98,7 +94,7 @@ void setup() {
   delay(300);
   Serial.println("\nAffaDisplay 03_hello");
 
-  if (!g_link.begin(kPins, kBitrate, kForceRecoveryMs))
+  if (!g_link.begin(kPins, kBitrate))
     Serial.println("[can] controller did not come up");
 
   // THE ORDER IS THE CONTRACT: callbacks, then begin(), then start(). start() refuses a

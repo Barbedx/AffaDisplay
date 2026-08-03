@@ -6,13 +6,12 @@ namespace affa {
 
 // Lock-free single-producer / single-consumer ring.
 //
-// Producer = the esp32_can general callback, running in task_CAN (prio 15, unpinned, so
-//            possibly a different core from the consumer).
+// Producer = the direct-TWAI RX task, which copies a received driver frame and returns.
 // Consumer = whatever task calls AffaDisplayBase::poll().
 //
 // Exactly one thread may call push(); exactly one may call pop(). Two producers or two
 // consumers corrupt it silently — there is no lock and there is not going to be one,
-// because push() runs in a driver task that must never block. It must also stay
+// because push() runs in an RX task that must never block. It must also stay
 // consistent if that task is deleted mid-push, which the publish-last store below
 // guarantees: at worst the in-flight frame is lost.
 //

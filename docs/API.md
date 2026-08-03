@@ -8,10 +8,16 @@ This document is the specification the core implementer codes against. Every typ
 referenced here is declared here. Where a declaration in this document and a comment in
 the source disagree, this document wins until it is amended.
 
+> **Direct-TWAI migration notice.** Transport-specific statements below that name
+> `esp32_can`, `CAN0`, callbacks, or `watchFor()` are historical context from the former
+> wrapper implementation, not requirements for the current code. The current ESP32 link
+> contract is the direct ESP-IDF TWAI contract in `docs/ESP32CAN-CONTRACT.md`.
+
 Companion documents:
 
 * `docs/WIRE-SPEC.md` — the byte-level frame layouts and where each byte was observed.
-* `docs/ESP32CAN-CONTRACT.md` — the prohibition list for the collin80/esp32_can driver.
+* `docs/ESP32CAN-CONTRACT.md` — the direct ESP-IDF TWAI ownership, RX/TX, and recovery
+  contract.
 
 ---
 
@@ -59,7 +65,7 @@ first so that a reviewer can check the design against its purpose.
 
 `Host` = must compile for `platform = native` with nothing but the C++17 standard
 library (`<cstdint>`, `<cstddef>`, `<cstring>`, `<atomic>`, `<type_traits>`). No
-`<Arduino.h>`, no `<esp32_can.h>`, no FreeRTOS headers, no `String`, no `std::vector`,
+`<Arduino.h>`, no `<driver/twai.h>`, no FreeRTOS headers, no `String`, no `std::vector`,
 no `std::function`, no heap after `begin()`.
 
 | File | Contents | May include | Host |
@@ -80,7 +86,7 @@ no `std::function`, no heap after `begin()`.
 | `util/AffaText.{h,cpp}` | `toAscii`, `normalizeTitle`. Pure C API, no allocation. **`.cpp` body gated on `AFFA_ENABLE_TRANSLITERATION`.** | `<cstdint>`, `<cstddef>`, `<cstring>` | yes |
 | `link/LoopbackLink.h` | `LoopbackLink` — header-only test double: records TX, injects RX, optional synthetic ACK. | `core/*` | yes |
 | `link/Esp32CanLink.h` | `CanPins`, `Esp32CanLink`. Includes `<driver/gpio.h>` **only** for `gpio_num_t`. Entire body gated on `AFFA_ENABLE_ESP32CAN_LINK`. | `core/*`, `<driver/gpio.h>` | no |
-| `link/Esp32CanLink.cpp` | **The only file in the library permitted to `#include <esp32_can.h>`.** Driver bring-up, the general-callback trampoline, the software TX gate. Entire body gated. | `<esp32_can.h>` | no |
+| `link/Esp32CanLink.cpp` | **The only file in the library permitted to `#include <driver/twai.h>`.** Direct driver lifecycle, bounded RX task, and non-blocking TX gate. Entire body gated. | `<driver/twai.h>` | no |
 | `proto/IsoTp.{h,cpp}` | `IsoTp::fragment()` (the transmit layout, shared with the TX FSM) and `IsoTp::Reassembler` (the receive direction). Entire `.cpp` body gated on `AFFA_ENABLE_ISOTP_RX`. | `core/AffaTypes.h` | yes |
 | `proto/ScreenModel.h` | `ScreenModel` — the decoded "what is on the panel" state. A plain aggregate, no methods beyond `clear()`. Header-only, so it costs nothing unless something instantiates it. | `<cstdint>` | yes |
 | `proto/ScreenDecode.{h,cpp}` | Payload offsets and `menu()` / `segText()` / `frame()` / `asciiz()` — reassembled bytes → `ScreenModel`. Same gate as `IsoTp.cpp`. | `ScreenModel.h`, `core/AffaTypes.h` | yes |
@@ -110,9 +116,8 @@ no `std::function`, no heap after `begin()`.
   does not learn what a task is — and it is host-tested through that seam
   (`test_owned_task`).
 
-* `<esp32_can.h>` appears exactly once in the repository, in `link/Esp32CanLink.cpp`.
-  A CI grep asserts this. The original code's `Menu.h` included it for `CAN_FRAME`;
-  the port removes that include and the `handleMessage(const CAN_FRAME&)` method with it.
+* `<driver/twai.h>` is confined to `link/Esp32CanLink.cpp`. The original wrapper's
+  `CAN_FRAME` type is not part of the public API; `affa::Frame` keeps `core/` portable.
 * `<Arduino.h>` is permitted only in `link/Esp32CanLink.cpp` and in panel `.cpp` files,
   and even there only if something genuinely needs it. Prefer `<cstring>`/`<cstdio>`.
   `AuxModeTracker` and `Menu` used to include it; the port did not, and `AuxModeTracker`
@@ -1179,8 +1184,8 @@ namespace affa {
 
 // Named so the two pins cannot be swapped at the call site. They have been, and the
 // symptom is a silent bus: no TX error, no RX, nothing.
-//   this board (ESP32-C3 SuperMini) : rx = GPIO_NUM_4, tx = GPIO_NUM_3
-//   MeganeCAN's board is MIRRORED   : rx = GPIO_NUM_3, tx = GPIO_NUM_4
+//   this board (ESP32-C3 SuperMini) : rx = GPIO_NUM_3, tx = GPIO_NUM_4
+//   pre-2026-08-03 bench wiring     : rx = GPIO_NUM_4, tx = GPIO_NUM_3 (historical)
 struct CanPins { gpio_num_t rx; gpio_num_t tx; };
 
 // THE ONLY CLASS IN THIS LIBRARY THAT KNOWS A DRIVER EXISTS.
@@ -2833,7 +2838,7 @@ ArduinoClock         clock;                       // your 3-line IClock
 affa::CarminatDisplay display(link, clock);
 
 void setup() {
-  link.begin(affa::CanPins{.rx = GPIO_NUM_4, .tx = GPIO_NUM_3}, 500000);
+  link.begin(affa::CanPins{.rx = GPIO_NUM_3, .tx = GPIO_NUM_4}, 500000);
   display.onKey(onKey, nullptr);
   display.onComplete(onDone, nullptr);
   display.begin();

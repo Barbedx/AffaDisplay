@@ -296,12 +296,12 @@ class AffaDisplayBase : public IDisplay, public IPanel {
     RenderSlot slot       = RenderSlot::None;   // coalescing key, together with funcId
     Priority   prio       = Priority::Normal;
     bool       coalesce   = false;      // false = this message is never replaced
-    bool       started    = false;      // one byte has gone to ICanLink::send(). THE SINGLE
-                                        // AUTHORITY for "not yet started" — never infer it
+    bool       started    = false;      // one byte was accepted by ICanLink::trySend(). THE
+                                        // SINGLE AUTHORITY for "not yet started" — never infer it
                                         // from queue position, TxState or frameIndex.
     bool       abandon    = false;      // abortAll() asked; honoured at a frame boundary
     uint8_t    len        = 0;
-    uint8_t    sent       = 0;          // bytes already handed to the link
+    uint8_t    sent       = 0;          // bytes already accepted by the link
     uint8_t    frameIndex = 0;          // ISO-TP continuation counter `num`
     uint8_t    tries      = 0;          // transmit attempts already made and failed
     uint32_t   readyAtMs  = 0;          // not startable before this: retry backoff, or the
@@ -339,16 +339,24 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // The choke point every frame passes through in BOTH directions, so a sniffer sees the
   // whole bus in order.
   void observe(const Frame& f, Direction d);
-  bool txFrame(Frame f);            // BY VALUE: the fromSelf stamp must not leak back into
-                                    // the caller's buffer, which panels may reuse.
+  // `observeAccepted` is normally true. pumpTx() turns it off so it can commit the head
+  // job's byte count immediately AFTER the link accepted the frame but BEFORE callbacks
+  // observe it; that preserves Tx callback re-entrancy without committing bytes when a
+  // locally busy controller declined the offer.
+  TxDisposition txFrame(Frame f, bool observeAccepted = true);
   void reportLinkError(LinkErrorKind k, uint32_t count);
 
   bool handleSyncFrame(const Frame& f);
   bool handleAckFrame(const Frame& f);
   void sendGenericAck(uint16_t id);      // the 0x74 reply on id|replyFlag
-  void sendAlive();                      // the B9/79 heartbeat frame — ONE builder, so the
+  TxDisposition sendAlive();             // the B9/79 heartbeat frame — ONE builder, so the
                                          // paced tick and the reply-to-ping path cannot
                                          // drift apart byte-wise
+  TxDisposition sendSyncRequest();       // the BA/7A frame, shared by normal and one-shot
+                                         // recovery so their bytes cannot drift either
+  void queueHello(uint32_t now);         // emits now or coalesces one paced reply
+  bool sendHelloBurst(uint32_t now);     // exact profile hello sequence; true only when
+                                         // every raw hello frame was accepted
   bool isOurTxId(uint16_t id) const;
   bool knownFunc(uint16_t id) const;
 
@@ -409,6 +417,29 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // same reason: the storm repeats `69` at line rate too. See AFFA_PING_REPLY_MIN_MS.
   uint32_t  _nextPongMs     = 0;
   SyncState _sync = SyncState::Failed;
+  // Carminat is panel-initiated.  This stays false from begin() until valid panel traffic
+  // reaches us, preventing the legacy FAILED -> BA-per-second startup storm.
+  bool      _panelObserved = false;
+  // A complete `61 11 xx` was received. This is deliberately not the same as a `69`:
+  // Carminat may answer a ping after the bootstrap, but a bare ping never opens the bus.
+  bool      _syncRequestObserved = false;
+  // Some profiles make an explicit distinction between the panel being alive (`69`) and
+  // authorizing application traffic (`61 11 00`). For those profiles an early ping or
+  // `61 11 01` bootstrap must never unlock registration or rendering.
+  bool      _authRequestObserved = false;
+  // A good authorization was seen but its required hello burst is still rate-limited. It
+  // keeps TX gated until the panel has actually received (or at least been offered) hello.
+  bool      _authHelloPending = false;
+  // A request repeated without CAN ACK is not permission to enqueue another full hello
+  // burst. One deferred reply preserves the latest protocol state without a TX storm.
+  bool      _helloPending = false;
+  // `61 11 01` gets exactly one B9 + BA bootstrap for profiles that ask for it. The first
+  // flag schedules it after RX has drained; the second suppresses every retransmission.
+  bool      _unauthControlPending = false;
+  bool      _unauthControlIssued = false;
+  // Separate from _nextSyncMs: a START followed by 00 in the same RX drain still emits its
+  // legacy B9 + BA immediately, but a locally busy controller is not hammered every poll.
+  uint32_t  _nextUnauthControlMs = 0;
   TxTicket  _nextTicket    = 1;
   TxTicket  _lastCompleted = kNoTicket;
   TxTicket  _lastEnqueued  = kNoTicket;
@@ -423,7 +454,7 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   TaskIdFn  _pollOwnerFn = nullptr;
   uint32_t  _foreignPolls = 0;  // poll() calls from a task that is not the owner
   uint32_t  _lastOverflow = 0;  // last ICanLink ringOverflow we reported
-  uint32_t  _txDropCount  = 0;  // frames ICanLink::send() refused, counted here so the
+  uint32_t  _txDropCount  = 0;  // frames ICanLink::trySend() hard-refused, counted here so the
                                 // LinkError event does not need a driver status read
 
   // Link recovery. `_linkDownSince` is 0 when the link is live, which is what makes it both

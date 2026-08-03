@@ -11,8 +11,8 @@
 //      wire. Note the controller still ACKs in hardware while the gate is shut, which is
 //      what makes the test meaningful on a two-node bus: if we could decode a frame we
 //      would acknowledge it, so busErr still climbing with rxFrames at 0 means we genuinely
-//      cannot decode. True listen-only is NOT available — Esp32CanLink::begin() refuses
-//      LinkMode::ListenOnly, because this driver has no safe place to enter it.
+//      cannot decode. The direct link also supports true listen-only, but this test uses
+//      the normal controller plus the software gate so it keeps hardware ACK enabled.
 //   3. Proves we can WRITE — the bring-up sequence: power on, WAIT for the panel to
 //      actually light up, then "SUCCESS", then the clock at 10:00.
 //
@@ -61,23 +61,18 @@ namespace {
 // ---------------------------------------------------------------------------
 // Board
 // ---------------------------------------------------------------------------
-// ESP32-C3 SuperMini on the bench rig: rx = GPIO4, tx = GPIO3. The named struct is what
-// stops the swap from becoming a silent bus with no error anywhere. -D AFFA_PINS_MIRRORED=1
-// tries the other orientation, which is how the same module is soldered on some boards.
+// ESP32-C3 SuperMini on the bench rig: CRX/RXD -> GPIO3, CTX/TXD -> GPIO4.
+// The named struct is what stops the swap from becoming a silent bus with no error anywhere.
+// -D AFFA_PINS_MIRRORED=1 selects the pre-2026-08-03 orientation for an older rig.
 #ifndef AFFA_PINS_MIRRORED
 #  define AFFA_PINS_MIRRORED 0
 #endif
 #if AFFA_PINS_MIRRORED
-constexpr affa::CanPins kPins{ .rx = GPIO_NUM_3, .tx = GPIO_NUM_4 };
-#else
 constexpr affa::CanPins kPins{ .rx = GPIO_NUM_4, .tx = GPIO_NUM_3 };
+#else
+constexpr affa::CanPins kPins{ .rx = GPIO_NUM_3, .tx = GPIO_NUM_4 };
 #endif
 constexpr uint32_t kBitrate = 500000;
-
-// 250 ms, MEASURED — not 0 and not 2000. 0 leaves a bus-off in TWAI_STATE_STOPPED for ever
-// (rxFrames 0, nothing climbing, reads exactly like a dead transceiver); 2000 accumulates
-// inside setup() and the board answers its first HTTP request three minutes after boot.
-constexpr uint32_t kForceRecoveryMs = 250;
 
 constexpr const char* kWifiNamespace = "megaopen";  // read-only: ssid / pass
 constexpr const char* kOwnNamespace  = "affa1";     // ours: the boot mode, and only that
@@ -554,10 +549,10 @@ void jStatus() {
      static_cast<unsigned long>(st.foreignPolls),
      static_cast<unsigned long>(st.stackFreeBytes));
 
-  // The controller. A SINGLE SAMPLE OF THIS IS NOT THE TRUTH — with forceRecovery armed, a
-  // continuously failing bus cycles counters-zero -> rxErr 129 -> busErr climbing -> bus-off
-  // -> reinstall -> counters-zero. Read `flaps` and `downMs` for the shape, busErr for the
-  // cause, and sample several times over ~40 s before concluding anything.
+  // The controller. A SINGLE SAMPLE OF THIS IS NOT THE TRUTH — library-owned recovery can
+  // cycle counters-zero -> rxErr 129 -> busErr climbing -> bus-off -> restart ->
+  // counters-zero. Read `flaps` and `downMs` for the shape, busErr for the cause, and
+  // sample several times over ~40 s before concluding anything.
   jf("\"drv\":{\"valid\":%s,\"state\":%u,\"txErr\":%lu,\"rxErr\":%lu,\"busErr\":%lu,"
      "\"arbLost\":%lu,\"rxMissed\":%lu,\"restarts\":%lu},",
      drv.valid ? "true" : "false", static_cast<unsigned>(drv.state),
@@ -935,9 +930,9 @@ void setup() {
   //    and returns in milliseconds, so OTA is still reachable moments later — the way back
   //    in is delayed, never lost.
   //
-  //    ALWAYS LinkMode::Normal: begin() refuses ListenOnly outright and would return false,
-  //    leaving the board with no link at all. The software gate below is the substitute.
-  g_canUp = g_link.begin(kPins, kBitrate, kForceRecoveryMs);
+  //    Start in normal mode. The software gate below is the diagnostic quiet period: it
+  //    suppresses our TX while retaining hardware ACK for the other bus participant.
+  g_canUp = g_link.begin(kPins, kBitrate);
 
   // 3. THE ORDER IS THE CONTRACT: callbacks, then begin(), then start(). start() refuses a
   //    display that was never begun, and callbacks installed after the task is running

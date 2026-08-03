@@ -3,6 +3,15 @@
 
 namespace affa {
 
+// What happened to one non-blocking transmit offer.  `Accepted` means the link took
+// ownership of the frame (usually by putting it in the controller TX queue), not that the
+// panel has acknowledged the protocol payload.  `Busy` is deliberately separate from a
+// hard refusal: a running controller can have a locally full queue for a moment, and the
+// protocol FSM must leave its bytes uncommitted and try again later.  `Rejected` means the
+// link did not take the frame and retrying immediately would not help (gate shut, driver
+// stopped, bus-off, malformed frame, ...).
+enum class TxDisposition : uint8_t { Accepted, Busy, Rejected };
+
 // The CAN seam, deliberately a PULL port.
 //
 // The obvious design is a push callback (onReceive(cb)), and that is what the code this
@@ -15,7 +24,21 @@ struct ICanLink {
 
   // Hand one frame to the controller. MUST NOT BLOCK. Returns false if the frame was not
   // accepted (TX gate closed, driver queue full, bus off). Never retries.
+  //
+  // Kept as the required legacy seam. Existing links that implement only send() continue
+  // to compile unchanged; their false remains the conservative `Rejected` result through
+  // trySend() below. New links with truthful driver dispositions should override trySend()
+  // instead, while retaining this method for source compatibility.
   virtual bool send(const Frame& f) = 0;
+
+  // The disposition-aware transmit seam. MUST NOT BLOCK. `Busy` is a transient local
+  // resource shortage, so AffaDisplayBase retries it without consuming payload bytes or a
+  // protocol retry budget. The default preserves every pre-existing ICanLink exactly:
+  // old boolean links cannot distinguish busy from a refusal and therefore map false to the
+  // safer Rejected value.
+  virtual TxDisposition trySend(const Frame& f) {
+    return send(f) ? TxDisposition::Accepted : TxDisposition::Rejected;
+  }
 
   // Pop one buffered received frame. Returns false when the buffer is empty.
   // MUST NOT BLOCK. Called in a tight loop by AffaDisplayBase::poll().

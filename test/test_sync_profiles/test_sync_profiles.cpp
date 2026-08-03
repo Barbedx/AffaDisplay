@@ -84,6 +84,7 @@ void test_carminat_hello_is_three_frames_the_last_two_identical(void) {
   // And the table in the panel header says the same thing, so a future edit that
   // deduplicated the two frames would fail here as well as on the wire.
   TEST_ASSERT_EQUAL_UINT8(3, carminat::kSync.helloCount);
+  TEST_ASSERT_EQUAL_UINT32(carminat::kHelloMinMs, carminat::kSync.helloMinMs);
   TEST_ASSERT_EQUAL_HEX8_ARRAY(carminat::kHello[1], carminat::kHello[2], 8);
 }
 
@@ -104,23 +105,26 @@ void test_updatelist_hello_is_exactly_one_frame(void) {
 }
 
 // ---------------------------------------------------------------------------
-// The sync request
+// Panel-initiated Carminat startup
 // ---------------------------------------------------------------------------
 
-void test_request_is_emitted_only_while_failed_or_start(void) {
+void test_carminat_waits_for_a_panel_message_before_transmitting(void) {
   CarRig r;
   r.d.begin();
 
-  // FAILED -> alive + request.
+  // The initial FAILED state is local bookkeeping, not permission to put BA probes on
+  // the wire.  AFFA3 NAV starts only after the panel's 61 11 authorization request.
+  r.d.poll();
+  r.clk.advance(5000);
   r.d.poll();
   SyncTally t = tally(r.link, 0x3AF, 0xB9, 0xBA);
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, t.alive, "one heartbeat");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, t.request, "the request goes out while FAILED");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.alive, "no heartbeat before the panel speaks");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "no BA-per-second startup traffic");
 
-  // Synced, START clear -> alive frames only, for as many seconds as you like. TWO per
+  // Once the panel has spoken, normal B9/pong liveness proceeds.  TWO per
   // ping-second since 0.4.1: the paced heartbeat plus the pong the ping provokes
-  // (SyncProfile::replyToPing — MeganeCAN's two-heartbeats-a-second wire). The subject of
-  // this test is the REQUEST staying at zero; the alive count is pinned so a pacing
+  // (SyncProfile::replyToPing — MeganeCAN's two-heartbeats-a-second wire).  The request
+  // must remain absent; the alive count is pinned so a pacing
   // regression in either half cannot hide.
   r.link.inject(affatest::panelSyncRequest());
   r.d.poll();
@@ -135,55 +139,148 @@ void test_request_is_emitted_only_while_failed_or_start(void) {
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "no request once the link is up");
 }
 
-void test_start_arms_exactly_one_request_and_then_clears(void) {
-  // data[2] == 0x01 sets START. It has NEVER been observed in any capture — data[2] is the
-  // panel's filler on all 791 instances — but [REF] tests for it, so the path exists and
-  // is pinned here with a FULL-LENGTH frame.
+void test_carminat_ping_alone_never_starts_authentication(void) {
+  // `69` says only that a panel is alive. It may not unlock B9, the three auth frames, a
+  // generic ACK, function registration, or a render queued by application code before the
+  // panel sends its separate GOOD `61 11 00` authorization request.
+  CarRig r;
+  r.d.begin();
+  TEST_ASSERT_EQUAL(Result::Ok, r.d.setPower(true)); // held until real 61 11 00
+
+  r.link.inject(affatest::panelPeerAlive());
+  r.d.poll();
+  r.clk.advance(3000);
+  r.d.poll();
+
+  SyncTally t = tally(r.link, 0x3AF, 0xB9, 0xBA);
+  TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "a bare 69 must not clear FAILED");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.hello, "69 must not start Carminat auth");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.alive, "69 before auth receives no B9");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "and never creates BA");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.other, "queued output stays held before auth");
+
+  // Now the real authorization request arrives.  The exact profile-specific hello is
+  // allowed immediately and the held power command can proceed through registration.
+  r.link.inject(mk(0x3CF, {0x61, 0x11, 0x00, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
+  r.d.poll();
+  t = tally(r.link, 0x3AF, 0xB9, 0xBA);
+  TEST_ASSERT_TRUE_MESSAGE(r.d.synced(), "61 11 00 alone opens the session");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(3, t.hello, "61 11 00 starts three-frame Carminat auth");
+}
+
+void test_carminat_bootstrap_is_held_until_good_auth(void) {
+  // The proven Carminat driver answers EVERY complete 61 11 with the hello trio. `01` is
+  // the bootstrap / START phase, so it also gets one B9+BA pair, but it remains locked:
+  // no registration and no screen traffic are allowed before the later good `00`.
+  TEST_ASSERT_TRUE_MESSAGE(carminat::kSync.requireAuthRequest,
+                           "Carminat requires a display-originated auth request");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00, carminat::kSync.authRequestByte2,
+                                 "only 61 11 00 is good auth");
+  TEST_ASSERT_TRUE_MESSAGE(carminat::kSync.oneShotResyncOnStart,
+                           "Carminat preserves the one-shot legacy START bootstrap");
+  CarRig r;
+  r.d.begin();
+  r.d.setSelfAck(true);
+  TEST_ASSERT_EQUAL(Result::Ok, r.d.setPower(true));
+  TEST_ASSERT_EQUAL(Result::Ok, r.d.setTime("1000"));
+
+  r.link.inject(affatest::panelSyncStart());
+  r.d.poll();
+  SyncTally t = tally(r.link, 0x3AF, 0xB9, 0xBA);
+  TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "01 is bootstrap, not a usable session");
+  TEST_ASSERT_FALSE_MESSAGE(r.d.registered(), "no function can register from 01");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(3, t.hello, "01 gets the exact Carminat hello trio");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, t.alive, "01 gets one B9 bootstrap");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, t.request, "01 gets one BA bootstrap");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.other, "held power/time cannot overtake authorization");
+
+  // A no-ACK display retransmits 01 at line rate. The delayed hello may be coalesced, but
+  // BA is exactly once for this phase: no per-second or per-request BA stream may return.
+  for (int i = 0; i < 64; ++i) r.link.inject(affatest::panelSyncStart());
+  r.d.poll();
+  t = tally(r.link, 0x3AF, 0xB9, 0xBA);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "01 retransmissions do not repeat BA");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.alive, "01 retransmissions do not repeat bootstrap B9");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.other, "still no app traffic during a 01 storm");
+
+  // Let the coalesced hello floor elapse, then provide the good authorization. Only now
+  // may the held power/time jobs register functions and run.
+  r.clk.advance(carminat::kHelloMinMs);
+  r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+  t = tally(r.link, 0x3AF, 0xB9, 0xBA);
+  TEST_ASSERT_TRUE_MESSAGE(r.d.synced(), "good 61 11 00 opens the usable session");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(3, t.hello, "00 also gets exact Carminat hello");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "00 needs no BA bootstrap");
+  affatest::pumpUntilIdle(r.d);
+  TEST_ASSERT_TRUE_MESSAGE(r.d.registered(), "functions register only after good 00");
+}
+
+void test_carminat_answers_unknown_full_auth_with_hello_only(void) {
+  // The old handler tests only the 61 11 prefix before sending its three hello frames. An
+  // unknown third byte must preserve that response, but it cannot become either a BA
+  // bootstrap (reserved for 01) or authorization (reserved for 00).
   CarRig r;
   r.d.begin();
   r.d.poll();
   drain(r.link);
 
-  r.link.inject(mk(0x3CF, {0x61, 0x11, 0x01, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
-  r.clk.advance(1000);
+  r.link.inject(mk(0x3CF, {0x61, 0x11, 0x5A, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
   r.d.poll();
   SyncTally t = tally(r.link, 0x3AF, 0xB9, 0xBA);
-  TEST_ASSERT_EQUAL_INT_MESSAGE(3, t.hello, "the 61 11 still gets its hello reply");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, t.alive, "heartbeat");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, t.request, "START arms the request even though synced");
+  TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "unknown auth never unlocks the session");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(3, t.hello, "every full 61 11 gets legacy hello x3");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.alive, "unknown auth gets no bootstrap B9");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "unknown auth gets no BA");
+}
 
-  r.link.inject(affatest::panelPeerAlive());
-  r.clk.advance(1000);
+void test_carminat_does_not_cancel_start_pair_when_00_follows_immediately(void) {
+  // Legacy leaves START set until its tick emits B9+BA, even when 00 follows 01 before
+  // that tick. Keep the one pair, but defer usable authorization until 00's paced hello.
+  CarRig r;
+  r.d.begin();
+  r.link.inject(affatest::panelSyncStart());
+  r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+
+  SyncTally t = tally(r.link, 0x3AF, 0xB9, 0xBA);
+  TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "00's deferred hello still gates output");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(3, t.hello, "01 hello was sent immediately");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, t.alive, "START's B9 remains present");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, t.request, "START's BA remains present");
+
+  r.clk.advance(carminat::kHelloMinMs);
   r.d.poll();
   t = tally(r.link, 0x3AF, 0xB9, 0xBA);
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "START is consumed, not sticky");
+  TEST_ASSERT_TRUE_MESSAGE(r.d.synced(), "00 becomes usable only after its hello");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(3, t.hello, "00 receives its own deferred hello trio");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "the one START BA is not retried");
 }
 
 // ---------------------------------------------------------------------------
 // THE SHORT-DLC TRAP
 // ---------------------------------------------------------------------------
 
-void test_short_dlc_sync_request_must_not_latch_start(void) {
-  // The OEM corpus holds 0x3CF with DLC 1 and DLC 2. The legacy shim read data[2] without
-  // checking len, so START latched off whatever the stack happened to hold. Here data[2]
-  // is deliberately set to 0x01 — the value that WOULD set START — while len says the
-  // panel only sent two bytes. Reading it is the bug; the test is that we do not.
+void test_short_dlc_carminat_auth_request_stays_silent(void) {
+  // The byte that says GOOD auth must actually be on the wire. A DLC-2 `61 11` cannot be
+  // treated as `61 11 00` based on stale buffer memory, or ESP32 would answer bad auth.
   CarRig r;
   r.d.begin();
   r.d.poll();
   drain(r.link);
 
-  Frame f = mk(0x3CF, {0x61, 0x11, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01});
+  Frame f = mk(0x3CF, {0x61, 0x11, 0x00, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3});
   f.len = 2;
   r.link.inject(f);
   r.clk.advance(1000);
   r.d.poll();
 
   SyncTally t = tally(r.link, 0x3AF, 0xB9, 0xBA);
-  TEST_ASSERT_TRUE_MESSAGE(r.d.synced(), "a DLC-2 `61 11` still clears FAILED");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(3, t.hello, "and still gets the hello reply");
+  TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "Carminat needs byte 2: only full 61 11 00 authenticates");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.hello, "a short request gets no hello reply");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.alive, "and no heartbeat");
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request,
-                                "START must NOT latch from a byte the panel never sent");
+                                "a short request must not provoke BA");
 }
 
 void test_short_dlc_peer_alive_is_honoured(void) {
@@ -380,12 +477,19 @@ void test_peer_deadline_fires_at_5001ms_and_drops_funcsreg(void) {
   TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "peer loss is declared on the CLOCK");
   TEST_ASSERT_FALSE_MESSAGE(r.d.registered(),
                             "FUNCSREG does not survive a resync — the panel forgot us too");
-  // And the machine asks to resynchronise, because it is FAILED again.
+  // Carminat recovery waits silently for the panel's next 61 11 instead of spraying BA.
   drain(r.link);
   r.clk.advance(1000);
   r.d.poll();
   SyncTally t = tally(r.link, 0x3AF, 0xB9, 0xBA);
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, t.request, "FAILED re-arms the sync request");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.alive, "recovery is quiet until the panel speaks");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "FAILED never re-arms periodic BA on Carminat");
+
+  r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+  t = tally(r.link, 0x3AF, 0xB9, 0xBA);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(3, t.hello, "the next panel request restarts the session");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "and recovery remains panel-initiated");
 }
 
 void test_peer_loss_is_not_a_poll_count(void) {
@@ -430,9 +534,12 @@ int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_carminat_hello_is_three_frames_the_last_two_identical);
   RUN_TEST(test_updatelist_hello_is_exactly_one_frame);
-  RUN_TEST(test_request_is_emitted_only_while_failed_or_start);
-  RUN_TEST(test_start_arms_exactly_one_request_and_then_clears);
-  RUN_TEST(test_short_dlc_sync_request_must_not_latch_start);
+  RUN_TEST(test_carminat_waits_for_a_panel_message_before_transmitting);
+  RUN_TEST(test_carminat_ping_alone_never_starts_authentication);
+  RUN_TEST(test_carminat_bootstrap_is_held_until_good_auth);
+  RUN_TEST(test_carminat_answers_unknown_full_auth_with_hello_only);
+  RUN_TEST(test_carminat_does_not_cancel_start_pair_when_00_follows_immediately);
+  RUN_TEST(test_short_dlc_carminat_auth_request_stays_silent);
   RUN_TEST(test_short_dlc_peer_alive_is_honoured);
   RUN_TEST(test_a_foreign_cluster_token_is_not_answered);
   RUN_TEST(test_updatelist_heartbeat_is_paced_by_the_clock);

@@ -110,14 +110,23 @@ Picking the wrong column is silent — the bus simply never answers.
 
 ## 3. Session
 
+> **AFFA3 NAV bench correction (2026-07-31).** The Carminat display owns session start.
+> The ESP32 remains silent after boot until it receives a *complete* display-originated
+> `3CF 61 11 xx` frame (DLC at least 3). It answers **every** such request with the exact
+> three-frame Carminat hello (`70 / B0 / B0`). `61 11 01` is the bootstrap/resync phase: it
+> additionally receives one bounded `B9` + `BA` control sequence, but it does **not**
+> authorize function registration, rendering, display power, text, or the clock. Only a
+> later `3CF 61 11 00` authorizes those operations. A bare `3CF 69` is liveness only and
+> cannot start authorization. Repeated `01` frames must never create a periodic `BA` stream.
+
 ### 3.1 State
 
 Four flags. `FAILED = 0x01`, `PEER_ALIVE = 0x02`, `START = 0x04`, `FUNCSREG = 0x08`.
 Initial state is `FAILED`. `[REF][IMPL]`
 
-### 3.2 What we transmit, once per second
+### 3.2 Legacy transmit tick and the bounded library behaviour
 
-On the sync id, unconditionally:
+The original driver sent this heartbeat once per second on the sync id:
 
 ```
 3AF   B9 00 00 00 00 00 00 00      "we are alive"
@@ -129,7 +138,13 @@ and additionally, **while `FAILED` or `START` is set**:
 3AF   BA 00 00 00 00 00 00 00      "please sync"
 ```
 
-then clear `START`. `[IMPL]`
+then cleared `START`. `[IMPL]`
+
+That is historical behaviour, not the Carminat library's retry policy. The library stays
+silent before the first complete `61 11 xx`, emits a single `B9` + `BA` sequence for the
+bootstrap `61 11 01`, and does not periodically repeat `BA`. It can continue its paced
+`B9` heartbeat only after the display has initiated a session; neither heartbeat nor ping
+reply authorizes application output.
 
 > `requestArg` (`data[1]`) is `0x00` on Carminat **and it is filler, not an argument**.
 > UpdateList's `7A 01` carries a genuine `0x01`. The two look symmetric on the wire and
@@ -144,30 +159,29 @@ then clear `START`. `[IMPL]`
 
 Match rules — **and the loose matching is deliberate**:
 
-- Sync request: `data[0] == 0x61 && data[1] == 0x11`. Bytes 3..7 are filler.
+- Sync request: `data[0] == 0x61 && data[1] == 0x11`, with `len >= 3` before reading
+  `data[2]`. Bytes 3..7 are filler.
 - Peer-alive: `data[0] == 0x69` **only**. Bytes 1..7 are never examined, and DLC may be
   as low as 1. `[REF][IMPL][OEM]`
 
-#### `data[2]` of `61 11` — the field that tells you registration is broken
+#### `data[2]` of `61 11` — bootstrap versus authorization
 
 | value | meaning |
 |---|---|
-| `0x00` | ordinary sync request |
-| **`0x01`** | **REGISTRATION IS NOT VALID. Start over from the top.** |
+| `0x00` | authorization request: after its hello has been sent, registration and output may proceed |
+| **`0x01`** | **bootstrap/resync request: hello plus one bounded `B9` + `BA`; remain unauthorized** |
+| any other `xx` | hello response only; it does not authorize output |
 
-`0x01` is the panel saying our session state is void — not merely "hello again". It is what
-the panel sends after *it* has lost the registration, and it will keep sending it, at line
-rate, until a full re-registration completes.
+`0x01` means the panel is asking us to bootstrap its session, not that application traffic
+may resume. The historical driver treated this as a registration-loss indication and may
+receive it repeatedly while the panel is not ACKed at the CAN link layer.
 
-Every known implementation under-reacts to it. All of them latch `START` (which re-arms the
-`BA` sync request on the next tick) and **leave `FUNCSREG` set**. So the head unit continues
-to believe it is registered, never re-runs §3.5, and the panel never gets what it is asking
-for. Both ends then wait for each other for ever, and the only thing that has ever cleared
-it in practice is a power cycle.
-
-**The correct reaction is to treat `data[2] == 0x01` exactly as a peer-alive timeout:**
-clear `FUNCSREG` along with latching `START`, so the next render re-registers every function
-id from index 0. That is a frame we can send — it should not need a reboot.
+The legacy behaviour latches `START`, re-arms `BA` on its next tick, and leaves `FUNCSREG`
+set. On a retransmitted request that turns into a `BA` stream while the head unit still
+believes it is registered. The library does the opposite: it holds/drops registration and
+application payloads, sends one nonblocking `B9` + `BA` control sequence, and waits for a
+later full `61 11 00`. That good request is what restarts registration from function index 0
+and permits queued display output.
 
 **Read it only after checking `len >= 3`.** Short DLCs are real on this channel; reading
 `data[2]` blind reads uninitialised memory. `[REF][IMPL][CAP]`
@@ -176,9 +190,10 @@ id from index 0. That is a frame we can send — it should not need a reboot.
 > a peer is never answered. Known hole, not a bug — the Carminat panel sends `61 11`.
 > `[OEM]`
 
-### 3.4 The hello — our answer to `61 11`
+### 3.4 The hello — our answer to every full `61 11 xx`
 
-Sent immediately on receipt, on the sync id, in this order:
+Queued on receipt, on the sync id, in this order. The initial burst is sent promptly;
+repeated/retransmitted requests are rate-limited without blocking the application:
 
 ```
 3AF   70 1A 11 00 00 00 00 01
@@ -186,14 +201,19 @@ Sent immediately on receipt, on the sync id, in this order:
 3AF   B0 14 11 00 1F 00 00 00      <-- IDENTICAL, sent twice, NOT a typo
 ```
 
-Then clear `FAILED`. `[IMPL][CAP]`
+The library sends this burst for every complete `61 11 xx`, including `01`, `00`, and an
+unknown `xx`. The hello alone is not authorization: a bootstrap `01` remains locked; only a
+later `00`, after its own hello burst has been emitted, clears the application gate. `01`
+also receives one bounded `B9` + `BA` sequence; repeated requests are coalesced and cannot
+create periodic `BA` traffic. `[IMPL][CAP]`
 
 UpdateList sends only the first frame. The duplicate second/third frame is present in the
 original source **and in the capture**; it is not deduplicated. `[REF][IMPL]`
 
-> **Sync is declared up without confirmation.** `FAILED` is cleared the instant `61 11` is
-> received — before any evidence the hello landed. Every implementation does this. It
-> means "synced" is an optimistic local belief, not an agreed state.
+> **Authorization is deliberately stricter than hello.** The legacy driver cleared `FAILED`
+> on any `61 11`; the library does not declare the application side ready until it has seen
+> `61 11 00` and sent the corresponding hello. It is still an optimistic local belief —
+> the panel does not acknowledge the hello burst directly.
 
 > **The panel's own test is weaker still**: the emulator sets `_synced` on *any* frame on
 > the sync id whose `data[0] == 0x70`. It does not check the remaining seven bytes.
@@ -206,8 +226,10 @@ original source **and in the capture**; it is not deduplicated. `[REF][IMPL]`
 1. the hello frame `70 1A 11 …` on the *sync* id (§3.4), and
 2. **FUNCSREG**: a one-byte payload `{0x70}` sent to *each* registered function id.
 
-FUNCSREG happens inside the **first render call**, not at boot. Our `funcs[]` is
-`{0x151, 0x1F1}`, in that order, and the order is on the wire:
+FUNCSREG happens inside the **first render call**, not at boot. For the Carminat profile,
+that render call is held until the display has completed the `61 11 00` authorization phase;
+a preceding `61 11 01` never starts registration or a time/text/power command. Our `funcs[]`
+is `{0x151, 0x1F1}`, in that order, and the order is on the wire:
 
 ```
 151   70 00 00 00 00 00 00 00      →  wait for ACK on 551
@@ -264,6 +286,10 @@ latched on those ACKs and on nothing else.
 - **Timeout:** 5 ticks × 1000 ms ≈ **5 s**.
 - **On expiry:** state is *assigned* `FAILED` — which clears `PEER_ALIVE`, `START` **and
   `FUNCSREG` together**. Registration must be redone before the next render. `[IMPL]`
+
+For the Carminat library, `69` remains liveness only: a bare ping before any complete
+`61 11 xx` produces no session/control traffic and can never authorize registration or
+application output.
 
 #### The ping is ANSWERED on Carminat, and the reply is a second heartbeat
 

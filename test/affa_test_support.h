@@ -48,10 +48,16 @@ inline affa::Frame mk(uint32_t id, std::initializer_list<uint8_t> bytes, uint8_t
   return f;
 }
 
-// The panel's `61 11 A3 A3 …` — the frame that clears FAILED. data[2] is the PANEL'S
-// filler on every one of the 791 instances in the corpus, never 0x00 and never 0x01.
+// The AFFA3 NAV panel's GOOD `61 11 00 A3 A3 …` authorization request. The panel begins
+// a session; the ESP never probes it into existence. `61 11 01` is the bootstrap / START
+// request and is covered by a separate test.
 inline affa::Frame panelSyncRequest() {
-  return mk(0x3CF, {0x61, 0x11, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3});
+  return mk(0x3CF, {0x61, 0x11, 0x00, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3});
+}
+// The legacy bootstrap / START request. It receives hello and a one-shot control pair,
+// but never authorizes registration or rendering; only panelSyncRequest() does that.
+inline affa::Frame panelSyncStart() {
+  return mk(0x3CF, {0x61, 0x11, 0x01, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3});
 }
 inline affa::Frame panelPeerAlive() {
   return mk(0x3CF, {0x69, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3});

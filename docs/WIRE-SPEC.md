@@ -11,6 +11,15 @@ disagree, the wire wins and this file is corrected — never silently the other 
 
 Bus parameters: **500 kbit/s, standard (11-bit) identifiers.**
 
+> **AFFA3 NAV live-session correction (2026-07-31).** The display initiates the session.
+> Once it sends a complete `3CF 61 11 xx` request (DLC at least 3), the ESP32 returns the
+> exact three-frame Carminat hello (`70 / B0 / B0`) for **every** `xx`. `61 11 01` is the
+> bootstrap/resync phase: it receives that hello plus one bounded `B9` + `BA` control
+> sequence, but registration, rendering, display power, text, and time remain locked.
+> Only a later `61 11 00` authorizes those operations. A bare `3CF 69` is liveness only
+> and cannot start a session. The Carminat profile never polls `3AF BA` periodically;
+> repeated/retransmitted `01` requests are coalesced rather than becoming a `BA` stream.
+
 **Everything *we* transmit is DLC 8**, in both families, without exception: `CanUtils::sendCan`
 takes eight bytes and `affa3_do_send` pads to eight with the family filler. **Frames we
 *receive* are not.** The OEM dashboard capture (§1.1) contains `3CF` with DLC 1, `3AF` and
@@ -59,7 +68,7 @@ TX  5C1  74 00 00 00 00 00 00 00     us: DONE ack (0x1C1 | 0x400)
 TX  3AF  70 1A 11 00 00 00 00 01     us: hello/announce, in reply to 61 11
 TX  3AF  B0 14 11 00 1F 00 00 00     us: sent TWICE, in reply to 61 11
 TX  3AF  B9 00 00 00 00 00 00 00     us: alive heartbeat, 1 Hz
-TX  3AF  BA 00 00 00 00 00 00 00     us: sync request (only while FAILED|START)
+TX  3AF  BA 00 00 00 00 00 00 00     us: legacy sync request (then while FAILED|START)
 ```
 
 Two facts fall straight out of this capture and are easy to get wrong:
@@ -67,9 +76,11 @@ Two facts fall straight out of this capture and are easy to get wrong:
 * **The panel's filler byte is 0xA3, ours is not.** `0xA3` never appears in anything we
   transmit. Carminat TX filler is `0x00`; UpdateList TX filler is `0x81`. A decoder must
   not assume symmetric padding.
-* **`61 11` arrives with `data[2] = 0x00` here.** `data[2] == 0x01` is the "cold start"
-  variant that additionally latches `START` and therefore provokes a `0xBA` sync request
-  on the next heartbeat. Both are seen in the field.
+* **`61 11` arrives with `data[2] = 0x00` here.** In the current Carminat library,
+  `data[2] == 0x01` is the bootstrap/resync variant: it gets the same hello plus exactly
+  one `B9` + `BA`, but remains unauthorized until a later `0x00`. The legacy source latched
+  `START` and let its periodic tick emit `BA`; that retry stream is intentionally not
+  reproduced.
 
 ## 1.1 Second witness: an OEM bus, neither node ours
 
@@ -186,11 +197,11 @@ Every one of these is quoted from a log line, not derived. Counts are across all
 
 Three of these contradict, refine or close something stated elsewhere:
 
-1. **The panel's sync frames pad from `data[1]`, not `data[2]`.** The corpus has
-   `69:A3:A3:…` and `61:11:A3:A3:…`, where §1's live capture reads `69 00 A3…` and
-   `61 11 00 A3…`. `data[1]` of the ping and `data[2]` of the request are **don't-care**;
-   never match on them. The one byte that is read, `data[2]` of `61 11`, has **never been
-   observed as `0x01`** in any capture — see §5.3.
+1. **The panel's padding varies, but `data[2]` of a full `61 11` is protocol state for
+   current Carminat.** The historical corpus has `69:A3:A3:…` and `61:11:A3:A3:…`, while
+   the live request reads `61 11 00 A3…`; neither makes `data[2]` safely ignorable. The
+   library requires `len >= 3`, answers every `xx` with hello, interprets `01` as bootstrap,
+   and permits application output only after `00` (§5.3). Bytes 3..7 remain don't-care.
 2. **`0x1C1` carries panel→radio traffic that is not a key** (`02 64 0F`, `05 63 "0037"`).
    The key decoder's `03 89` guard is load-bearing, not defensive coding (§7.1).
 3. **`0x1F1` is registered but the OEM radio does write to it**, with a 12-bit ISO-TP
@@ -538,10 +549,11 @@ re-runs on the next send after a link drop. That is deliberate: the panel forget
 
 ## 5. Sync handshake
 
-The sync state machine is byte-for-byte identical between the two families apart from the
-profile constants below. Legacy duplicates it in `CarminatDisplay::tick()` and
-`UpdateListBase::tick()`; the library lifts it into `AffaDisplayBase` parameterised by
-`SyncProfile`.
+The sync wire constants are shared through `SyncProfile`, but the current Carminat session
+policy is deliberately staged: `01` bootstraps and `00` authorizes application traffic.
+Legacy duplicated a periodic retry state machine in `CarminatDisplay::tick()` and
+`UpdateListBase::tick()`; the library keeps UpdateList compatibility while bounding
+Carminat control recovery.
 
 | Profile field | Carminat | UpdateList |
 |---|---|---|
@@ -554,7 +566,7 @@ profile constants below. Legacy duplicates it in `CarminatDisplay::tick()` and
 | `filler` | `0x00` | `0x81` |
 | `helloCount` | 3 | 1 |
 
-### 5.1 Alive heartbeat — every 1000 ms, unconditional
+### 5.1 Alive heartbeat — legacy/UpdateList cadence, gated on Carminat
 
 ```
 Carminat    TX  3AF  B9 00 00 00 00 00 00 00
@@ -564,24 +576,31 @@ UpdateList  TX  3DF  79 00 81 81 81 81 81 81
 `data[1]` is a literal `0x00` in both families (not the filler — for Carminat they happen
 to coincide, for UpdateList they do not: `79 00 81 …`, not `79 81 81 …`).
 
-### 5.2 Sync request — only while `FAILED` or `START` is set
+The Carminat library is silent before a complete `61 11 xx`. Its bootstrap `01` produces one
+`B9` as part of the bounded recovery sequence; after the display has initiated a session,
+`B9` is paced normally. A heartbeat or a reply to `69` is never authorization for output.
+
+### 5.2 Sync request — legacy retry versus Carminat's one-shot bootstrap
 
 ```
 Carminat    TX  3AF  BA 00 00 00 00 00 00 00
 UpdateList  TX  3DF  7A 01 81 81 81 81 81 81
 ```
 
-Carminat's `data[1]` is the filler (`0x00`); UpdateList's is a literal `0x01`. After
-transmitting, `START` is cleared. Legacy then called `delay(100)` — **deleted outright in
-the library**, it has no wire meaning; the request is idempotent and the panel answers
-whenever it feels like it.
+Carminat's `data[1]` is the filler (`0x00`); UpdateList's is a literal `0x01`. The legacy
+Carminat state machine cleared `START` after transmitting and retried while failed. The
+library sends Carminat `BA` **once** after `61 11 01`, paired with one `B9`; it does not
+periodically retry `BA` while failed or in response to a retransmit storm. Legacy then called
+`delay(100)` — **deleted outright in the library**, it has no wire meaning; the request is
+idempotent and the panel answers whenever it feels like it.
 
 ### 5.3 Reply to the panel's `61 11` (RX on `0x3CF`)
 
-Trigger: `data[0] == 0x61 && data[1] == 0x11`.
+Trigger: `data[0] == 0x61 && data[1] == 0x11`; Carminat requires `len >= 3` before
+interpreting `data[2]`.
 
-Carminat sends three frames on `0x3AF`, in this order, back to back with no inter-frame
-delay:
+Carminat sends three frames on `0x3AF` for every full `61 11 xx`, in this order. The first
+request is handled promptly; a retransmit burst is coalesced/rate-limited without blocking:
 
 ```
 TX  3AF  70 1A 11 00 00 00 00 01      hello / announce
@@ -598,24 +617,31 @@ UpdateList sends one frame on `0x3DF`:
 TX  3DF  70 1A 11 00 00 00 00 01
 ```
 
-Then, both families: clear `FAILED`; if `data[2] == 0x01`, set `START`.
+For the current Carminat profile, every complete `61 11 xx` gets the hello burst. `01`
+leaves registration and application output locked and schedules exactly one `B9` + `BA`.
+Only `00`, after its hello is emitted, clears the application gate and permits sequential
+function registration, display power/text, and time. An unknown `xx` gets hello only.
+UpdateList retains its separately profiled legacy state handling.
 
-> **`data[2]` is the panel's filler, and `START` has never been observed.** The capture
-> corpus contains the request 791 times, always as
-> `0x3CF [8] <61:11:A3:A3:A3:A3:A3:A3>` — `data[2] = 0xA3`, the panel's pad byte. The live
-> capture in §1 transcribes it as `61 11 00 A3 …`. Whichever it is, it is **not** `0x01`,
-> in any capture we hold. **[CAP]**
+> **`data[2]` is a session-phase byte for the current Carminat profile; bytes 3..7 are
+> filler.** Captures can contain `A3` at `data[2]`, but a complete `61 11 A3` still receives
+> the mandatory hello and does not authorize output. `01` is the bootstrap phase and `00` is
+> the authorization phase. Always require `len >= 3` before interpreting it.
 >
-> Keep the `data[2] == 0x01 -> START` test — it is [REF]-attested and costs nothing — but
-> do not build anything on `START` being reachable, and require `len >= 3` before reading
-> `data[2]` (§1.1 note 4). In practice the `0xBA` / `0x7A` sync request is emitted only
-> while `FAILED`, which matches the live capture's annotation exactly.
+> The legacy `data[2] == 0x01 -> START` path is evidence for the one-shot bootstrap control
+> response, not justification for a periodic `BA` retry. The current Carminat profile emits
+> a single paired `B9` + `BA` for that phase and waits for the later `00` before registering
+> functions or sending application commands.
 
 ### 5.4 Peer-alive ping (RX on `0x3CF`, `data[0] == 0x69`)
 
 Observed 1157 times in the corpus as `0x3CF [8] <69:A3:A3:A3:A3:A3:A3:A3>` — **`data[1]`
 is the panel's filler, not `0x00`** as §1's transcription reads. `0x69` in `data[0]` is
 the entire test; nothing else in the frame is inspected and nothing else may be. **[CAP]**
+
+For the current Carminat profile, a bare `69` before any complete `61 11 xx` is silent:
+it cannot initiate control traffic, registration, rendering, or time/text output. After a
+full request it is liveness only, not authorization.
 
 Sets `PEER_ALIVE`. The watchdog consumes the flag on the next heartbeat and re-arms a
 **5000 ms wall-clock deadline**. When the deadline expires:
@@ -624,7 +650,9 @@ Sets `PEER_ALIVE`. The watchdog consumes the flag on the next heartbeat and re-a
 sync_status = FAILED           (all other bits, including FUNCSREG, dropped)
 ```
 
-which re-arms the `0xBA` / `0x7A` sync request and forces re-registration on the next send.
+In the legacy/UpdateList state machine this re-arms the `0xBA` / `0x7A` sync request. The
+current Carminat library instead drops registration and waits for the display to initiate a
+new full `61 11 xx`; it never turns a watchdog failure into periodic `BA` traffic.
 
 > **This is where one of the two expensive defects lived.** Legacy used
 > `static int8_t timeout = SYNC_TIMEOUT` decremented once per `tick()` **call**. That only
@@ -1373,8 +1401,9 @@ static const affa::Frame kCarminatAlive =
 static const affa::Frame kUpdateListAlive =
   { 0x3DF, 8, {0x79,0x00,0x81,0x81,0x81,0x81,0x81,0x81}, false };
 
-// Sync request, emitted only while FAILED or START is set. Carminat's arg byte is the
-// filler (0x00); UpdateList's is a literal 0x01.
+// Carminat emits this once after a bootstrap 61 11 01, paired with B9; it is never
+// periodically retried. UpdateList retains its separately profiled legacy request. Carminat's
+// arg byte is filler (0x00); UpdateList's is a literal 0x01.
 static const affa::Frame kCarminatSyncRequest =
   { 0x3AF, 8, {0xBA,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, false };
 static const affa::Frame kUpdateListSyncRequest =
@@ -1870,17 +1899,17 @@ static const affa::Frame kNotAKeyFrame[] = {
 
 ```cpp
 // [CAP-VERBATIM] -- CAN MSG: 0x3CF [8] <61:11:A3:A3:A3:A3:A3:A3>   (x791)
-// data[2] is the panel's FILLER here, not 0x00 and never 0x01.
-static const affa::Frame kPanelSyncRequest =            // -> reply kCarminatHello,
-  { 0x3CF, 8, {0x61,0x11,0xA3,0xA3,0xA3,0xA3,0xA3,0xA3}, false };  // clear FAILED
+// Unknown phase: current Carminat replies with hello x3 but remains unauthorized.
+static const affa::Frame kPanelSyncRequest =            // -> reply kCarminatHello x3,
+  { 0x3CF, 8, {0x61,0x11,0xA3,0xA3,0xA3,0xA3,0xA3,0xA3}, false };  // no application output
 
-// [LIVE] variant, same handling: the bench transcription reads data[2] = 0x00.
+// [LIVE] authorization variant: data[2] = 0x00; its hello completes the application gate.
 static const affa::Frame kPanelSyncRequestLive =
   { 0x3CF, 8, {0x61,0x11,0x00,0xA3,0xA3,0xA3,0xA3,0xA3}, false };
 
-// [DERIVED] -- NEVER OBSERVED in any capture. Kept because [REF] affa3.c:98 tests for it.
-static const affa::Frame kPanelSyncRequestColdStart =   // data[2]==0x01 also sets START,
-  { 0x3CF, 8, {0x61,0x11,0x01,0xA3,0xA3,0xA3,0xA3,0xA3}, false };  // which arms 0xBA/0x7A
+// [LIVE] bootstrap/resync variant: hello x3 plus one B9+BA, still no application output.
+static const affa::Frame kPanelSyncRequestColdStart =
+  { 0x3CF, 8, {0x61,0x11,0x01,0xA3,0xA3,0xA3,0xA3,0xA3}, false };
 
 // [CAP-VERBATIM] -- CAN MSG: 0x3CF [8] <69:A3:A3:A3:A3:A3:A3:A3>   (x1157)
 static const affa::Frame kPanelPeerAlive =              // -> set PEER_ALIVE, re-arm the

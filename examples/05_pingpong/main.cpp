@@ -73,8 +73,8 @@ bool g_listenBoot = false;
 // ---------------------------------------------------------------------------
 // Board — ESP32-C3 SuperMini on the bench rig. RX FIRST.
 // ---------------------------------------------------------------------------
-constexpr gpio_num_t kRxPin   = GPIO_NUM_4;
-constexpr gpio_num_t kTxPin   = GPIO_NUM_3;
+constexpr gpio_num_t kRxPin   = GPIO_NUM_3;
+constexpr gpio_num_t kTxPin   = GPIO_NUM_4;
 constexpr uint32_t   kBitrate = 500000;
 
 // 250 ms, MEASURED on this rig. 0 parks a bus-off in TWAI_STATE_STOPPED for ever;

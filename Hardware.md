@@ -5,6 +5,19 @@ ITS 100% and hardwaree 100% if that text is here.
 
 ---
 
+## Current bench wiring (2026-08-03)
+
+The transceiver was resoldered. For every current build and flash, use this mapping:
+
+| Transceiver signal | ESP32-C3 pin | `CanPins` field |
+| --- | --- | --- |
+| `CRX` / `RXD` / `R` | **GPIO3** | `.rx = GPIO_NUM_3` |
+| `CTX` / `TXD` / `D` | **GPIO4** | `.tx = GPIO_NUM_4` |
+
+The owner's note above and all 2026-07-29/30 measurements below describe the prior,
+mirrored `CRX -> GPIO4`, `CTX -> GPIO3` wiring. They remain useful as dated observations,
+but are not a wiring recipe for the current rig.
+
 # Flash log
 
 Everything above this line is the OWNER'S. Claude does not edit it. Everything below is

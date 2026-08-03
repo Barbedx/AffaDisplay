@@ -1,5 +1,10 @@
 # Bench handoff — 2026-07-29
 
+> **Historical wiring note (2026-08-03):** this handoff records the old bench wiring
+> `CRX/RXD -> GPIO4`, `CTX/TXD -> GPIO3`. The resoldered current rig is
+> `CRX/RXD -> GPIO3`, `CTX/TXD -> GPIO4`; do not copy the pin assignment below into a
+> current build.
+
 Panel powered off by the owner. Board at **192.168.100.85** runs `examples/01_bringup`,
 OTA at `/update`. Goal not reached: **SUCCESS never appeared on the glass.**
 

@@ -129,38 +129,16 @@
 #  define AFFA_LOG_LEVEL 3
 #endif
 
-// Esp32CanLink.{h,cpp} and the <esp32_can.h> dependency. 1 without that dependency in
-// lib_deps: link error. Defaults to ARDUINO because the header includes <driver/gpio.h>
-// for gpio_num_t, which does not exist on the host — unconditional 1 would break
-// `pio test -e native` on an include.
+// Esp32CanLink.{h,cpp}, using the ESP32 Arduino core's built-in ESP-IDF TWAI driver.
+// No ESP32_CAN/can_common dependency is required. Defaults to ARDUINO because the header
+// includes <driver/gpio.h> for gpio_num_t, which does not exist on the host — unconditional
+// 1 would break `pio test -e native` on an include.
 #ifndef AFFA_ENABLE_ESP32CAN_LINK
 #  if defined(ARDUINO)
 #    define AFFA_ENABLE_ESP32CAN_LINK 1
 #  else
 #    define AFFA_ENABLE_ESP32CAN_LINK 0
 #  endif
-#endif
-
-// Reset the TWAI peripheral before installing the driver, in Esp32CanLink::begin().
-//
-// WHY THIS EXISTS. `ESP.restart()` does not reset peripherals. After a warm reboot — an OTA
-// update, a watchdog restart, /api/reboot — the TWAI block comes back part-configured from
-// the previous run and the driver installs on top of that state. Measured across one
-// evening of eight OTA flashes on the bench rig: controller flaps 7 -> 22 -> 134 -> 139,
-// bus errors 0 -> 143 -> 827, ending in a peripheral sitting in BUS_OFF and cycling for
-// ever while the panel beside it was perfectly healthy. A cold power cycle cleared it every
-// time; nothing in software did.
-//
-// periph_module_reset() is NOT a twai_* call and does not breach the driver prohibition in
-// Esp32CanLink.h — it is a clock/reset-control write, it happens BEFORE the driver exists,
-// in the one window where touching the peripheral is sanctioned, and it is exactly what a
-// cold boot does for free.
-//
-// Set to 0 if something else in your firmware owns the TWAI peripheral and may already have
-// installed a driver by the time you call begin(): resetting it under a live driver would
-// be the very failure this exists to prevent.
-#ifndef AFFA_ESP32CAN_PERIPH_RESET
-#  define AFFA_ESP32CAN_PERIPH_RESET 1
 #endif
 
 // src/rtos/ — the library creates and owns a FreeRTOS task that calls poll(), and the
@@ -326,24 +304,12 @@
 // ---------------------------------------------------------------------------
 // Link recovery: what the library does about a CONTROLLER that has stopped
 // ---------------------------------------------------------------------------
-// THE LAST THING AN APPLICATION STILL HAD TO OWN, AND THE ONE IT OWNED WORST.
+// Esp32CanLink owns the direct ESP-IDF TWAI lifecycle. ICanLink::recover() is called only
+// from the library poll path, after the deadline below; a controlled driver restart may
+// briefly block there while its RX task exits. Applications keep rendering state only —
+// they neither restart TWAI nor race the library's recovery.
 //
-// 0.3.0 recovered everything above the wire — a torn transfer, a lost registration, a panel
-// that went away — and gave up on exactly one thing: a CAN controller that is no longer
-// RUNNING. `Esp32CanLink` does not touch the driver after begin() (docs/ESP32CAN-CONTRACT.md
-// rule 4), so isLive() reported the link down and nothing in the system ever brought it
-// back. The only move left to the application was a reboot, and a reboot is WORSE THAN THE
-// PROBLEM: it does not fix a wire, and ESP.restart() leaves the TWAI block part-configured.
-// Measured on the bench rig across one evening of warm reboots — flaps 7 -> 139, bus errors
-// 0 -> 827 — ending in a controller cycling BUS_OFF beside a perfectly healthy panel. The
-// application's recovery layer is what made the hardware look broken.
-//
-// Nor does the driver close it. ESP32CAN's own watchdog reacts to TWAI_STATE_BUS_OFF ONLY
-// (esp32_can_builtin.cpp:169). A controller in TWAI_STATE_STOPPED — where forceRecoveryMs=0
-// leaves it, and where a failed recovery leaves it — is never restarted by anybody.
-//
-// So the library asks the link to recover itself, through ICanLink::recover(), and keeps
-// asking. How long the controller must be CONTINUOUSLY down before the first attempt:
+// How long the controller must be CONTINUOUSLY down before the first attempt:
 #ifndef AFFA_LINK_RECOVER_MS
 #  define AFFA_LINK_RECOVER_MS 3000
 #endif
@@ -357,9 +323,9 @@
 // reboots itself into a flash-wear loop and loses its own log ring — and fast enough that a
 // transient fault costs seconds.
 //
-// A doubling backoff rather than a fixed interval, because a driver restart is not free: it
-// deletes and recreates two tasks and holds the bus down for its settle delay. Retrying that
-// at 3 s for ever against a dead transceiver is its own kind of storm.
+// A doubling backoff rather than a fixed interval, because a direct TWAI restart is not
+// free: it stops the RX task, reinstalls the controller, and then starts the task again.
+// Retrying that at 3 s for ever against a dead bus is its own kind of storm.
 //
 // 0 disables link recovery entirely, which is the pre-0.3.1 contract: isLive() goes false
 // and stays false.
@@ -386,9 +352,8 @@
 //
 // IT FIRES ONCE PER SILENCE. After a stall-triggered recovery the watchdog re-arms only
 // when a frame is actually heard again, so a panel that is genuinely powered off costs one
-// driver restart and then quiet, not a restart per backoff for ever — every restart is a
-// full teardown, and a teardown against a silent bus is exactly where esp32_can's
-// disable() has wedged before (examples/02_canspy, c8d8695).
+// controlled restart and then quiet, not a restart per backoff for ever. A teardown against
+// a silent bus is deliberately rate-limited by the recovery backoff.
 //
 // The default clears the bench panel's slowest healthy signal — the ~1 Hz peer-alive — by
 // 2.5x, and sits below AFFA_PEER_TIMEOUT_MS deliberately: the driver reinstall this
@@ -453,9 +418,9 @@
 // which turns three-frames-per-request into ~4400 transmit attempts per second on a bus
 // whose entire capacity is ~4200 and which is already 92 % full of the panel's own frames.
 //
-// The result is not a slow handshake, it is no handshake: the TWAI transmit queue is
-// permanently full, sendFrame() blocks the poll task, and every render behind it starves.
-// From the outside it looks exactly like a panel stuck in half-completed authorisation.
+// The result is not a slow handshake, it is no handshake: the direct TWAI transmit queue
+// can be permanently full. trySend() returns Busy rather than blocking poll(), so the
+// protocol leaves its bytes pending and retries on a later pass.
 //
 // The sync STATE is still updated on every request — only the frames are paced. 200 ms
 // keeps the answer well inside the panel's ~1 s expectation while costing 15 frames/s.

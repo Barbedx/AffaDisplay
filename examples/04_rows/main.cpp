@@ -50,8 +50,8 @@
 
 #include <AffaDisplay.h>
 
-// The ECC probe reads the TWAI peripheral's own registers. The register map and the status
-// API are the SDK's; nothing here reaches into esp32_can internals.
+// The ECC probe reads the TWAI peripheral's own registers. The register map and status API
+// are ESP-IDF's; nothing here reaches into Esp32CanLink's private state.
 #include <driver/twai.h>
 #include <soc/twai_struct.h>
 #include <soc/gpio_struct.h>
@@ -82,12 +82,8 @@ using affa::widget::RowScreen;
 // ---------------------------------------------------------------------------
 // ESP32-C3 SuperMini on the bench rig. RX FIRST — the named fields are what stop the swap
 // from becoming a silent bus with no error reported anywhere.
-constexpr affa::CanPins kPins{ .rx = GPIO_NUM_4, .tx = GPIO_NUM_3 };
+constexpr affa::CanPins kPins{ .rx = GPIO_NUM_3, .tx = GPIO_NUM_4 };
 constexpr uint32_t      kBitrate = 500000;
-
-// 250 ms, MEASURED. 0 leaves a bus-off parked in TWAI_STATE_STOPPED for ever and reads
-// exactly like a dead transceiver; 2000 accumulates inside setup().
-constexpr uint32_t kForceRecoveryMs = 250;
 
 // The panel does not announce that its glass is lit, so this is a hard-coded wait and there
 // is no honest way around it.
@@ -491,9 +487,9 @@ uint32_t g_deafEvents  = 0;       // times reception died while we were talking
 // The poller runs on its own low-priority task. It touches the registers ONLY while
 // twai_get_status_info() succeeds: with the driver uninstalled the peripheral clock may be
 // gated, and a raw register read is then a fault, not a zero. After a BUS-OFF sighting it
-// stands back for 600 ms — that is the window in which the force-recovery watchdog
-// uninstalls the peripheral, and losing a few poll beats costs nothing while reading
-// mid-uninstall costs a panic. Reading ECC races the driver's own ISR on bus-error
+// stands back for 600 ms while library-owned direct-TWAI recovery may reconfigure the
+// peripheral; losing a few poll beats costs nothing while reading mid-uninstall costs a
+// panic. Reading ECC races the driver's own ISR on bus-error
 // interrupts; the register keeps the captured value until the NEXT error overwrites it, so
 // the race costs at worst one re-arm, never a wrong code.
 namespace ecc {
@@ -539,9 +535,9 @@ const char* errcName(uint8_t e) {
   }
 }
 
-// THE ONLY SAFE WAY TO TOUCH TWAI.* FROM A SIDE TASK. Driver reinstalls — the deaf
-// recovery, setListenOnly, the bus-off watchdog — uninstall the peripheral from OTHER
-// tasks at higher priority, and an uninstalled peripheral has its clock gated: a raw
+// THE ONLY SAFE WAY TO TOUCH TWAI.* FROM A SIDE TASK. A library recovery or controlled
+// setListenOnly() restart can uninstall the peripheral from another task, and an
+// uninstalled peripheral has its clock gated: a raw
 // register access then faults, it does not read zero. twai_get_status_info() alone is a
 // TOCTOU check — the uninstall can land between it and the reads. So the reads run inside
 // a critical section (single core: nothing else can run) with the peripheral's own
@@ -754,8 +750,8 @@ void pumpScreen(uint32_t now) {
 // ---------------------------------------------------------------------------
 // The gate FSM — silent until the bus proves itself, silent again the moment it stops
 // ---------------------------------------------------------------------------
-// Driven from loop(), never from a handler: setListenOnly() reinstalls the driver and must
-// not run on the HTTP task while the poll task is inside the library.
+// The shout mode change is driven from loop(). setListenOnly() performs a controlled direct
+// TWAI restart, so it can briefly pause traffic while the RX task and driver are replaced.
 void pumpShout(uint32_t now) {
   if (g_shoutPhase == 1) {
     g_link.setListenOnly(false);
@@ -1184,10 +1180,10 @@ void routes() {
   // THE PAD AUDIT. The ECC verdict is "every dominant we drive reads back recessive" — this
   // answers whether the dominant ever leaves the chip. Dumps the GPIO matrix routing and
   // output-enable for the TX pad, then samples both pads at register-read speed (~25 M/s)
-  // for ~16 ms. CRX (GPIO4) is the control: the storm guarantees it pulses low constantly,
-  // so if the sampler sees GPIO4 move and GPIO3 never leave HIGH while the controller is
+  // for ~16 ms. CRX (GPIO3) is the control: the storm guarantees it pulses low constantly,
+  // so if the sampler sees GPIO3 move and GPIO4 never leave HIGH while the controller is
   // ACKing in NORMAL, the dominant is not reaching the pad — a chip-side routing fault.
-  // GPIO3 pulsing low here while ECC still reports ACK-slot bit errors would mean the level
+  // GPIO4 pulsing low here while ECC still reports ACK-slot bit errors would mean the level
   // IS on the pad and the loop back through CRX is where it dies.
   //
   // FUN_IE (the pad's input buffer) is force-enabled for both pins first: the driver
@@ -1202,65 +1198,65 @@ void routes() {
     const uint32_t iomux4 = REG_READ(IO_MUX_GPIO4_REG);
     n += snprintf(out + n, sizeof(out) - n,
                   "driver     %s state %d\n"
-                  "out_sel[3] func %u inv %u oen_sel %u oen_inv %u   enable.3 %u\n"
+                  "out_sel[4] func %u inv %u oen_sel %u oen_inv %u   enable.4 %u\n"
                   "in_sel[74] gpio %u sig_in_sel %u inv %u          (74 = TWAI RX/TX idx)\n"
-                  "iomux3     0x%08X (MCU_SEL %u FUN_IE %u)  iomux4 0x%08X (MCU_SEL %u FUN_IE %u)\n",
+                  "iomux4     0x%08X (MCU_SEL %u FUN_IE %u)  iomux3 0x%08X (MCU_SEL %u FUN_IE %u)\n",
                   up ? "ok" : "ABSENT", up ? static_cast<int>(st.state) : -1,
-                  static_cast<unsigned>(GPIO.func_out_sel_cfg[3].func_sel),
-                  static_cast<unsigned>(GPIO.func_out_sel_cfg[3].inv_sel),
-                  static_cast<unsigned>(GPIO.func_out_sel_cfg[3].oen_sel),
-                  static_cast<unsigned>(GPIO.func_out_sel_cfg[3].oen_inv_sel),
-                  static_cast<unsigned>((GPIO.enable.val >> 3) & 1),
+                  static_cast<unsigned>(GPIO.func_out_sel_cfg[4].func_sel),
+                  static_cast<unsigned>(GPIO.func_out_sel_cfg[4].inv_sel),
+                  static_cast<unsigned>(GPIO.func_out_sel_cfg[4].oen_sel),
+                  static_cast<unsigned>(GPIO.func_out_sel_cfg[4].oen_inv_sel),
+                  static_cast<unsigned>((GPIO.enable.val >> 4) & 1),
                   static_cast<unsigned>(GPIO.func_in_sel_cfg[TWAI_RX_IDX].func_sel),
                   static_cast<unsigned>(GPIO.func_in_sel_cfg[TWAI_RX_IDX].sig_in_sel),
                   static_cast<unsigned>(GPIO.func_in_sel_cfg[TWAI_RX_IDX].sig_in_inv),
-                  static_cast<unsigned>(iomux3),
-                  static_cast<unsigned>((iomux3 >> 12) & 7),
-                  static_cast<unsigned>((iomux3 >> 9) & 1),
                   static_cast<unsigned>(iomux4),
                   static_cast<unsigned>((iomux4 >> 12) & 7),
-                  static_cast<unsigned>((iomux4 >> 9) & 1));
+                  static_cast<unsigned>((iomux4 >> 9) & 1),
+                  static_cast<unsigned>(iomux3),
+                  static_cast<unsigned>((iomux3 >> 12) & 7),
+                  static_cast<unsigned>((iomux3 >> 9) & 1));
 
     PIN_INPUT_ENABLE(IO_MUX_GPIO3_REG);
     PIN_INPUT_ENABLE(IO_MUX_GPIO4_REG);
 
-    uint32_t low3 = 0, low4 = 0, edges3 = 0, run3 = 0, maxRun3 = 0;
-    uint32_t bothLow = 0, drive3crx4High = 0;
-    bool last3 = true;
+    uint32_t low3 = 0, low4 = 0, edges4 = 0, run4 = 0, maxRun4 = 0;
+    uint32_t bothLow = 0, drive4crx3High = 0;
+    bool last4 = true;
     constexpr uint32_t kSamples = 400000;
     const uint32_t t0 = micros();
     for (uint32_t i = 0; i < kSamples; ++i) {
       const uint32_t v = GPIO.in.val;
       const bool b3 = v & (1u << 3);
       const bool b4 = v & (1u << 4);
-      if (!b3) {
-        ++low3; if (++run3 > maxRun3) maxRun3 = run3;
+      if (!b4) {
+        ++low4; if (++run4 > maxRun4) maxRun4 = run4;
         // THE VERDICT COUNTERS: while WE hold TXD dominant, what does CRX say? Same
         // register read, so the two bits are the same instant. Loop delay through the
         // transceiver is ~1 sample; anything beyond edge effects is the answer.
-        if (!b4) ++bothLow; else ++drive3crx4High;
-      } else run3 = 0;
-      if (!b4) ++low4;
-      if (b3 != last3) { ++edges3; last3 = b3; }
+        if (!b3) ++bothLow; else ++drive4crx3High;
+      } else run4 = 0;
+      if (!b3) ++low3;
+      if (b4 != last4) { ++edges4; last4 = b4; }
     }
     const uint32_t us = micros() - t0;
     n += snprintf(out + n, sizeof(out) - n,
                   "sampled    %lu reads in %lu us (%lu ns/read)\n"
-                  "GPIO3 CTX  low %lu (%lu.%04lu%%)  edges %lu  longest-low-run %lu reads\n"
-                  "GPIO4 CRX  low %lu (%lu.%04lu%%)   <- control: must move during the storm\n"
+                  "GPIO4 CTX  low %lu (%lu.%04lu%%)  edges %lu  longest-low-run %lu reads\n"
+                  "GPIO3 CRX  low %lu (%lu.%04lu%%)   <- control: must move during the storm\n"
                   "correlate  while CTX low: CRX low %lu, CRX HIGH %lu   <- HIGH means the "
                   "dominant never came back\n",
                   static_cast<unsigned long>(kSamples), static_cast<unsigned long>(us),
                   static_cast<unsigned long>((us * 1000UL) / kSamples),
-                  static_cast<unsigned long>(low3),
-                  static_cast<unsigned long>((low3 * 100ULL) / kSamples),
-                  static_cast<unsigned long>(((low3 * 1000000ULL) / kSamples) % 10000),
-                  static_cast<unsigned long>(edges3), static_cast<unsigned long>(maxRun3),
                   static_cast<unsigned long>(low4),
                   static_cast<unsigned long>((low4 * 100ULL) / kSamples),
                   static_cast<unsigned long>(((low4 * 1000000ULL) / kSamples) % 10000),
+                  static_cast<unsigned long>(edges4), static_cast<unsigned long>(maxRun4),
+                  static_cast<unsigned long>(low3),
+                  static_cast<unsigned long>((low3 * 100ULL) / kSamples),
+                  static_cast<unsigned long>(((low3 * 1000000ULL) / kSamples) % 10000),
                   static_cast<unsigned long>(bothLow),
-                  static_cast<unsigned long>(drive3crx4High));
+                  static_cast<unsigned long>(drive4crx3High));
     return r->reply(200, "text/plain", out);
   });
 
@@ -1356,9 +1352,8 @@ void routes() {
   // wire or at the other end. If rx starts climbing the moment we go quiet, we were
   // trampling the bus.
   //
-  // True listen-only IS available at runtime since 1220f78 — setListenOnly(), used below —
-  // it is only begin(..., ListenOnly) that stays refused (pre-begin, the driver has no
-  // queues for the mode switch to land on and the board dies before OTA).
+  // Direct TWAI supports listen-only both at begin() and through setListenOnly(). This
+  // console switches at runtime so it can compare the same powered session in both modes.
   // THE A/B THAT SETTLES IT, on one boot, with the trace running.
   //
   // Listen-only observes the bus WITHOUT ACKNOWLEDGING IT. Normal acknowledges every frame
@@ -1566,7 +1561,7 @@ void setup() {
   //
   // The cost is that a CAN failure now precedes OTA. That is acceptable because begin() does
   // not block — it installs a driver and returns — whereas WiFi does.
-  if (!g_link.begin(kPins, kBitrate, kForceRecoveryMs))
+  if (!g_link.begin(kPins, kBitrate))
     Serial.println("[can] controller did not come up");
 
   // The ECC probe watches from the first moment: the SEED error of a storm is worth more

@@ -1,5 +1,11 @@
 # can-link Specification
 
+> **Direct-TWAI migration notice.** Statements below that name `esp32_can`, `CAN0`,
+> callbacks, `setCANPins()`, or `watchFor()` describe the former wrapper and are retained
+> as historical evidence only. The current implementation contract is
+> [`docs/ESP32CAN-CONTRACT.md`](../../../docs/ESP32CAN-CONTRACT.md), which defines the
+> direct ESP-IDF TWAI transport.
+
 ## Purpose
 
 `ICanLink` is the library's only seam to a CAN controller. `Esp32CanLink` is the only
@@ -35,7 +41,7 @@ silent bus is.
 
 #### Scenario: Pin order is RX first
 
-- **WHEN** the caller constructs `CanPins{ .rx = GPIO_NUM_4, .tx = GPIO_NUM_3 }`
+- **WHEN** the caller constructs `CanPins{ .rx = GPIO_NUM_3, .tx = GPIO_NUM_4 }`
 - **THEN** the named fields make the order explicit at the call site
 - **AND** the driver is configured RX-first, matching `setCANPins(rxPin, txPin)`
 

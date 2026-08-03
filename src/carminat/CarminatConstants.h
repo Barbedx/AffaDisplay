@@ -55,7 +55,9 @@ inline constexpr uint8_t kFiller = 0x00;
 // Sync profile
 // ---------------------------------------------------------------------------
 
-// Sent in reply to the panel's `61 11 ..` on 0x3CF, in this order. The second and third
+// Sent in reply to EVERY complete panel `61 11 xx` request on 0x3CF, in this order. The
+// later `00` authorizes registration and rendering; `01` is only the bootstrap / START
+// phase. The second and third
 // frames are IDENTICAL — two sendCan calls in the legacy source, and present in the
 // capture. It is not a typo and it is not deduplicated. [CAP]
 inline constexpr uint8_t kHello[3][8] = {
@@ -63,6 +65,11 @@ inline constexpr uint8_t kHello[3][8] = {
     {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00},
     {0xB0, 0x14, 0x11, 0x00, 0x1F, 0x00, 0x00, 0x00},
 };
+
+// AFFA3 NAV repeats its full request at roughly 106 ms while waking. MeganeCAN's working
+// handler answered that cadence, so this preserves the measured exchange without allowing
+// a pathological line-rate retry storm to turn into an unbounded transmit flood.
+inline constexpr uint32_t kHelloMinMs = 90;
 
 // requestArg is 0x00 AND MUST STAY SO. Carminat's `BA 00 00 …` is 0xBA followed by seven
 // filler bytes that merely happen to be zero; UpdateList's `7A 01` carries a genuine
@@ -74,9 +81,18 @@ inline constexpr uint8_t kHello[3][8] = {
 // The other families keep the paced-only heartbeat. docs/PROTOCOL.md §3.6.
 //
 //   syncId, syncReplyId, replyFlag, alive, request, requestArg, filler, hello, helloCount,
-//   replyToPing
+//   replyToPing, waitForPanel, sendSyncRequest, requireAuthRequest, authRequestByte2,
+//   oneShotResyncOnStart, helloMinMs
 inline constexpr SyncProfile kSync = {
-    kIdSync, kIdSyncReply, 0x0400, 0xB9, 0xBA, 0x00, kFiller, kHello, 3, true};
+    kIdSync, kIdSyncReply, 0x0400, 0xB9, 0xBA, 0x00, kFiller, kHello, 3,
+    true,  // B9 is a paced reply to a panel 69 ping, after a complete 61 11 bootstrap.
+    true,  // Do not speak until the AFFA3 NAV panel speaks first.
+    false, // Never spray BA probes as periodic recovery.
+    true,  // A bare 69 is only a ping; only good 61 11 00 starts auth/registration.
+    0x00,  // Good authorization byte.
+    true,  // 61 11 01 gets one nonblocking B9 + BA bootstrap, never a repeating stream.
+    kHelloMinMs,
+};
 
 // ORDER IS ON THE WIRE: the first send after a resync walks this table in declaration
 // order and puts a 1-byte 0x70 on each id before the payload. [CAP]
