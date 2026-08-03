@@ -25,6 +25,20 @@ The first run against the **OEM-capture-derived** handshake (`docs/CARMINAT-HAND
 | `setPower(true)` | ✅ | `151 03 52 09 00`, ACKed |
 | Panel control ACK `1C1 -> 5C1 74` | ✅ | `autoAcks-TX+ 2`, emitted between B0 fragments |
 | Steady state, 8+ minutes | ✅ | `pings 991`, `openings 1`, `TX+ 973`, **`TX- 0`**, `txErr/rxErr/busErr/busOff` all **0** |
+| Clock free-runs after being set | ✅ | set `10:00`, read `10:11` eleven minutes later |
+
+And then the same sequence **through the library** (`03_hello`, `src/` rather than the
+example's own FSM) — the first hardware run since the handshake work:
+
+| Capability | | Evidence |
+|---|---|---|
+| Library opening + lazy registration | ✅ | `AFFA: sync 0x01 -> 0x00`, `[seq] panel answering` |
+| `setPower(true)` via `CarminatDisplay` | ✅ | `[seq] power acknowledged` |
+| **`setText("SUCCESS")` — multi-frame ISO-TP** | ✅ | user: *"i see success"*. Three frames with `30 01 00` flow control between them, panel-ACKed |
+| `setTime("1000")` via `CarminatDisplay` | ✅ | `[seq] clock set to 10:00 - done` |
+
+That `setText` is the first proof that the **segmented** transmit path works against real
+glass under the captured opening — a strictly harder path than the single-frame clock.
 
 **The transmit-failure signature that dogged this rig for a week was `frame.ss = 1`**
 (single-shot). Same wiring, same session, only that flag changed: `TX+ 43 / TX- 334` and
