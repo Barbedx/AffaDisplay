@@ -13,6 +13,27 @@ did not work** · **⬜ never run**.
 
 ---
 
+## Session of 2026-08-04 — the captured opening, on a real Carminat
+
+The first run against the **OEM-capture-derived** handshake (`docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`),
+06_authclock 0.6.0, ESP32-C3 with CTX=GPIO4 / CRX=GPIO3.
+
+| Capability | | Evidence |
+|---|---|---|
+| Cold opening from the display's own `61 11` | ✅ | `61 11 00 -> B0/B0/B0 -> 151 70 -> 1F1 70 -> FUNCSREG` in **194 ms** |
+| `setTime` **read off the glass** | ✅ | user: *"I CAN SEE 10 00"* — `151 05 56 31 30 30 30`, ACKed on `0x551` |
+| `setPower(true)` | ✅ | `151 03 52 09 00`, ACKed |
+| Panel control ACK `1C1 -> 5C1 74` | ✅ | `autoAcks-TX+ 2`, emitted between B0 fragments |
+| Steady state, 8+ minutes | ✅ | `pings 991`, `openings 1`, `TX+ 973`, **`TX- 0`**, `txErr/rxErr/busErr/busOff` all **0** |
+
+**The transmit-failure signature that dogged this rig for a week was `frame.ss = 1`**
+(single-shot). Same wiring, same session, only that flag changed: `TX+ 43 / TX- 334` and
+`busErr 63 120` became `TX+ 973 / TX- 0` and `busErr 0`. See
+[[affa-single-shot-was-the-tx-failure]] — a high `busErr` here was a symptom of the flag, not
+a statement about the wire.
+
+---
+
 ## Carminat / AFFA3
 
 | Capability | | Evidence |

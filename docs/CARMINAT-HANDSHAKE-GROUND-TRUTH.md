@@ -487,7 +487,7 @@ Filler→sender mapping (0/579 exceptions, proven by same-message/different-fill
 
 ### Unverified — flagged, do not treat as settled
 
-1. **No OEM radio has ever been captured sending `0x56` (setTime).** The four OEM captures end a few seconds past registration. The clock frame rests on the MeganeCAN corpus, our own bench ACK, and the visual confirmation in `docs/BENCH-VERIFIED.md:22`. Strong, but not OEM-observed.
+1. **No OEM radio has ever been captured sending `0x56` (setTime)** — but it is CONFIRMED ON GLASS: 2026-08-04, 06_authclock 0.6.0, user read `10:00` off a real Carminat after `151 05 56 31 30 30 30`. The command is proven; only its OEM provenance is not. The four OEM captures end a few seconds past registration. The clock frame rests on the MeganeCAN corpus, our own bench ACK, and the visual confirmation in `docs/BENCH-VERIFIED.md:22`. Strong, but not OEM-observed.
 2. **`02 54 01` and `02 54 03` are undecoded.** `0x54` is the close/hide opcode; the two arguments are unresolved. Whether they are required before a clock or text render is unknown — our bench run set the clock without them.
 3. **`1C1 02 64 0F` is undecoded** beyond "capability report". Three bytes, one sample per capture, always identical.
 4. **The 5 selector bytes in the text header `77 09 55 FF 31 01` are one sample.** Do not generalise. The ASCII payload `"   1056 "` is plausibly an FM frequency (105.6) and plausibly a track/clock field — one sample cannot settle it, and it is **not** a clock update.
