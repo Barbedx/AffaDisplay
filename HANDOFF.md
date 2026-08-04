@@ -1,4 +1,4 @@
-# Handoff — 2026-08-04, the day both families worked
+# Handoff — 2026-08-04/05, the day both families worked
 
 Library **0.5.0**. The previous handoff (2026-07-29) described a bench that could decode the
 panel but never establish a link. That problem was solved earlier today; this one records
@@ -56,6 +56,15 @@ burst answers the panel's *first* request rather than its second.
 attempt, 220 ms of wire time, every counter zero. That family had never put a frame on a bus
 before — its sequencing was an argument until that run. `docs/BENCH-VERIFIED.md` records what
 it proved and, more usefully, the four things it did **not**.
+
+**An unrelated project corroborates the whole opening, frame for frame.** A three-part
+[Hackaday series on this exact display](https://hackaday.io/project/27439-smart-car-radio/log/67942-reverse-engineering-the-renault-update-list-display-part-3),
+by a different author from a different car, documents `3DF 7A 01` → `3DF 79 00` →
+`3DF 70 1A 11 00 00 00 00 01` → `121 70` → `1B1 70` → `1B1 04 52 02 FF FF`. That is
+byte-identical to what this library emits, **in that order**. Those bytes reached us through
+`notes/archive_mhroczny/affa3.c` on the argument that the reference driver was trustworthy;
+an outsider arriving at the same six frames independently turns that argument into evidence
+— including the ORDER, which is the part step 8 changed on reasoning alone.
 
 Three rows scroll at independent speeds; pause/resume, per-row text and speed, clock entry,
 wire-log download, WiFi setup and OTA all work from the web console.
@@ -153,23 +162,25 @@ point `Ready` means what it used to mean. `09_golden` is the worked example: it 
 sending power and kept only its 750 ms warm-up, which is a property of the glass rather than
 of the protocol.
 
-### 3. The clock, if you want a small win
+### 3. The clock — ASKED AND ANSWERED, negatively. Do not re-run it blind
 
-The panel shows a time nobody set — it free-runs from its own power-on. UpdateList has no
-clock command and that is correct; the reference driver has none. But the panel is universal
-and there are two untried candidates, written up in `docs/BENCH-VERIFIED.md`:
+`examples/12_ulclock` fired **23 candidate frames over 7 passes — 162 probes** — at a
+registered, lit, rendering UpdateList session. **Nothing moved the clock.** The full table is
+in `docs/BENCH-VERIFIED.md`; between it, three independent reverse-engineering projects that
+document no clock frame either, and a Hackaday series describing the panel as having an
+*integrated* clock, the working conclusion is that **on this family the radio does not set
+the clock and the panel does.** If you need it set, drive the panel as Carminat —
+`151 05 56 "HHMM"` is proven on this exact unit.
 
-* **Carminat's `151 05 56 "HHMM"`** — already accepted by *this physical panel* on
-  2026-07-28, read off the glass as `10:00`. It needs `0x151` added to the UpdateList
-  function table so the `70` probe registers it. Cross-family and ugly; the only one with
-  evidence.
-* **`3EF A6 <hh> <mm>`** — three bytes, DLC 3, no PCI, no SF_DL, so it bypasses the
-  transport entirely and needs a raw `ICanLink::send()`. Transcribed from an OEM
-  radio↔cluster capture and never put on a bus by this library. It is the *designed* answer
-  for a panel whose head unit has no clock button, which is exactly this situation.
+**The reusable lesson is not the failure, it is the instrument.** THE PANEL ACKS EVERYTHING:
+it answered a terminal `74` to command bytes it has certainly never seen, on both registered
+functions. Anyone probing this family by watching for ACKs will believe they have found
+something twenty times over. It is the same trap as *"a dark panel ACKs a screen it never
+lights"*, one layer down, and it will bite the next protocol question too.
 
-Try the first for the evidence, then the second — because if the second works it is the
-right answer rather than the working one, and it needs no registration at all.
+If you do want to push further, the cheap next step is a **`70` probe sweep over candidate
+function ids** — the panel answers `<id>|0x400 74` for each function it accepts, so it will
+*tell you* its table instead of being guessed at.
 
 ### 4. Then the two open items below
 
