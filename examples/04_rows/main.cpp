@@ -1213,6 +1213,12 @@ void routes() {
     }
 
     const affa::TxDisposition sent = g_link.trySend(f);
+    // RECORD IT OURSELVES. This send deliberately bypasses the library — that is the whole
+    // point of a raw injector — so the library's Layer-0 frame tap never sees it and the
+    // frame would go out on the wire while /api/frames showed nothing. A diagnostic tool
+    // whose output is invisible in the diagnostic log is worse than no tool.
+    if (sent == affa::TxDisposition::Accepted) onTap(f, affa::Direction::Tx, nullptr);
+
     char msg[96];
     snprintf(msg, sizeof(msg), "0x%03lX %s\n", static_cast<unsigned long>(f.id),
              sent == affa::TxDisposition::Accepted ? "accepted by the controller"
