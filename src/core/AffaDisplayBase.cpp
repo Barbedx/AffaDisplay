@@ -355,11 +355,20 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
                                      _unauthControlIssued &&
                                      f.data[2] == kSyncStartFlag;
       if (f.data[2] == _profile.authRequestByte2 || bootstrapAnswered) {
-        // A START that arrives once we already hold registrations says the panel forgot us:
-        // "your registration is void". In every capture a registered display stops sending
-        // `61 11` entirely, so one arriving here is real loss, not chatter. Void the session
-        // before re-opening it, or stale 151/1F1 bytes cross into the new one.
-        if (bootstrapAnswered && hasFlag(_sync, SyncState::FuncsReg)) {
+        // ANY complete `61 11 xx` that arrives once we already hold registrations says the
+        // panel forgot us: "your registration is void". In every OEM capture a registered
+        // display stops sending `61 11` ENTIRELY — so one arriving here is real loss, never
+        // chatter, and the value of xx is irrelevant to that.
+        //
+        // THIS USED TO READ `bootstrapAnswered && ...`, which restricted the teardown to
+        // `61 11 01` and let `61 11 00` fall straight through: needsHelloBeforeAuth then
+        // computed false and NOTHING happened. Measured on the bench — the panel sent
+        // `61 11 00` twenty-six times, then fifteen more, while we cheerfully kept pushing
+        // fullscreen rows at it. A deauthorized panel asking to re-open must stop the
+        // application traffic, not be talked over.
+        if (hasFlag(_sync, SyncState::FuncsReg)) {
+          AFFA_LOGW(kTag, "61 11 %02X while registered - the panel voided us; reopening",
+                    static_cast<unsigned>(f.data[2]));
           setSync(SyncState::Failed, EventKind::SyncChanged);
           invalidateInFlightForSession(now);
           _authRequestObserved = false;
