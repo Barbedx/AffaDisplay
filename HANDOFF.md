@@ -4,19 +4,28 @@ The previous handoff (2026-07-29) described a bench that could decode the panel 
 establish a link. **That problem is solved and the whole protocol is now proven on glass.** It
 is archived at `docs/HANDOFF-2026-07-29.md`; almost every open question in it is answered here.
 
-The refactor planned in [`docs/REFACTOR-PLAN.md`](docs/REFACTOR-PLAN.md) is **partly done** —
-steps 2, 3 and 6 landed on 2026-08-04 and **none of it has been on glass**. Read that file
-second. Read this one first, and flash before you write any code.
+The refactor planned in [`docs/REFACTOR-PLAN.md`](docs/REFACTOR-PLAN.md) **landed on
+2026-08-04** — steps 2, 3, 4, 6, 7 and four of step 8's five items — and **it has been on
+glass**: the fully-refactored firmware opens the session unattended in 5.7 s and renders.
+Read that file second. Read this one first.
 
 ---
 
 ## Where things actually are
 
-**It works** — at `0a9095c`, which is the commit that was on glass. `examples/09_golden` on an
-ESP32 DevKit V1 ran unattended for 1 h 36 m: 24 912 fullscreen transfers, `failed 0`, and
-`txErr / rxErr / busErr / arbLost / rxMissed / ringOverflow` **all zero**. Three commits of
-refactor have gone in since and are unproven on hardware. Three rows scroll at independent speeds; pause/resume, per-row text
-and speed, clock entry, wire-log download, WiFi setup and OTA all work from the web console.
+**It works.** `examples/09_golden` on an ESP32 DevKit V1 ran unattended for 1 h 36 m at
+`0a9095c`: 24 912 fullscreen transfers, `failed 0`, and `txErr / rxErr / busErr / arbLost /
+rxMissed / ringOverflow` **all zero**. The refactored build reproduces the whole opening —
+announce, burst, the panel's `1C1`, registration, `03 52 09`, ISO-TP text — in 5.7 s from
+boot, and soaked 31.7 minutes with zero session losses.
+
+The library is now **`Phase`-driven**: one ordered value, one writer, nine named edges.
+`phase` is the first line to read when the glass is dark — a phase that will not advance
+names the frame that never arrived. `AwaitPeerChannel` in particular means the panel never
+got our announce, which is a failure that once cost a whole session to recognise.
+
+Three rows scroll at independent speeds; pause/resume, per-row text and speed, clock entry,
+wire-log download, WiFi setup and OTA all work from the web console.
 
 | | |
 |---|---|
@@ -49,8 +58,9 @@ registered       -> 3AF B9 every 500 ms        free-running. NOT a pong.
 
 Five rules that each cost a session to learn:
 
-1. **`61 11 00` and `61 11 01` are the same request.** One capture runs a whole session on
-   sixteen `01`s and zero `00`s.
+1. **`61 11 00` and `61 11 01` are the same request** — and so is every other byte 2. The
+   library stopped reading it on 2026-08-04; one capture runs a whole session on sixteen
+   `01`s and zero `00`s, and nothing distinguishes an unmeasured value from either.
 2. **Our `BA` comes first, and the panel's *next* request draws the burst.** Without it the
    panel never opens its `1C1` and nothing registers.
 3. **The display registers its channel before we register ours**, and its `1C1` must be
@@ -66,41 +76,36 @@ ISO-TP: DLC 8 always; first frame `10 <len>`; **the first consecutive frame is `
 
 ## What to do next, in order
 
-**FLASH AND SOAK. That is the next action, and nothing else should go in front of it.**
+**THE REFACTOR IS DONE — steps 2, 3, 4, 6, 7 and four-fifths of 8.** The fully-refactored
+build is flashed and running. What is left is a long soak (step 9) and one decision.
+
+### 1. Let it soak, and read the drop line
 
 ```
-pio run -e ex09_golden -t upload --upload-port COM5     # then power-cycle the display
+http://192.168.100.97/          ->   phase / drops / reason on the third line
+http://192.168.100.97/deregistered.txt        the frames from BEFORE the first drop
 ```
 
-Steps 2, 3 and 6 of `docs/REFACTOR-PLAN.md` are done (`2f561c0`, `9ac2a11`, `cc9c9db`).
-255 → **257/257** native, all nine examples build, nothing has been on glass yet.
+The step-2/3/6 build ran **31.7 min, 246 screens, zero drops, every counter zero**, where the
+proven build lost fourteen sessions in 96 min. **That is not a fix claim** — the reasoning,
+including why it is only ~1 % surprising, is in `docs/REFACTOR-PLAN.md` under "The drop did
+not happen". Run the next one long. `/deregistered.txt` lives in RAM: **download it before
+re-flashing.**
 
-What changed that the bench has not seen:
+### 2. Decide who owns power-before-render
 
-* Six settled profile flags are gone and **any complete `61 11 xx` is now one request**. On
-  every byte the captures contain, the wire is identical.
-* `Phase` — `Silent → Announced → HelloPending → AwaitPeerChannel → Registering → Settling →
-  Ready` — on the console, and it is the first line to read when the glass is dark. A phase
-  that will not advance names the missing frame.
-* **The ~7-minute drop is now instrumented**, which is the real reason to soak now rather
-  than after step 4. The status page counts drops and names the cause, and the first one
-  freezes the wire ring:
+The one item of step 8 not done, because it is a policy call rather than an implementation
+gap: should the library light the glass itself at the end of the opening, on a panel no
+application asked it to light? Carminat already replays power after every *re*-registration;
+only the first one is missing. Three options are laid out in `docs/REFACTOR-PLAN.md` under
+"Step 8's fifth item is a policy decision" — the middle one, a profile knob defaulting off,
+is the smallest thing that fixes the real failure (a panel that ACKs a screen it never
+lights) without overriding a build that wants the glass dark.
 
-```
-phase   Ready   drops 3  last 412s ago  (panel voided us (61 11 while registered))
-```
+### 3. Then the two open items below
 
-  → then `http://192.168.100.97/deregistered.txt` for the frames *before* the drop, the phase
-  it fell from, and every counter at that instant. `?clear=1` arms the next one. **Download
-  it before re-flashing** — it lives in RAM.
-
-A soak that comes back with `PanelVoided` versus `PeerTimeout` splits the open question in
-half on the first run, and either answer is worth more than another 96 minutes of `failed 0`.
-
-**Then step 4** — invert `Phase`, delete the nine booleans. It is the one step that rewrites
-the proven handshake, which is why it was held back; the argument is written out in
-`docs/REFACTOR-PLAN.md` under "Why step 4 was not done with 2 and 3". If you would rather
-just do it and soak once, nothing in step 4 depends on the soak — say so and it goes in.
+Neither blocks anything. The half-open-session hole needs a rule no capture provides; the
+~7-minute drop now reports itself.
 
 ### Two decisions already made, do not relitigate
 
@@ -157,6 +162,18 @@ special case standing in for a general rule.**
 
 Four times, the same error: encoding the case in front of me instead of the law the data
 states. The captures were unambiguous each time.
+
+**A fifth was found in a TEST, on 2026-08-04, which is worse.**
+`test_carminat_ignores_unknown_full_auth_until_00` asserted that `61 11 5A` produced nothing
+at all — no announce, no burst, no session — until a `61 11 00` arrived. No capture contains
+`5A`, or says byte 2 is read at all. The special case had been promoted from code into a
+regression test, where it looked like a measurement and would have outlived the code that
+made it true. It is now `test_any_complete_61_11_xx_is_the_same_request`.
+
+The lesson generalises past this bug: **a test that pins a flag's VALUE is weaker than one
+that pins the wire.** Four assertions of the form `TEST_ASSERT_FALSE(kSync.someFlag)` went
+with the flags they named, and every one of them would have gone on passing while the FSM
+did something else entirely.
 
 And the counters lie by omission. `rx 0` with zero errors fits *three* different states — a
 silent bus, a bus we cannot decode, and a controller that never started. Telling them apart

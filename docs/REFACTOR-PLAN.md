@@ -191,22 +191,60 @@ The library works. Each step must keep it working, and "it compiles" is not evid
    tenth thing that can disagree with the other nine is the disease. What makes step 4
    checkable is `test_phase_walks_the_measured_opening_in_order`, which drives the opening
    one frame at a time and pins which frame moves the phase on.
-4. **Invert it** — `Phase` becomes the source of truth, the booleans are deleted. **NEXT, and
-   the one step in this plan that rewrites the proven handshake.** See the note below on why
-   it did not land with 2 and 3.
-5. **Flash and soak Carminat.** Nothing may proceed on a red bench.
+4. ~~**Invert it**~~ — **DONE** (`67975d8`). `_authRequestObserved`, `_authHelloPending` and
+   `_unauthControlIssued` deleted; `_phase` has one writer, `enterPhase()`, and nine named
+   edges. What survives is documented as *not* a hedge: `_helloPending` is a transmit
+   cursor, `_unauthControlSpent` is a budget ("spent but never sent" is a real state),
+   `_peerChannelSeen` has to be a latch because the panel's `1C1` arrives *during* the
+   burst, and `_panelObserved` / `_syncRequestObserved` are facts about the peer.
+5. ~~**Flash and soak Carminat.**~~ — **DONE 2026-08-04.** The step-2/3/6 build opened the
+   session unattended in 5.6 s and ran **31.7 minutes, 246 screens, zero drops, every
+   counter zero**. See "the drop did not happen" below.
 6. ~~**Add the drop snapshot**~~ — **DONE EARLY** (`cc9c9db`), deliberately out of order: it
    had to exist before the step 5 soak or that soak collects the same evidence the last one
    did, which is none. `LossReason` in the library, `/deregistered.txt` in `09_golden`,
    `sessionsLost()` on the status page. Still outstanding: the ring snapshot belongs in the
    library once step 7 gives `AffaObserve` the tap; today it lives in the example.
-7. **Split the files.** Mechanical; no behaviour change in the same commit.
-8. **Move UpdateList onto the shared rules** — registration in the opening, peer-channel gate,
-   `61 11` teardown, power before render. `helloRequiresAnnounce = false` is its only
-   remaining difference. `test_updatelist_wire` must stay green: the BYTES do not change, only
-   the sequencing.
-9. **Flash and soak again.** A green suite has already let a broken handshake through twice
-   this session; only glass counts.
+7. ~~**Split the files.**~~ — **DONE** (`94e932e`). 605 / 710 / 728 / 184 lines. No behaviour
+   change, and it is *measured*: ex09_golden built either side of the split came out at
+   **identical RAM (60580) and Flash (862377) byte counts with 7018 defined symbols on both
+   sides, none added or removed.** 18 small leaf functions changed size by a few bytes —
+   cross-TU inlining, which is exactly and only what splitting a translation unit causes.
+8. ~~**Move UpdateList onto the shared rules**~~ — **FOUR OF FIVE DONE** (`fc33740`).
+   Registration in the opening, peer-channel gate, `61 11` teardown, heartbeat after
+   registration, `helloRequiresAnnounce = false` as the sole difference. Not one byte moved
+   and `test_updatelist_wire` is green. **Power-before-render is NOT done — see below.**
+9. **Flash and soak again.** The fully-refactored build is on the bench as of 2026-08-04 and
+   opened in 5.7 s. A green suite has already let a broken handshake through twice this
+   session; only glass counts.
+
+### Step 8's fifth item is a policy decision, not an implementation gap
+
+*"`Phase::Ready` should mean registered AND the glass is on, with the library emitting the
+family's power frame itself on the way there."* Everything needed for that exists — the
+durable-control cache already replays power after **every re-registration**, on Carminat,
+today. What is missing is only the **first** one, i.e. the library lighting a panel that no
+application asked it to light.
+
+That is the part that is not mine to decide:
+
+* It changes the family that is currently proven on glass, and `09_golden` already manages
+  power itself through `Stage::NeedPower` — so the panel would get the command twice.
+  Harmless (it is idempotent) but it is a wire change to a proven build.
+* A build that deliberately wants the glass dark at boot would be fighting the library.
+* It cannot be validated at all for UpdateList.
+
+Three ways to go, in increasing order of how much the library decides:
+
+1. **Leave it to the application** and keep `Ready` meaning *registered*. The rule then lives
+   in documentation, which is exactly what failed before.
+2. **A profile knob** — `powerOnAfterRegistration`, default off, on for Carminat once soaked.
+   The library owns the rule, the application can opt out, `Ready` still means registered.
+3. **Universal, as the plan says.** `Ready` means the glass is on, `09_golden` drops its
+   power stage, and the sequence is one place for both families.
+
+(2) is the smallest thing that fixes the actual failure — a panel that ACKs a screen it never
+lights — without taking a decision away from a build that may have a reason for it.
 
 ### Why step 4 was not done with 2 and 3, and the case for soaking first
 
@@ -254,6 +292,29 @@ burst. The two candidate rules are "re-burst, the opening failed" and "absorb, i
 duplicate", and picking wrong in the first direction re-opens the session on every panel that
 merely repeats itself. Do not guess it; measure it, or bound it with a timer that is honestly
 labelled as ours rather than the protocol's.
+
+## The drop did not happen — 2026-08-04, and this is NOT a fix claim
+
+The step-2/3/6 build ran **31.7 minutes with zero session losses**, 246 fullscreen transfers,
+every driver counter at zero. The build it replaced lost fourteen sessions in 96 minutes,
+i.e. one per 411 s on average. Over 1901 s a Poisson process at that rate misses entirely
+about **1 % of the time**.
+
+That is suggestive and it is not proof, and the difference matters:
+
+* The observed intervals ran from **15 s to 1409 s**, so the distribution is nothing like
+  Poisson — it is irregular in a way nobody has explained. A single 1901 s gap is *inside*
+  the observed spread, barely.
+* The paint rate was changed mid-run (2 s to 12 s per marquee step) to widen the snapshot
+  window. Rate was already shown not to drive the drop — 16× fewer screens gave the same
+  rate — but it is a variable that moved.
+* Nothing in steps 2, 3 or 6 was aimed at this. The only behavioural changes are `61 11 xx`
+  for an unmeasured byte 2, and a hold-window re-arm on the FUNCSREG teardown. Neither has a
+  mechanism that would stop a panel deauthorizing us.
+
+**So: do not write this down as fixed.** What it does mean is that the next soak is worth
+running long, and that if a drop does come, `/deregistered.txt` and the `LossReason` line now
+answer *which kind* it was on the first occurrence rather than the fifteenth.
 
 ## Open: why the panel drops the session every ~7 minutes
 
