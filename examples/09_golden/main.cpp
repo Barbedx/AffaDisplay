@@ -114,8 +114,16 @@ size_t       g_wireHead = 0;
 uint32_t     g_wireSeq = 0;
 portMUX_TYPE g_wireMux = portMUX_INITIALIZER_UNLOCKED;
 
+bool g_logHeartbeats = false;   // the 1 Hz B9/69 pair floods a ring you want for a handshake
+
 void onWire(const affa::Frame& f, affa::Direction d, void*) {
   const bool tx = (d == affa::Direction::Tx);
+  // HEARTBEATS ARE 4 FRAMES A SECOND AND THEY NEVER COALESCE, because B9 and 69 alternate.
+  // Left in, they evict an entire 120-row ring in thirty seconds and every post-mortem shows
+  // nothing but the heartbeat. Filtered by default; the toggle is on the console.
+  if (!g_logHeartbeats && f.len >= 1 &&
+      ((f.id == 0x3AF && f.data[0] == 0xB9) || (f.id == 0x3CF && f.data[0] == 0x69)))
+    return;
   portENTER_CRITICAL(&g_wireMux);
   ++g_wireSeq;
   WireRec& last = g_wire[(g_wireHead + kWireRing - 1) % kWireRing];
@@ -166,13 +174,32 @@ void windowOf(const Row& r, char* out, size_t n) {
 // Completion callback — delivery verdicts arrive here, on the library's task
 // ---------------------------------------------------------------------------
 volatile uint32_t g_okCount = 0, g_failCount = 0;
+uint32_t g_refused = 0;
 volatile uint8_t  g_lastResult = 0;
 volatile bool     g_screenBusy = false;
+
+// THE GLASS HAS TO BE TURNED ON BEFORE ANYTHING DRAWN ON IT IS VISIBLE, and the panel does
+// not tell you which state it is in. `03 52 09` is the first application payload in all four
+// OEM captures — never a screen, never a clock — and a fullscreen sent to a dark panel is
+// ACKed exactly like one sent to a lit panel. Found on the bench: a flawless ring (announce,
+// burst, registration, 400 ms settle, 14-frame transfer, terminal 74) and nothing on screen,
+// because this example painted rows without ever sending power-on.
+enum class Stage : uint8_t { NeedPower, WarmUp, Live };
+Stage    g_stage      = Stage::NeedPower;
+uint32_t g_warmUntil  = 0;
+constexpr uint32_t kWarmUpMs = 750;   // the panel does not announce that its glass is lit
 
 void onDone(affa::rtos::TxRequest, affa::Result r, void*) {
   g_lastResult = static_cast<uint8_t>(r);
   if (r == affa::Result::Ok) ++g_okCount; else ++g_failCount;
   g_screenBusy = false;
+  // The power render completing is what starts the warm-up clock — NOT the moment it was
+  // enqueued. On a busy bus the ACK can take longer than the warm-up itself, so a deadline
+  // armed at enqueue time has already expired when the glass actually begins to light.
+  if (g_stage == Stage::NeedPower && r == affa::Result::Ok) {
+    g_stage     = Stage::WarmUp;
+    g_warmUntil = millis() + kWarmUpMs;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +211,23 @@ void onDone(affa::rtos::TxRequest, affa::Result r, void*) {
 // only when the previous one COMPLETED and the visible text actually MOVED is self-limiting
 // and cannot lag.
 void pumpRows(uint32_t now) {
+  // Power on, wait for its ACK, let the glass light, and only then draw. Same order as
+  // 03_hello and as every OEM capture.
+  if (g_stage == Stage::NeedPower) {
+    if (g_screenBusy) return;
+    if (g_task.setPower(true) != affa::rtos::kNoRequest) {
+      g_screenBusy = true;
+      logmsg("display ON queued - waiting for its ACK, then %lu ms warm-up",
+             static_cast<unsigned long>(kWarmUpMs));
+    }
+    return;
+  }
+  if (g_stage == Stage::WarmUp) {
+    if (static_cast<int32_t>(now - g_warmUntil) < 0) return;
+    g_stage = Stage::Live;
+    logmsg("glass warm - rows are live");
+  }
+
   if (!g_paused) {
     for (auto& r : g_row) {
       if (r.periodMs == 0 || static_cast<int32_t>(now - r.nextAt) < 0) continue;
@@ -204,7 +248,15 @@ void pumpRows(uint32_t now) {
   if (g_task.showFullscreenText(w[0], w[1], w[2]) != affa::rtos::kNoRequest) {
     g_screenBusy = true;
     for (int i = 0; i < 3; ++i) snprintf(g_shown[i], sizeof(g_shown[i]), "%s", w[i]);
+    return;
   }
+  // REFUSED, AND SAYING SO. A silent refusal here is a frozen screen with every counter
+  // looking healthy — which is exactly how this presented on the bench: `screens ok 1` and
+  // rows that never moved again. Rate-limited so a persistent refusal cannot itself flood.
+  ++g_refused;
+  if (g_refused == 1 || (g_refused % 200) == 0)
+    logmsg("showFullscreenText REFUSED x%lu (task queue full?)",
+           static_cast<unsigned long>(g_refused));
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +369,20 @@ String wireText() {
   return out;
 }
 
+// ACTION ENDPOINTS MUST NOT 301. PsychicRequest::redirect() sends 301 Moved Permanently,
+// which browsers cache FOR EVER: the first click works, and every click after it is served
+// from cache without ever reaching the board. The button then looks broken while the
+// endpoint behind it is perfectly fine. 303 See Other is the correct code for "I did the
+// thing, now go look at this page", and it is explicitly not cacheable.
+esp_err_t seeOther(PsychicRequest* r) {
+  PsychicResponse res(r);
+  res.setCode(303);
+  res.addHeader("Location", "/");
+  res.addHeader("Cache-Control", "no-store");
+  res.setContent("");
+  return res.send();
+}
+
 void routes() {
   g_server.on("/", HTTP_GET, [](PsychicRequest* r) {
     String out;
@@ -337,6 +403,9 @@ void routes() {
 
     // Forms, not JavaScript: a GET form is the smallest thing that works everywhere.
     out += g_paused ? "<a href='/pause?on=0'>[ RESUME ]</a> " : "<a href='/pause?on=1'>[ PAUSE ]</a> ";
+    out += "<a href=/wire.txt><b>[ DOWNLOAD WIRE LOG ]</b></a> ";
+    out += g_logHeartbeats ? "<a href='/heartbeats?on=0'>[ hide heartbeats ]</a> "
+                           : "<a href='/heartbeats?on=1'>[ show heartbeats ]</a> ";
     out += "<a href='/update'>[ OTA ]</a> <a href='/wifi'>[ WiFi ]</a><br><br>";
     for (int i = 0; i < 3; ++i) {
       snprintf(b, sizeof(b),
@@ -364,11 +433,67 @@ void routes() {
     return r->reply(200, "text/html", out.c_str());
   });
 
+  // DOWNLOAD THE WHOLE RING. The page shows only the newest rows — a response sized to the
+  // full ring is a multi-kilobyte allocation on the HTTP task and blanks the page when it
+  // fails — but a post-mortem wants all of it, and a one-shot download is not on the 2 s
+  // refresh path. Content-Disposition makes the browser save it instead of rendering it.
+  g_server.on("/wire.txt", HTTP_GET, [](PsychicRequest* r) {
+    WireRec snap[kWireRing];
+    size_t head; uint32_t seq;
+    portENTER_CRITICAL(&g_wireMux);
+    memcpy(snap, g_wire, sizeof(snap));
+    head = g_wireHead; seq = g_wireSeq;
+    portEXIT_CRITICAL(&g_wireMux);
+
+    String out;
+    out.reserve(kWireRing * 64 + 512);
+    char line[128];
+    snprintf(line, sizeof(line),
+             "# AffaDisplay %s  img %.8s\n# up %lus, %lu frames seen, ring holds %u\n"
+             "# heartbeats (3AF B9 / 3CF 69) are %s\n"
+             "#   first    last   xN dir  id  data\n",
+             kVersion, ESP.getSketchMD5().c_str(),
+             static_cast<unsigned long>(millis() / 1000),
+             static_cast<unsigned long>(seq), static_cast<unsigned>(kWireRing),
+             g_logHeartbeats ? "INCLUDED" : "filtered out");
+    out += line;
+    for (size_t i = 0; i < kWireRing; ++i) {
+      const WireRec& w = snap[(head + i) % kWireRing];
+      if (!w.count) continue;
+      int n = snprintf(line, sizeof(line), "%8lu %7lu %4lu  %s %03X ",
+                       static_cast<unsigned long>(w.firstMs),
+                       static_cast<unsigned long>(w.lastMs),
+                       static_cast<unsigned long>(w.count),
+                       w.tx ? "TX" : "RX", static_cast<unsigned>(w.id));
+      for (uint8_t b = 0; b < 8; ++b)
+        n += snprintf(line + n, sizeof(line) - n, " %02X", static_cast<unsigned>(w.d[b]));
+      out += line; out += '\n';
+    }
+
+    PsychicResponse res(r);
+    res.setCode(200);
+    res.setContentType("text/plain");
+    char fname[96];
+    snprintf(fname, sizeof(fname), "attachment; filename=affa-wire-%lus.txt",
+             static_cast<unsigned long>(millis() / 1000));
+    res.addHeader("Content-Disposition", fname);
+    res.setContent(out.c_str());
+    return res.send();
+  });
+
+  // Heartbeats are filtered from the ring by default so a handshake is still readable
+  // thirty seconds later. Turn them on when the question IS the heartbeat.
+  g_server.on("/heartbeats", HTTP_GET, [](PsychicRequest* r) {
+    if (r->getParam("on")) g_logHeartbeats = r->getParam("on")->value().toInt() != 0;
+    logmsg("wire log heartbeats %s", g_logHeartbeats ? "INCLUDED" : "filtered");
+    return seeOther(r);
+  });
+
   g_server.on("/pause", HTTP_GET, [](PsychicRequest* r) {
     if (r->getParam("on")) g_paused = r->getParam("on")->value().toInt() != 0;
     saveRows();
     logmsg("rows %s", g_paused ? "PAUSED" : "resumed");
-    return r->redirect("/");
+    return seeOther(r);
   });
 
   g_server.on("/row", HTTP_GET, [](PsychicRequest* r) {
@@ -381,7 +506,7 @@ void routes() {
     saveRows();
     logmsg("row %d = \"%s\" @ %lu ms", i, g_row[i].text,
            static_cast<unsigned long>(g_row[i].periodMs));
-    return r->redirect("/");
+    return seeOther(r);
   });
 
   g_server.on("/clock", HTTP_GET, [](PsychicRequest* r) {
@@ -390,7 +515,7 @@ void routes() {
     // Another one-liner: the library builds `05 56 'H''H''M''M'` and owns the ACK.
     const bool ok = g_task.setTime(v.c_str()) != affa::rtos::kNoRequest;
     logmsg("clock %s -> %s", v.c_str(), ok ? "queued" : "REFUSED");
-    return r->redirect("/");
+    return seeOther(r);
   });
 
   // Minimal WiFi manager: show the saved SSID and let it be changed. Credentials live in
@@ -499,7 +624,11 @@ void loop() {
   if (registered != s_wasRegistered) {
     s_wasRegistered = registered;
     logmsg(registered ? "panel REGISTERED - rows are live" : "registration lost");
-    if (registered) { for (auto& s : g_shown) s[0] = 0; g_screenBusy = false; }
+    if (registered) {
+      for (auto& s : g_shown) s[0] = 0;
+      g_screenBusy = false;
+      g_stage = Stage::NeedPower;   // a new session starts with a dark panel
+    }
   }
 
   if (registered) pumpRows(now);
@@ -508,15 +637,47 @@ void loop() {
   if (static_cast<int32_t>(now - s_nextStatus) >= 0) {
     s_nextStatus = now + 5000;
     const affa::CanCommonLink::Driver d = g_link.driver();
-    Serial.printf("[%lu] sync 0x%02X reg %d | screens ok %lu fail %lu | drv s=%u txErr %lu "
+    Serial.printf("[%lu] sync 0x%02X reg %d | screens ok %lu fail %lu busy %d refused %lu q %u | drv s=%u txErr %lu "
                   "rxErr %lu busErr %lu qTx %lu\n",
                   static_cast<unsigned long>(now),
                   static_cast<unsigned>(g_task.status().sync), registered ? 1 : 0,
                   static_cast<unsigned long>(g_okCount),
                   static_cast<unsigned long>(g_failCount),
+                  g_screenBusy ? 1 : 0, static_cast<unsigned long>(g_refused),
+                  static_cast<unsigned>(g_display.queued()),
                   static_cast<unsigned>(d.state), static_cast<unsigned long>(d.txErr),
                   static_cast<unsigned long>(d.rxErr), static_cast<unsigned long>(d.busErr),
                   static_cast<unsigned long>(d.queuedTx));
+  }
+
+  // FULL WIRE DUMP ON DEMAND. Send any character on the serial port and the ENTIRE ring is
+  // printed, oldest first, uncoalesced counts included. The web page shows only the newest
+  // rows on purpose — a response sized to the whole ring is a multi-kilobyte allocation on
+  // the HTTP task and goes BLANK when it fails — but a handshake post-mortem needs all of it,
+  // and serial has no such limit.
+  if (Serial.available()) {
+    while (Serial.available()) Serial.read();
+    WireRec snap[kWireRing];
+    size_t head; uint32_t seq;
+    portENTER_CRITICAL(&g_wireMux);
+    memcpy(snap, g_wire, sizeof(snap));
+    head = g_wireHead; seq = g_wireSeq;
+    portEXIT_CRITICAL(&g_wireMux);
+
+    Serial.printf("\n===== WIRE DUMP: %lu frames seen, ring holds %u =====\n",
+                  static_cast<unsigned long>(seq), static_cast<unsigned>(kWireRing));
+    Serial.println("   first    last   xN dir  id  data");
+    for (size_t i = 0; i < kWireRing; ++i) {
+      const WireRec& w = snap[(head + i) % kWireRing];
+      if (!w.count) continue;
+      Serial.printf("%8lu %7lu %4lu  %s %03X  %02X %02X %02X %02X %02X %02X %02X %02X\n",
+                    static_cast<unsigned long>(w.firstMs),
+                    static_cast<unsigned long>(w.lastMs),
+                    static_cast<unsigned long>(w.count),
+                    w.tx ? "TX" : "RX", static_cast<unsigned>(w.id),
+                    w.d[0], w.d[1], w.d[2], w.d[3], w.d[4], w.d[5], w.d[6], w.d[7]);
+    }
+    Serial.println("===== END WIRE DUMP =====\n");
   }
 
   ElegantOTA.loop();
