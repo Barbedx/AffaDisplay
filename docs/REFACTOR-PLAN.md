@@ -116,10 +116,42 @@ driver rather than inferred:
 | any `61 11 xx` while registered voids the session | **no `61 11` teardown at all**; `FUNCSREG` survives. Only the peer watchdog drops it |
 | `03 52 09` must precede any render or the glass stays dark | **no such rule**; builds routinely render having never sent `0x1B1` |
 
-**So the two families do not collapse into one behaviour, and the three knobs in the profile
-above are exactly what they are for.** `Opening`, `registerInOpening` and a peer-channel gate
-carry the whole difference. Forcing UpdateList onto the Carminat rules would break a family
-nobody can currently test on hardware — which is the failure this plan exists to avoid.
+### DECISION 2026-08-04: UpdateList adopts the Carminat rules
+
+The owner's call, and the reasoning is sound: **the two originals were nearly the same code**
+(`archive_mhroczny/affa3.c` is the ancestor of *both* — see the naming note below), the
+Carminat side has been reworked against OEM captures and proven on glass for 96 minutes, and
+the UpdateList reference *worked* rather than being *right*. A driver whose only heartbeat was
+a pong for most of its life, that registers lazily and serially, and that cannot notice a panel
+deauthorizing it, is coincidence-shaped. We take the measured machine over the surviving one.
+
+So all five differences are **deliberately removed**, one exception aside:
+
+| # | UpdateList reference did | we will do | note |
+|---|---|---|---|
+| 1 | answers the first `61 11` immediately | **same — answer the first request** | THE ONE EXCEPTION. `helloRequiresAnnounce = false`. Our `BA` should provoke a `61 11`, but the panel also volunteers them, so the announce is not a precondition here |
+| 2 | lazy, serial registration on first render | **registration in the opening**, pipelined | `registerInOpening = true` |
+| 3 | ACKs `0A9 70`, gates nothing | **wait for the peer channel** before registering ours | same gate as Carminat |
+| 4 | no `61 11` teardown; `FUNCSREG` survives | **any `61 11` while registered voids the session** | same rule, byte 2 irrelevant |
+| 5 | no power-before-render rule | **`1B1 04 52 02 FF FF` is mandatory before any text** | a panel that is not on ACKs a render it never lights |
+
+**Consequence for the design: the knobs shrink further.** `registerInOpening`,
+`waitForPeerChannel`, the teardown rule and power-before-render all become **universal code**,
+not configuration. Only `helloRequiresAnnounce` remains a genuine per-family difference — plus
+the identity bytes and timings, which is what a profile should have been all along.
+
+**And the library should own power-before-render.** Both families now require it, and it is
+exactly the kind of rule an application forgets — this one did, and the panel ACKed a screen it
+never lit. `Phase::Ready` should mean *"registered AND the glass is on"*, with the library
+emitting the family's power frame itself on the way there. That is what "the library handles
+it and exposes an API" has to mean.
+
+### Naming trap, recorded because it wastes an hour every time
+
+`notes/archive_mhroczny/affa3.c` is the **UpdateList** ancestor, not Carminat — it defines
+`0x3DF` / `0x121` / `0x1B1`, which are the UpdateList ids. Meanwhile this repository calls the
+*Carminat* family "AFFA3 NAV". So the file named `affa3` implements what we call AFFA2. Do not
+assume the numbering agrees with ours.
 
 ### The one finding to act on first
 
@@ -146,14 +178,28 @@ refactor and silently changing a family nobody can currently test on hardware.
 
 The library works. Each step must keep it working, and "it compiles" is not evidence.
 
-1. **Extract the UpdateList byte truth** from the reference. Report only, no code.
+1. ~~**Extract the UpdateList byte truth**~~ — **DONE**, see the section above. The bytes are
+   right; the logic differs; the owner has ruled that it adopts the Carminat rules.
 2. **Collapse the dead flags.** Pure deletion of settled hedges. 255 tests green.
 3. **Introduce `Phase`** alongside the booleans, derived from them, and assert they agree.
 4. **Invert it** — `Phase` becomes the source of truth, the booleans are deleted.
-5. **Split the files.** Mechanical; no behaviour change in the same commit.
-6. **Unify UpdateList** onto the profile, guided by step 1.
-7. **Flash and soak** after 4 and after 6. A green suite has already let a broken handshake
-   through this session; only glass counts.
+5. **Flash and soak Carminat.** Nothing may proceed on a red bench.
+6. **Add the drop snapshot** — freeze the ring on leaving `Ready`, expose
+   `/deregistered.txt`. Cheap once `Phase` exists, and it turns the open question above into
+   a measurement instead of a mystery.
+7. **Split the files.** Mechanical; no behaviour change in the same commit.
+8. **Move UpdateList onto the shared rules** — registration in the opening, peer-channel gate,
+   `61 11` teardown, power before render. `helloRequiresAnnounce = false` is its only
+   remaining difference. `test_updatelist_wire` must stay green: the BYTES do not change, only
+   the sequencing.
+9. **Flash and soak again.** A green suite has already let a broken handshake through twice
+   this session; only glass counts.
+
+> Step 8 changes a family that cannot currently be tested on hardware. The mitigation is that
+> every byte it emits is already pinned by golden vectors, and what changes is *when* frames go
+> out, not *what* is in them. If an UpdateList panel ever reaches the bench and stalls, the
+> first knob to turn is `replyToPing` (see above), and the second is reverting step 8's
+> registration timing to lazy.
 
 ## Open: why the panel drops the session every ~7 minutes
 
@@ -179,9 +225,28 @@ timer on either side. Remaining candidates, untested: the panel re-registering a
 behaviour for this unit; CPU contention between WiFi and the CAN poll task; or something in our
 heartbeat timing that the OEM radio does differently.
 
-**The next measurement is a capture of the moment itself** — the drop is preceded by whatever
-causes it, and the wire log holds 120 rows with heartbeats filtered, which is enough to see it
-if the trace is downloaded promptly after a drop. `/wire.txt` exists for exactly this.
+**Accepted for now** (owner, 2026-08-04): the recovery is good enough to ship on, and this goes
+to the backlog rather than blocking the refactor. But it needs to stop being invisible.
+
+### Build the evidence capture into the refactor — `Phase` makes it nearly free
+
+The problem is that the drop scrolls away: by the time anyone looks, the ring holds the frames
+of the *recovery*, not of the cause. Downloading `/wire.txt` promptly is a race nobody wins at
+2 a.m.
+
+**Snapshot the ring at the transition.** When `Phase` leaves `Ready` for any reason, copy the
+wire ring into a second, non-circular buffer and stop writing it. That freeze is exactly the
+mechanism `04_rows` already had for its DEAF watchdog — which is why the retirement of that
+freeze should be a *move*, not a deletion. Expose it as:
+
+* `/deregistered.txt` — the frames immediately **before** the drop, the phase it fell from,
+  the reason the FSM recorded, and the driver counters at that instant
+* a count and a timestamp of the last N transitions on the status page, so a soak reports
+  "14 drops" instead of the owner discovering it by reading a log
+
+`Phase` gives the exact hook: one place where `Ready` is left, one place to snapshot. Without
+it that hook is spread across the twenty-two booleans, which is a large part of why nobody
+noticed fourteen re-openings during a soak that looked perfect.
 
 ## What must not be lost
 
