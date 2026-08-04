@@ -122,6 +122,12 @@ constexpr bool hasFlag(SyncState v, SyncState f) noexcept {
 // session is lost, never partly lost. Print it on any diagnostic surface: the last four
 // protocol bugs were all found by watching a phase that would not advance.
 //
+// `Ready` MEANS THE GLASS IS ON, not merely that we are registered, and that is deliberate.
+// A panel that has not been powered ACKs a screen it never lights: every counter reports
+// success and the display stays black, which is a failure mode with no symptom. The library
+// sends the family's power-on command itself on the way through `Powering` — see
+// AffaDisplayBase::setAutoPower() for the opt-out and for what `Ready` means without it.
+//
 // AwaitPeerChannel is the one nobody expects and it is measured 4/4: the DISPLAY registers
 // its own channel (`1C1 70`, answered `5C1 74`) before the radio registers its functions.
 // A bench that stalls here — "waiting for the display's 1C1" — is a panel that never got
@@ -133,7 +139,8 @@ enum class Phase : uint8_t {
   AwaitPeerChannel,  // burst done; waiting for the panel to open ITS channel
   Registering,       // our function probes are out, awaiting their ACKs
   Settling,          // the measured quiet interval between registration and any payload
-  Ready,             // registered and past the quiet interval: rendering permitted
+  Powering,          // the family's power-on command is out, awaiting its ACK
+  Ready,             // the glass is on: rendering permitted
 };
 
 // WHY THE LAST SESSION ENDED. There are exactly four ways to leave FUNCSREG and they call
@@ -175,6 +182,7 @@ inline const char* phaseName(Phase p) {
     case Phase::AwaitPeerChannel: return "AwaitPeerChannel";
     case Phase::Registering:      return "Registering";
     case Phase::Settling:         return "Settling";
+    case Phase::Powering:         return "Powering";
     case Phase::Ready:            return "Ready";
   }
   return "?";

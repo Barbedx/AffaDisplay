@@ -219,13 +219,11 @@ void onDone(affa::rtos::TxRequest, affa::Result r, void*) {
   g_lastResult = static_cast<uint8_t>(r);
   if (r == affa::Result::Ok) ++g_okCount; else ++g_failCount;
   g_screenBusy = false;
-  // The power render completing is what starts the warm-up clock — NOT the moment it was
-  // enqueued. On a busy bus the ACK can take longer than the warm-up itself, so a deadline
-  // armed at enqueue time has already expired when the glass actually begins to light.
-  if (g_stage == Stage::NeedPower && r == affa::Result::Ok) {
-    g_stage     = Stage::WarmUp;
-    g_warmUntil = millis() + kWarmUpMs;
-  }
+  // The warm-up used to be armed here, off the completion of the application's own power
+  // render. It moved to pumpRows() with the power itself: `Phase::Ready` already means the
+  // command was ACKED, not merely sent, which is the same guarantee this branch existed to
+  // provide — the ACK can outlast the warm-up on a busy bus, so a deadline armed at enqueue
+  // time has already expired by the time the glass begins to light.
 }
 
 // ---------------------------------------------------------------------------
@@ -237,16 +235,20 @@ void onDone(affa::rtos::TxRequest, affa::Result r, void*) {
 // only when the previous one COMPLETED and the visible text actually MOVED is self-limiting
 // and cannot lag.
 void pumpRows(uint32_t now) {
-  // Power on, wait for its ACK, let the glass light, and only then draw. Same order as
-  // 03_hello and as every OEM capture.
+  // POWER IS THE LIBRARY'S JOB NOW. This used to call setPower(true) here and wait for its
+  // ACK; since 2026-08-04 the library sends the family's power-on itself at the end of the
+  // opening and does not report Phase::Ready until it is acknowledged. So the application's
+  // whole share of "03 52 09 before anything is drawn" is: do not draw before Ready.
+  //
+  // The example kept the WARM-UP, because that is a property of the GLASS and not of the
+  // protocol — the panel ACKs the power command before the display is actually legible, and
+  // a screen drawn into that window is lost with every counter reporting success.
   if (g_stage == Stage::NeedPower) {
-    if (g_screenBusy) return;
-    if (g_task.setPower(true) != affa::rtos::kNoRequest) {
-      g_screenBusy = true;
-      logmsg("display ON queued - waiting for its ACK, then %lu ms warm-up",
-             static_cast<unsigned long>(kWarmUpMs));
-    }
-    return;
+    if (g_task.status().phase != affa::Phase::Ready) return;
+    g_stage     = Stage::WarmUp;
+    g_warmUntil = now + kWarmUpMs;
+    logmsg("panel powered by the library - %lu ms warm-up",
+           static_cast<unsigned long>(kWarmUpMs));
   }
   if (g_stage == Stage::WarmUp) {
     if (static_cast<int32_t>(now - g_warmUntil) < 0) return;

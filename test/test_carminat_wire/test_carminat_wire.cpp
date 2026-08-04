@@ -460,6 +460,11 @@ void test_hideInfoPopup_falls_back_to_the_source_banner(void) {
 
 void test_first_send_after_a_resync_registers_both_functions_in_order(void) {
   Rig r;
+  // Auto-power off: this test is about probe ORDER, and it goes on to exercise the
+  // application-owned power path explicitly below. Letting the library send its own
+  // `03 52 09` here would put a frame between the probes and that setPower() and prove
+  // nothing about either. See AffaDisplayBase::setAutoPower().
+  r.d.setAutoPower(false);
   r.d.begin();
   // Armed before the opening: the probes now leave WITH the final hello frame, so a rig that
   // arms the emulator afterwards parks the first one in WaitAck for ever.

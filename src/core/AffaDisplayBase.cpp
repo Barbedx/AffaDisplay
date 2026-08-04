@@ -70,6 +70,8 @@ bool AffaDisplayBase::begin() {
   _lastCompleted  = kNoTicket;
   _lastEnqueued   = kNoTicket;
   _lastResult     = Result::Ok;
+  _autoPowerTicket   = kNoTicket;        // NOT _autoPower: that is a build's decision and
+                                         // survives begin(), like _passive and _selfAck
   _sessionsLost      = 0;                // counted since THIS begin(), so a re-begin() does
   _lastSessionLossMs = 0;                // not carry a previous run's drops into a soak
   _lastLossReason    = LossReason::None;
@@ -113,8 +115,11 @@ void AffaDisplayBase::poll() {
   // expiring, so it has no frame to hang on and is promoted here instead. After pumpTx()
   // deliberately: the gate that actually holds the payloads back is in there, and a phase
   // that said Ready before that gate opened would be a lie a console would repeat.
+  // The power-on the library queued at registration is still in flight, so `Ready` waits for
+  // its ACK. Issuing it is NOT done here — see setSync()'s FuncsReg rising edge for why the
+  // enqueue has to happen a full quiet interval earlier than this.
   if (_phase == Phase::Settling && expired(_clock.millis(), _nextPayloadMs))
-    enterPhase(Phase::Ready);
+    enterPhase(_autoPowerTicket == kNoTicket ? Phase::Ready : Phase::Powering);
 
   onPoll();
 
@@ -546,6 +551,8 @@ void AffaDisplayBase::setPassive(bool on) {
 }
 bool AffaDisplayBase::passive() const { return _passive; }
 void AffaDisplayBase::setSelfAck(bool on) { _selfAck = on; }
+void AffaDisplayBase::setAutoPower(bool on) { _autoPower = on; }
+bool AffaDisplayBase::autoPower() const { return _autoPower; }
 
 // STORED, AND THE SOURCE OF TRUTH — step 4 of docs/REFACTOR-PLAN.md is done. It was derived
 // from the booleans for exactly one commit, long enough for

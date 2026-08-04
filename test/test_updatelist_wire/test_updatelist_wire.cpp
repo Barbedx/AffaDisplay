@@ -236,14 +236,19 @@ void test_registration_walks_the_function_table_with_0x81_filler(void) {
   // from the receive pump, so it is always ahead of anything the sync pump schedules.
   affatest::expectFrame(r.link, kAckToKeyId[0],
                         "the 4A9 74 reflex answers the panel's own channel");
-  expectFrames(r.link, kRegister, 2, "registration walks {0x121, 0x1B1} with 0x81 filler");
+  affatest::expectFrame(r.link, kRegister[0], "registration walks 0x121 first...");
+  affatest::expectFrame(r.link, kRegister[1], "...then 0x1B1, both with 0x81 filler");
   TEST_ASSERT_TRUE_MESSAGE(r.d.registered(),
                            "the opening completes registration with no application help");
 
-  // The payload then follows on its own, behind a registration that is already done.
-  ASSERT_RESULT(Ok, r.d.setPower(true));
-  pumpUntilIdle(r.d);
-  expectFrames(r.link, kSetStateEnable, 1, "and the render follows the completed table");
+  // AND THEN THE LIBRARY LIGHTS THE GLASS ITSELF — this family's `04 52 02 FF FF`, not
+  // Carminat's `03 52 09`, from the same rule and the same place in the opening. No
+  // application asked for it, which is the point: a panel that is not on ACKs a screen it
+  // never lights, and this build never calls setPower() at all.
+  expectFrames(r.link, kSetStateEnable, 1, "the opening ends by powering the panel on");
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(static_cast<uint8_t>(affa::Phase::Ready),
+                                  static_cast<uint8_t>(r.d.phase()),
+                                  "and only then is the phase Ready");
 }
 
 // ---------------------------------------------------------------------------

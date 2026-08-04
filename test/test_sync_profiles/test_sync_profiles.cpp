@@ -113,6 +113,17 @@ void finishCarminatRegistration(CarRig& r) {
   TEST_ASSERT_TRUE_MESSAGE(r.d.registered(), "Carminat functions should register");
 }
 
+// Registration is no longer the end of the opening: the library sends the family's power-on
+// itself and only reports Ready once it is acknowledged. A test that is not ABOUT that has
+// to let it finish, or one `03 52 09` turns up in the middle of its frame sequence.
+void finishCarminatPower(CarRig& r) {
+  r.clk.advance(carminat::kPayloadAfterRegistrationMs);
+  for (int i = 0; i < 8 && r.d.phase() != Phase::Ready; ++i) r.d.poll();
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(static_cast<uint8_t>(Phase::Ready),
+                                  static_cast<uint8_t>(r.d.phase()),
+                                  "the opening ends at Ready, with the glass on");
+}
+
 // The whole measured opening, up to and including a COMPLETED registration, with the link
 // drained and the clock left at request-time + 93 ms.
 //
@@ -132,6 +143,11 @@ void openCarminatSession(CarRig& r) {
   finishCarminatHello(r);
   finishCarminatRegistration(r);
   drain(r.link);
+  // DELIBERATELY LEFT AT Settling, and the clock deliberately left at t = 93. Several
+  // callers measure the heartbeat's free-running phase from the request at t = 0, and
+  // advancing 400 ms here to reach Ready would move every deadline they assert. A caller
+  // that pumps past the quiet interval will see the library's own power-on; the ones that
+  // must not, because they are counting frames in a window, turn it off explicitly.
 }
 
 // THE UPDATELIST OPENING, since 2026-08-04 the same machine as Carminat's.
@@ -150,6 +166,11 @@ void openUpdateListSession(UlRig& r) {
   for (int i = 0; i < 8 && !r.d.registered(); ++i) r.d.poll();
   TEST_ASSERT_TRUE_MESSAGE(r.d.registered(),
                            "the UpdateList opening registers without a render");
+  // …and then the library lights the glass, here as on the other family.
+  for (int i = 0; i < 8 && r.d.phase() != Phase::Ready; ++i) r.d.poll();
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(static_cast<uint8_t>(Phase::Ready),
+                                  static_cast<uint8_t>(r.d.phase()),
+                                  "the UpdateList opening ends at Ready too");
   drain(r.link);
 }
 
@@ -365,7 +386,10 @@ void test_carminat_announces_into_a_silent_bus_slowly_and_ba_only(void) {
   // The heartbeat cannot start before registration completes (see below), so the rig has to
   // be able to finish one. Self-ACK is armed before anything is injected, exactly as the
   // instructions for a Carminat opening require.
+  //
+  // Auto-power off: frame counting in a timing window, as above.
   r.d.setSelfAck(true);
+  r.d.setAutoPower(false);
   r.d.begin();
 
   // The initial FAILED state is local bookkeeping, not permission to put BA probes on the
@@ -731,9 +755,66 @@ void test_phase_walks_the_measured_opening_in_order(void) {
   r.clk.advance(carminat::kPayloadAfterRegistrationMs - 1);
   r.d.poll();
   assertPhase(r, Phase::Settling, "399 ms is not 400");
+
+  // THE GLASS IS NOT ON YET, AND Ready SAYS SO. The library sends `03 52 09` itself here.
+  // Before this existed the phase went straight to Ready and an application that forgot to
+  // power the panel got a session that ACKed every screen and lit none of them — success on
+  // every counter, black glass, no symptom.
   r.clk.advance(1);
   r.d.poll();
-  assertPhase(r, Phase::Ready, "and only now may an application render");
+  assertPhase(r, Phase::Powering, "registered is not lit: the power command is out");
+  expectFrame(r.link, kCarminatPowerOn, "…and it is the family's own 03 52 09 00");
+
+  r.d.poll();
+  assertPhase(r, Phase::Ready, "its ACK is what finally permits an application to render");
+}
+
+void test_an_application_that_owns_power_is_not_overridden(void) {
+  // AUTO-POWER FILLS A GAP; IT DOES NOT COMPETE. A build that has already said what it wants
+  // — including a deliberate OFF — must not have the library talk over it at the end of the
+  // opening, or `setPower(false)` becomes a value that silently reverts once per session.
+  CarRig r;
+  r.d.begin();
+  r.d.setSelfAck(true);
+  TEST_ASSERT_EQUAL(Result::Ok, r.d.setPower(false));   // deliberately dark
+  affatest::carminatOpeningRequest(r.d, r.link);
+  finishCarminatHello(r);
+  finishCarminatRegistration(r);
+  r.clk.advance(carminat::kPayloadAfterRegistrationMs);
+  affatest::pumpUntilIdle(r.d);
+
+  assertPhase(r, Phase::Ready, "an application that owns power reaches Ready directly");
+  static const Frame kPowerOff =
+      {0x151, 8, {0x03, 0x52, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false};
+  bool sawOff = false, sawOn = false;
+  Frame f;
+  while (r.link.takeSent(f)) {
+    if (f.id == 0x151 && f.data[0] == 0x03 && f.data[1] == 0x52) {
+      if (f.data[2] == kPowerOff.data[2]) sawOff = true;
+      if (f.data[2] == kCarminatPowerOn.data[2]) sawOn = true;
+    }
+  }
+  TEST_ASSERT_TRUE_MESSAGE(sawOff, "the application's OFF is what went out");
+  TEST_ASSERT_FALSE_MESSAGE(sawOn, "and the library did NOT turn the panel on behind it");
+}
+
+void test_auto_power_can_be_turned_off(void) {
+  // The opt-out. `Ready` then means what it meant before 2026-08-04 — registered — and the
+  // build decides for itself when the glass lights.
+  CarRig r;
+  r.d.begin();
+  r.d.setAutoPower(false);
+  TEST_ASSERT_FALSE(r.d.autoPower());
+  r.d.setSelfAck(true);
+  affatest::carminatOpeningRequest(r.d, r.link);
+  finishCarminatHello(r);
+  finishCarminatRegistration(r);
+  drain(r.link);
+  r.clk.advance(carminat::kPayloadAfterRegistrationMs);
+  r.d.poll();
+
+  assertPhase(r, Phase::Ready, "without auto-power the opening ends at registration");
+  expectNoFrame(r, "and nothing is sent to the display that the application did not ask for");
 }
 
 void test_phase_falls_back_when_the_panel_voids_the_session(void) {
@@ -745,9 +826,9 @@ void test_phase_falls_back_when_the_panel_voids_the_session(void) {
   r.d.begin();
   openCarminatSession(r);
   r.clk.advance(carminat::kPayloadAfterRegistrationMs);
-  r.d.poll();
+  affatest::pumpUntilIdle(r.d);
   drain(r.link);
-  assertPhase(r, Phase::Ready, "the soak's steady state");
+  assertPhase(r, Phase::Ready, "the soak's steady state — registered AND lit");
   TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.d.sessionsLost(),
                                    "opening a session is not losing one");
 
@@ -773,7 +854,13 @@ void test_phase_falls_back_when_the_panel_voids_the_session(void) {
   drain(r.link);
   finishCarminatRegistration(r);
   drain(r.link);
+  // THE SECOND SESSION DOES NOT AUTO-POWER, AND IT DOES NOT NEED TO. The first one's
+  // `03 52 09` was cached as durable control on its ACK, so the recovery replays it from
+  // there — the library's own power-on stands down for exactly the same reason it stands
+  // down for an application's: a desired state already exists. Ready therefore arrives
+  // without a second auto-power, and the glass is still lit.
   r.clk.advance(carminat::kPayloadAfterRegistrationMs);
+  affatest::pumpUntilIdle(r.d);
   r.d.poll();
   assertPhase(r, Phase::Ready, "self-healed, which is why nobody noticed fourteen of these");
   TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, r.d.sessionsLost(),
@@ -952,7 +1039,13 @@ void test_carminat_never_pongs_between_heartbeats(void) {
   // Mid-interval ping. Nothing may leave, and — the stronger half — the heartbeat must
   // still land on the deadline it already owned, not 500 ms after the ping. A pong
   // implementation consumes the cadence and would shift that deadline.
+  //
+  // AUTO-POWER OFF, and every test below that says this means the same thing: it counts
+  // frames in a timing window, and the library's own `03 52 09` at the end of the opening
+  // is noise in that window. Using the feature's own opt-out keeps the test measuring one
+  // thing; the glass being lit is pinned by test_phase_walks_the_measured_opening_in_order.
   CarRig r;
+  r.d.setAutoPower(false);
   r.d.begin();
   // t = 0 for the request, so the first B9 is due at t = 500; the opening (announce plus a
   // completed registration) leaves the clock at t = 93. Registration has to finish here or
@@ -984,7 +1077,10 @@ void test_a_ping_storm_never_moves_the_free_running_heartbeat(void) {
   // floored by AFFA_PING_REPLY_MIN_MS". Measured against a real radio the answer is
   // stronger and simpler: ZERO. A storm of pings changes neither the frame count nor the
   // heartbeat's phase.
+  //
+  // Auto-power off: frame counting in a timing window, as above.
   CarRig r;
+  r.d.setAutoPower(false);
   r.d.begin();
   // First B9 due at t = 500, counted from the 61 11 00 the opening starts with. Registration
   // is completed inside the helper because the heartbeat does not start before FUNCSREG.
@@ -1228,6 +1324,8 @@ int main(int, char**) {
   RUN_TEST(test_any_complete_61_11_xx_is_the_same_request);
   RUN_TEST(test_phase_walks_the_measured_opening_in_order);
   RUN_TEST(test_phase_falls_back_when_the_panel_voids_the_session);
+  RUN_TEST(test_an_application_that_owns_power_is_not_overridden);
+  RUN_TEST(test_auto_power_can_be_turned_off);
   RUN_TEST(test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediately);
   RUN_TEST(test_short_dlc_carminat_auth_request_stays_silent);
   RUN_TEST(test_short_dlc_peer_alive_is_honoured);

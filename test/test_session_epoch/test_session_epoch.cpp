@@ -322,6 +322,10 @@ void assertBootstrapStormIsBounded(StuckLink::Mode mode) {
 // must wait for a genuinely new, fully acknowledged registration table.
 void test_late_registration_ack_cannot_revive_a_torn_down_session(void) {
   Rig r;
+  // Auto-power off: the race under test is a stale `551` against a held CLOCK, and the
+  // library's own `03 52 09` would sit between the registration and that clock in two
+  // separate sessions. See AffaDisplayBase::setAutoPower().
+  r.display.setAutoPower(false);
   r.display.begin();
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Result::Ok),
                     static_cast<uint8_t>(r.display.setTime("1000")));
@@ -473,6 +477,9 @@ void test_bare_first_69_gets_one_discovery_ba_but_never_unlocks_output(void) {
 // none at all because the ping "already answered".
 void test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9(void) {
   Rig r;
+  // Auto-power off: this counts B9s in a 500 ms window and the library's own `03 52 09`
+  // lands inside it. See AffaDisplayBase::setAutoPower().
+  r.display.setAutoPower(false);
   r.display.begin();
   // Two requests, both at t = 0, with our bare `BA` announce between them — the burst answers
   // the panel's SECOND ask ([CAP] 4/4; SyncProfile::helloRequiresAnnounce). The announce

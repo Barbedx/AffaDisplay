@@ -104,6 +104,25 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   void setPassive(bool on);
   bool passive() const;
 
+  // THE LIBRARY LIGHTS THE GLASS. At the end of the opening — after registration and after
+  // the family's measured quiet interval — it sends the panel's power-on command itself and
+  // waits for the ACK before reporting Phase::Ready.
+  //
+  // WHY IT IS THE LIBRARY'S JOB. A panel that is not on ACKs a screen it never lights. Every
+  // counter says success, `failed 0`, and the glass stays black; there is no symptom to
+  // notice and nothing to debug against. It is exactly the kind of rule an application
+  // forgets, and this one did.
+  //
+  // IT NEVER OVERRIDES THE APPLICATION. If a desired power state has already been expressed
+  // — queued, or cached from an earlier ACK, including a deliberate `setPower(false)` — the
+  // library leaves it alone and goes straight to Ready. So this fills a gap; it does not
+  // compete. A panel whose family has no power command is likewise untouched.
+  //
+  // Turn it off for a build that must decide for itself when the glass lights. `Ready` then
+  // means "registered", which is what it meant before 2026-08-04.
+  void setAutoPower(bool on);
+  bool autoPower() const;
+
   // Bench self-ACK: the TX FSM acknowledges its own frames, so a multi-frame message goes
   // out in full with no panel attached. Wire bytes are identical to a real send.
   //
@@ -553,6 +572,12 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   uint8_t   _funcCount;
   bool      _passive = false;
   bool      _selfAck = false;
+  // See setAutoPower(). On by default: the failure it prevents has no symptom, so opting IN
+  // would mean every build that never heard of it keeps the bug.
+  bool      _autoPower = true;
+  // The ticket of the power-on the library issued itself, so its completion — and only its
+  // completion — is what promotes Powering to Ready. kNoTicket when none is in flight.
+  TxTicket  _autoPowerTicket = kNoTicket;
   bool      _inPoll  = false;   // re-entrancy guard, not a feature
   bool      _begun   = false;   // begin() has run at least once
   void*     _pollOwner   = nullptr;   // null = unchecked (caller-owned mode)

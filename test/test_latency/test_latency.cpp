@@ -47,6 +47,12 @@ struct Rig {
   Rig() : d(link, clk) {}
 
   void sync(bool selfAck = false) {
+    // AUTO-POWER OFF FOR THE WHOLE SUITE. Every test here counts frames and asserts queue
+    // ORDER, and the library's own `03 52 09` at the end of the opening is an extra job in
+    // exactly the queue under test. `up()` expresses a power state itself, which would
+    // suppress it anyway; `sync()` does not, so it is turned off in one place rather than
+    // in each test. See AffaDisplayBase::setAutoPower().
+    d.setAutoPower(false);
     d.begin();
     // The 0x70 registrations leave with the final hello frame on this family, so a rig that
     // wants them acknowledged must arm the emulator before the opening, not after.

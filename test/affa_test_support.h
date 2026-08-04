@@ -197,6 +197,14 @@ inline void settleCarminatRegistration(D& d, FakeClock& clk) {
   TEST_ASSERT_TRUE_MESSAGE(d.registered(), "Carminat registrations must complete first");
   clk.advance(affa::carminat::kPayloadAfterRegistrationMs);
   d.poll();
+  // AND THE LIBRARY LIGHTS THE GLASS. Since 2026-08-04 the end of the opening is not
+  // registration but `Phase::Ready`, and the way through it is the family's power-on
+  // command — unless the caller already expressed a desired power state, in which case
+  // nothing extra goes out and this loop is one poll. A helper that stopped at
+  // `registered()` would leave every test built on it asserting against a session the
+  // library still considers half-open, and the symptom would be one unexplained `03 52 09`
+  // in the middle of somebody else's frame sequence.
+  for (uint8_t i = 0; i < 8 && d.phase() == affa::Phase::Powering; ++i) d.poll();
 }
 #endif
 

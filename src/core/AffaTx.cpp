@@ -576,6 +576,25 @@ void AffaDisplayBase::finishJob(Result r, bool allowRetry) {
         // its first payload, and a render inside that window is a screen the panel takes
         // and does not draw. poll() promotes Settling -> Ready when the interval expires.
         enterPhase(Phase::Settling);
+
+        // AND THE GLASS GETS LIT — QUEUED HERE, A FULL QUIET INTERVAL BEFORE IT CAN GO OUT,
+        // AND THAT IS THE POINT. `03 52 09` must precede any render, so it has to be IN THE
+        // QUEUE before the application's held work becomes eligible, not raced against it
+        // when the gate opens. Queued here it inherits the same `_nextPayloadMs` gate as
+        // every other payload and simply leaves first.
+        //
+        // See setAutoPower(). The three ways it declines are all "somebody else already has
+        // an opinion, or there is nothing to have an opinion about":
+        //   * a desired power state is already queued or cached — including a deliberate
+        //     OFF, which must not be undone by a session the application did not ask for
+        //   * the family has no power command, so setPower() returns NotSupported
+        //   * the build turned it off
+        // Any of those leaves `_autoPowerTicket` clear and the phase goes straight to Ready.
+        const bool appOwnsPower =
+            _cachedControl.valid || hasQueuedControl() || reassertQueued();
+        if (_autoPower && !_passive && !appOwnsPower && supports(Feature::Power) &&
+            setPower(true) == Result::Ok)
+          _autoPowerTicket = _lastEnqueued;
       }
     } else {
       // IT NO LONGER TAKES THE PAYLOADS WITH IT. The legacy affa3_send propagated a failed
@@ -616,6 +635,24 @@ void AffaDisplayBase::completeTicket(TxTicket t, Result r) {
   if (t == kNoTicket) return;
   _lastCompleted = t;
   _lastResult    = r;
+
+  // THE GLASS IS ON — or it is not going to be, and Ready is still the right answer.
+  //
+  // This is the edge that ends Phase::Powering, and it fires on ANY terminal result, not
+  // only on Ok. A power command the panel refused leaves the display dark, which is bad; a
+  // library that answers "not Ready" for ever because of it is worse, because then nothing
+  // renders and the application has no way to find out why. The failure is on the ticket
+  // and in the log; the phase moves on.
+  if (t == _autoPowerTicket) {
+    _autoPowerTicket = kNoTicket;
+    if (_phase == Phase::Powering) {
+      if (r != Result::Ok)
+        AFFA_LOGW(kTag, "auto power-on failed (%u) — the glass may be dark",
+                  static_cast<unsigned>(r));
+      enterPhase(Phase::Ready);
+    }
+  }
+
   if (_cplCb) _cplCb(t, r, _cplCtx);
 
   Event ev;
