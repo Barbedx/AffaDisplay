@@ -180,13 +180,26 @@ The library works. Each step must keep it working, and "it compiles" is not evid
 
 1. ~~**Extract the UpdateList byte truth**~~ — **DONE**, see the section above. The bytes are
    right; the logic differs; the owner has ruled that it adopts the Carminat rules.
-2. **Collapse the dead flags.** Pure deletion of settled hedges. 255 tests green.
-3. **Introduce `Phase`** alongside the booleans, derived from them, and assert they agree.
-4. **Invert it** — `Phase` becomes the source of truth, the booleans are deleted.
+2. ~~**Collapse the dead flags.**~~ — **DONE** (`2f561c0`). Six went:
+   `authRequestByte2`, `helloAfterBootstrapRequest`, `helloOnNonAuthRequest`,
+   `oneShotResyncOnStart`, `oneShotResyncOnPeerAlive`, `bootstrapAliveFrame`, and with them
+   the whole second copy of the request branch, `BootstrapStage`, and `_unauthControlStage`.
+   Not a pure deletion in the end, and the commit says so: making `61 11 xx` one request
+   changes what an unmeasured byte 2 does, and closing the second branch closed the only
+   inbound teardown of a pre-`FUNCSREG` session (see the new open item below).
+3. ~~**Introduce `Phase`**~~ — **DONE** (`9ac2a11`), derived rather than stored, because a
+   tenth thing that can disagree with the other nine is the disease. What makes step 4
+   checkable is `test_phase_walks_the_measured_opening_in_order`, which drives the opening
+   one frame at a time and pins which frame moves the phase on.
+4. **Invert it** — `Phase` becomes the source of truth, the booleans are deleted. **NEXT, and
+   the one step in this plan that rewrites the proven handshake.** See the note below on why
+   it did not land with 2 and 3.
 5. **Flash and soak Carminat.** Nothing may proceed on a red bench.
-6. **Add the drop snapshot** — freeze the ring on leaving `Ready`, expose
-   `/deregistered.txt`. Cheap once `Phase` exists, and it turns the open question above into
-   a measurement instead of a mystery.
+6. ~~**Add the drop snapshot**~~ — **DONE EARLY** (`cc9c9db`), deliberately out of order: it
+   had to exist before the step 5 soak or that soak collects the same evidence the last one
+   did, which is none. `LossReason` in the library, `/deregistered.txt` in `09_golden`,
+   `sessionsLost()` on the status page. Still outstanding: the ring snapshot belongs in the
+   library once step 7 gives `AffaObserve` the tap; today it lives in the example.
 7. **Split the files.** Mechanical; no behaviour change in the same commit.
 8. **Move UpdateList onto the shared rules** — registration in the opening, peer-channel gate,
    `61 11` teardown, power before render. `helloRequiresAnnounce = false` is its only
@@ -195,11 +208,52 @@ The library works. Each step must keep it working, and "it compiles" is not evid
 9. **Flash and soak again.** A green suite has already let a broken handshake through twice
    this session; only glass counts.
 
+### Why step 4 was not done with 2 and 3, and the case for soaking first
+
+Steps 2, 3 and 6 landed together on 2026-08-04. Step 4 deliberately did not, and the plan's
+own sequencing is the argument against that decision, so here is the argument for it.
+
+Right now the tree is a *good* thing to put on a bench: the behavioural delta since the
+proven build is one branch (`61 11 xx` for xx outside {00, 01}) plus a hold-window re-arm,
+and everything else added is observation — `Phase`, `sessionsLost()`, `LossReason`,
+`/deregistered.txt`. If it soaks clean, that is a real result, and if it does not, the
+suspect list is two items long.
+
+Step 4 rewrites `handleSyncFrame`, `pumpSync`, `pumpHello`, `pumpUnauthControl`,
+`linkReady`, `pumpTx`'s gates and `begin()` — the whole opening — against a host suite
+only. Stacking it on top of 2 and 3 before any bench check means that if the next soak is
+red, three unvalidated changes are in the frame at once. **A green suite has already let a
+broken handshake through twice this session**; that sentence is in this plan and in
+HANDOFF.md, and it is the reason to spend one bench cycle here.
+
+Owner's call. If the answer is "just do 4 and soak once", nothing in step 4 depends on the
+soak having happened — the phase tests are the safety net either way.
+
 > Step 8 changes a family that cannot currently be tested on hardware. The mitigation is that
 > every byte it emits is already pinned by golden vectors, and what changes is *when* frames go
 > out, not *what* is in them. If an UpdateList panel ever reaches the bench and stalls, the
 > first knob to turn is `replyToPing` (see above), and the second is reverting step 8's
 > registration timing to lazy.
+
+## Open, new on 2026-08-04: a half-open session has no teardown
+
+Deleting the second request branch (step 2) closed the only path by which an inbound frame
+could void a session that had **drawn its burst but not yet latched `FUNCSREG`**. The
+teardown is now gated on `FUNCSREG`, which is the measured rule — *"any `61 11` while
+registered means the panel voided us"* — and the peer watchdog does not run before `FUNCSREG`
+either, because `pumpSync()` returns early on `registerAfterHello && !FuncsReg`.
+
+**It is not a regression.** A real panel sends `00` or `01`, and both were already absorbed
+in that state; only an unmeasured byte 2 reached the branch that tore down. But it is a hole:
+if our `151` probe is never acknowledged, the library re-queues registrations for ever and
+nothing — no frame, no timer — says the opening failed.
+
+Closing it means deciding what a `61 11` arriving *after* the burst and *before* registration
+means, and **no capture answers that**: in all four, the panel stops asking once it has the
+burst. The two candidate rules are "re-burst, the opening failed" and "absorb, it is a
+duplicate", and picking wrong in the first direction re-opens the session on every panel that
+merely repeats itself. Do not guess it; measure it, or bound it with a timer that is honestly
+labelled as ours rather than the protocol's.
 
 ## Open: why the panel drops the session every ~7 minutes
 

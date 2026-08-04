@@ -4,16 +4,18 @@ The previous handoff (2026-07-29) described a bench that could decode the panel 
 establish a link. **That problem is solved and the whole protocol is now proven on glass.** It
 is archived at `docs/HANDOFF-2026-07-29.md`; almost every open question in it is answered here.
 
-Next session's job is a **refactor**, fully planned in
-[`docs/REFACTOR-PLAN.md`](docs/REFACTOR-PLAN.md). Read that file second. Read this one first.
+The refactor planned in [`docs/REFACTOR-PLAN.md`](docs/REFACTOR-PLAN.md) is **partly done** —
+steps 2, 3 and 6 landed on 2026-08-04 and **none of it has been on glass**. Read that file
+second. Read this one first, and flash before you write any code.
 
 ---
 
 ## Where things actually are
 
-**It works.** `examples/09_golden` on an ESP32 DevKit V1 ran unattended for 1 h 36 m: 24 912
-fullscreen transfers, `failed 0`, and `txErr / rxErr / busErr / arbLost / rxMissed /
-ringOverflow` **all zero**. Three rows scroll at independent speeds; pause/resume, per-row text
+**It works** — at `0a9095c`, which is the commit that was on glass. `examples/09_golden` on an
+ESP32 DevKit V1 ran unattended for 1 h 36 m: 24 912 fullscreen transfers, `failed 0`, and
+`txErr / rxErr / busErr / arbLost / rxMissed / ringOverflow` **all zero**. Three commits of
+refactor have gone in since and are unproven on hardware. Three rows scroll at independent speeds; pause/resume, per-row text
 and speed, clock entry, wire-log download, WiFi setup and OTA all work from the web console.
 
 | | |
@@ -21,7 +23,7 @@ and speed, clock entry, wire-log download, WiFi setup and OTA all work from the 
 | board | ESP32 DevKit V1, **CRX → GPIO5, CTX → GPIO4**, 500 kbit/s |
 | flash | `pio run -e ex09_golden -t upload --upload-port COM5` |
 | console | `http://192.168.100.97/` (joins the saved network; falls back to AP `AffaGolden`/`affagolden`) |
-| tests | `pio test -e native` → **255/255**. `rm -rf .pio/build/native` first if results look odd — a stale build has hidden real failures here twice |
+| tests | `pio test -e native` → **257/257**. `rm -rf .pio/build/native` first if results look odd — a stale build has hidden real failures here twice |
 | protocol truth | `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`, derived from `docs/captures/*.csv` |
 
 The C3 SuperMini at `192.168.100.85` **cannot receive** — its CANRX reads permanently dominant.
@@ -64,15 +66,41 @@ ISO-TP: DLC 8 always; first frame `10 <len>`; **the first consecutive frame is `
 
 ## What to do next, in order
 
-`docs/REFACTOR-PLAN.md` has the full design and rationale. The short version:
+**FLASH AND SOAK. That is the next action, and nothing else should go in front of it.**
 
-The sync FSM carries **18 profile flags and 22 state variables**, nearly all of them hedges
-between competing theories of a wire that is now measured. Collapse them into one explicit
-`Phase` enum, reduce `SyncProfile` to identity + timings + one real knob, split the 2102-line
-`AffaDisplayBase.cpp` into four units, and bring UpdateList onto the same rules.
+```
+pio run -e ex09_golden -t upload --upload-port COM5     # then power-cycle the display
+```
 
-Nine steps, sequenced so each is provable. **Flash and soak after step 5 and step 9** — a green
-suite has already let a broken handshake through twice.
+Steps 2, 3 and 6 of `docs/REFACTOR-PLAN.md` are done (`2f561c0`, `9ac2a11`, `cc9c9db`).
+255 → **257/257** native, all nine examples build, nothing has been on glass yet.
+
+What changed that the bench has not seen:
+
+* Six settled profile flags are gone and **any complete `61 11 xx` is now one request**. On
+  every byte the captures contain, the wire is identical.
+* `Phase` — `Silent → Announced → HelloPending → AwaitPeerChannel → Registering → Settling →
+  Ready` — on the console, and it is the first line to read when the glass is dark. A phase
+  that will not advance names the missing frame.
+* **The ~7-minute drop is now instrumented**, which is the real reason to soak now rather
+  than after step 4. The status page counts drops and names the cause, and the first one
+  freezes the wire ring:
+
+```
+phase   Ready   drops 3  last 412s ago  (panel voided us (61 11 while registered))
+```
+
+  → then `http://192.168.100.97/deregistered.txt` for the frames *before* the drop, the phase
+  it fell from, and every counter at that instant. `?clear=1` arms the next one. **Download
+  it before re-flashing** — it lives in RAM.
+
+A soak that comes back with `PanelVoided` versus `PeerTimeout` splits the open question in
+half on the first run, and either answer is worth more than another 96 minutes of `failed 0`.
+
+**Then step 4** — invert `Phase`, delete the nine booleans. It is the one step that rewrites
+the proven handshake, which is why it was held back; the argument is written out in
+`docs/REFACTOR-PLAN.md` under "Why step 4 was not done with 2 and 3". If you would rather
+just do it and soak once, nothing in step 4 depends on the soak — say so and it goes in.
 
 ### Two decisions already made, do not relitigate
 
@@ -90,8 +118,17 @@ suite has already let a broken handshake through twice.
 **Why the panel drops the session every ~7 minutes.** Fourteen times in a 96-minute soak,
 invisible because recovery works. **The paint rate is NOT the cause** — tested at 16× fewer
 screens, same drop rate. All driver counters stay zero across the drops, and the intervals are
-15 s to 1409 s, so it is neither electrical nor a timer. Step 6 of the plan captures the wire
-at the moment it happens.
+15 s to 1409 s, so it is neither electrical nor a timer. **It is no longer invisible:** the
+next soak counts the drops, names the cause (`PanelVoided` / `PeerTimeout` / `LinkRestarted`)
+and freezes the wire ring at the first one. See "What to do next".
+
+**A half-open session has no teardown, as of 2026-08-04.** A session that drew its burst but
+never latched `FUNCSREG` cannot be voided by any inbound frame, and the peer watchdog does not
+run before `FUNCSREG` either — so if our `151` probe is never acknowledged, registration
+re-queues for ever and nothing says the opening failed. Not a regression (a real panel sends
+`00` or `01`, and both were already absorbed there), but a hole. Closing it needs a rule for a
+`61 11` arriving after the burst and before registration, and **no capture answers that** —
+in all four the panel stops asking once it has the burst. Do not guess it.
 
 **`replyToPing = false` is unverified for UpdateList.** Its reference pongs every `0x69`, and
 that pong was its *only* heartbeat until March 2026. We removed it on the strength of four
