@@ -65,6 +65,44 @@ constexpr uint32_t   kBitrate = 500000;
 
 constexpr const char* kText = "SUCCESS";
 
+// ---------------------------------------------------------------------------
+// The phrases
+// ---------------------------------------------------------------------------
+// AFTER the proof frame, the panel cycles these. It is not decoration: a render path that
+// works ONCE and a render path that stays healthy are different claims, and the second one
+// is the interesting one. Every phrase is a complete four-frame ISO-TP transfer with flow
+// control between each fragment, so this is a continuous soak of the transport as well as
+// something nice to look at.
+//
+// TWELVE CHARACTERS IS THE BUDGET, and it is a wire fact rather than a style choice: the
+// `76` encoding shows `kNewCells` = 12 (docs/WIRE-SPEC.md §9.1). A thirteenth character is
+// not truncated politely — it changes the declared length and the frame count with it.
+// Uppercase because that is what these panels were built to render.
+const char* const kPhrases[] = {
+    "COGITATING",   "PONDERING",    "PERCOLATING",  "RUMINATING",
+    "NOODLING",     "SIMMERING",    "MARINATING",   "BREWING",
+    "CONJURING",    "FINAGLING",    "WHIRRING",     "PUZZLING",
+    "MULLING",      "SCHEMING",     "MUSING",       "TINKERING",
+    "WRANGLING",    "HERDING CATS", "VIBING",       "CHURNING",
+    "DISTILLING",   "FERMENTING",   "INCUBATING",   "SPELUNKING",
+    "TRANSMUTING",  "CALIBRATING",  "SYNTHESIZING", "DIVINING",
+    "CHANNELING",   "SUMMONING",    "WEAVING",      "RETICULATING",
+};
+constexpr size_t kPhraseCount = sizeof(kPhrases) / sizeof(kPhrases[0]);
+constexpr uint32_t kPhraseHoldMs = 2500;
+
+// A phrase every 2.5 s is gentle on the bus — one transfer is ~30 ms — and slow enough to
+// read. The panel is not a progress bar.
+size_t   g_phraseIx  = kPhraseCount;   // out of range = nothing shown yet
+uint32_t g_nextPhraseAt = 0;
+
+affa::TxTicket g_textTicket = affa::kNoTicket;
+bool           g_textSent   = false;
+uint32_t       g_firstRxMs  = 0;
+bool           g_busy       = false;   // one render in flight, always
+uint32_t       g_rendered   = 0;
+uint32_t       g_renderFail = 0;
+
 struct ArduinoClock final : affa::IClock {
   uint32_t millis() const override { return ::millis(); }
 };
@@ -106,11 +144,24 @@ void onDone(affa::TxTicket t, affa::Result r, void*) {
   Serial.printf("[%8lu] ** ticket %u -> %s (%u)\n", static_cast<unsigned long>(millis()),
                 static_cast<unsigned>(t),
                 r == affa::Result::Ok ? "OK" : "FAILED", static_cast<unsigned>(r));
+  // DELIVERY ARRIVES HERE, NOT FROM THE RENDER CALL. setText() returns an ACCEPTANCE
+  // verdict — "did this go into the queue" — and the panel's answer comes later, on this
+  // callback. Releasing the in-flight latch anywhere else is how a queue eats itself.
+  g_busy = false;
+  if (r == affa::Result::Ok) ++g_rendered; else ++g_renderFail;
 }
 
-affa::TxTicket g_textTicket = affa::kNoTicket;
-bool           g_textSent   = false;
-uint32_t       g_firstRxMs  = 0;
+// NEVER THE SAME PHRASE TWICE RUNNING. A repeat is indistinguishable from a frozen panel —
+// which is the exact failure this is meant to make visible — so the one thing the randomness
+// must guarantee is that something CHANGED.
+size_t nextPhrase() {
+  if (kPhraseCount < 2) return 0;
+  size_t ix;
+  do {
+    ix = esp_random() % kPhraseCount;   // the hardware RNG: no seeding, no rand() sequence
+  } while (ix == g_phraseIx);
+  return ix;
+}
 
 }  // namespace
 
@@ -178,6 +229,32 @@ void loop() {
                     "delivery one\n", static_cast<unsigned long>(now),
                     static_cast<unsigned>(r));
     g_textSent = true;
+    g_busy = (r == affa::Result::Ok);
+    // Let the proof frame be READ before the cycle starts talking over it.
+    g_nextPhraseAt = now + 4000;
+  }
+
+  // THE PHRASE CYCLE. Three gates, and each one is a bug this library has actually had:
+  //   Ready      — never render at a panel that is not registered and lit
+  //   !g_busy    — one message in flight; two setText calls in a row COALESCE, because they
+  //                share RenderSlot::Text, and the second silently replaces the first
+  //   deadline   — paced by the wall clock, never by a poll count
+  if (g_textSent && !g_busy && g_display.phase() == affa::Phase::Ready &&
+      static_cast<int32_t>(now - g_nextPhraseAt) >= 0) {
+    const size_t ix = nextPhrase();
+    const affa::Result r = g_display.setText(kPhrases[ix]);
+    if (r == affa::Result::Ok) {
+      g_phraseIx = ix;
+      g_busy     = true;
+      g_nextPhraseAt = now + kPhraseHoldMs;
+      Serial.printf("[%8lu] >> \"%s\"\n", static_cast<unsigned long>(now), kPhrases[ix]);
+    } else {
+      // A refusal that is not reported is a frozen panel with every counter looking
+      // healthy — which is exactly how this presented on the Carminat bench once.
+      Serial.printf("[%8lu] !! setText refused (%u) — retrying on the next tick\n",
+                    static_cast<unsigned long>(now), static_cast<unsigned>(r));
+      g_nextPhraseAt = now + 250;
+    }
   }
 
   // TWICE A SECOND, AND IT INCLUDES QUEUE DEPTHS. `rx 0` with zero errors fits three
@@ -189,11 +266,14 @@ void loop() {
     s_nextStatus = now + 500;
     const affa::Stats st = g_display.stats();
     const affa::CanCommonLink::Driver d = g_link.driver();
-    Serial.printf("[%8lu] .. phase %-16s sync 0x%02X reg %d | rx %lu tx %lu txDrop %lu "
+    Serial.printf("[%8lu] .. phase %-16s sync 0x%02X reg %d | screens %lu/%lu | "
+                  "rx %lu tx %lu txDrop %lu "
                   "ovf %lu | drv %u txErr %lu rxErr %lu busErr %lu qRx %lu qTx %lu\n",
                   static_cast<unsigned long>(now), affa::phaseName(g_display.phase()),
                   static_cast<unsigned>(g_display.syncState()),
                   g_display.registered() ? 1 : 0,
+                  static_cast<unsigned long>(g_rendered),
+                  static_cast<unsigned long>(g_renderFail),
                   static_cast<unsigned long>(st.rxFrames),
                   static_cast<unsigned long>(st.txFrames),
                   static_cast<unsigned long>(st.txDropped),
