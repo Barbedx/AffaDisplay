@@ -27,9 +27,22 @@ have since disproven. That is what this file exists to prevent.
 
 ## Fun, and harder soaks than they look
 
+Each of these is a continuous full-rate load as well as something to look at. A marquee only
+repaints when the visible text moves; these change **every frame**, so nothing is skipped by
+repaint-on-change and the bus is exercised at a steady ~6–8 fullscreens a second — the rate
+the 1 h 36 m soak ran at. All three take live settings from a web form and persist them.
+
 | example | board | what it is |
 |---|---|---|
-| `11_boom` | DevKit V1 | A T-10 countdown with a burning fuse, then a nine-frame three-row ASCII explosion, then again. Countdown length, tick and frame time are set from a web form and persisted, so retuning costs no reflash. **The harshest soak in the tree**: every frame is a complete fullscreen — fourteen acknowledged ISO-TP frames — at ~180 ms, which is only about three times the duration of one transfer, so a bus falling behind shows as a visible stutter rather than hiding in a gap. |
+| `14_demoreel` | DevKit V1 | **The one to show people.** Six effects, eight seconds each: a Knight Rider scanner, fire, a sine-bobbed scroller, shockwave rings, a bouncing ball with a trail, falling rain. Every effect has a jump link on the console and the console mirrors the panel. |
+| `11_boom` | DevKit V1 | A T-10 countdown with a burning fuse, then a nine-frame three-row ASCII explosion, then again. The fuse is *scaled* to the row, so the bar and the number cannot disagree whatever the countdown is set to. |
+| `13_starfield` | DevKit V1 | Perspective 3D, procedural rather than a frame table: each star carries a direction and a depth, and every frame is an integer perspective division. The depth cue is the **rate**, not the shape — which is why it works at 20×3 where a wireframe cube would resolve to a blob. Deliberately subtle; `14_demoreel` is the loud one. |
+
+## Protocol experiments
+
+| example | what it asks |
+|---|---|
+| `12_ulclock` | **Which frame sets the clock on an AFFA2 panel?** It fires numbered candidates with the panel showing which one is live, so a human watching the glass can name the winner. The answer so far is *none of them* — 23 candidates, 162 probes, no effect (`../docs/BENCH-VERIFIED.md`). Kept as the shape to copy for the next protocol question, and for the finding that came out of it: **this panel ACKs everything**, so an ACK proves nothing and only the glass counts. |
 
 ## Diagnostics — reach for these when something is wrong
 
