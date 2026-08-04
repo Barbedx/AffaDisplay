@@ -160,7 +160,13 @@ it and exposes an API" has to mean.
 *Carminat* family "AFFA3 NAV". So the file named `affa3` implements what we call AFFA2. Do not
 assume the numbering agrees with ours.
 
-### The one finding to act on first
+### The one finding to act on first — SETTLED 2026-08-04, and it was not wrong
+
+**`replyToPing = false` is correct for UpdateList.** Measured on glass: the panel pings
+every ~500 ms, is never ponged, and the session held throughout with every counter at zero.
+The reasoning below stands as the reason it was *doubted*, which is worth keeping — the
+removal really was justified on Carminat evidence alone, and it really could have been
+wrong. It simply was not.
 
 **`replyToPing = false` is unverified for UpdateList and may be wrong.** The reference calls
 `tick()` from its `0x69` handler, so every panel ping provokes an immediate `3DF 79 00 …` —
@@ -270,6 +276,13 @@ HANDOFF.md, and it is the reason to spend one bench cycle here.
 Owner's call. If the answer is "just do 4 and soak once", nothing in step 4 depends on the
 soak having happened — the phase tests are the safety net either way.
 
+> **RESOLVED 2026-08-04, on glass.** The caveat below is kept because it was the honest
+> position at the time, but it no longer applies: the bench panel is universal and answered
+> as an UpdateList panel on the first attempt. Registration in the opening, the peer-channel
+> gate, the single hello and library-owned power all worked, `setText("SUCCESS")` rendered,
+> and `replyToPing = false` — "the first knob to turn" — did not need turning. See
+> `docs/BENCH-VERIFIED.md` and `docs/captures/2026-08-04-updatelist-first-contact.log`.
+>
 > Step 8 changes a family that cannot currently be tested on hardware. The mitigation is that
 > every byte it emits is already pinned by golden vectors, and what changes is *when* frames go
 > out, not *what* is in them. If an UpdateList panel ever reaches the bench and stalls, the

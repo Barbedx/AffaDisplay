@@ -13,6 +13,77 @@ did not work** · **⬜ never run**.
 
 ---
 
+## Session of 2026-08-04, evening — AFFA2 / UpdateList, FIRST EVER CONTACT
+
+**The UpdateList family had never put a frame on a bus.** Every byte it emits was pinned by
+golden vectors extracted from a reference driver, and step 8 of `docs/REFACTOR-PLAN.md`
+moved its *sequencing* onto the measured Carminat rules on the strength of an argument —
+that the two originals were nearly the same code, and that the reference *worked* rather
+than being *right*. This is that argument meeting glass.
+
+`10_updatelist` on the ESP32 DevKit V1, CRX=GPIO5 / CTX=GPIO4. Full log at
+`docs/captures/2026-08-04-updatelist-first-contact.log`. **It opened, registered, powered
+and rendered on the first attempt, in 220 ms of wire time.**
+
+| Capability | | Evidence |
+|---|---|---|
+| Panel answers `0x3DF` at all | ✅ | `RX 3CF 69` → our `TX 3DF 7A 01`, then `RX 3CF 61 11 00` |
+| The **single** hello frame (not Carminat's three) | ✅ | `TX 3DF 70 1A 11 00 00 00 00 01`, 1 ms after the request |
+| **Registration in the OPENING**, not lazily off a render | ✅ | `121 70` then `1B1 70` with no application involvement at all — the step-8 change that had no evidence behind it |
+| **The peer-channel gate** | ✅ | the panel's own `70` probe arrived and unlocked ours; ACKed `521 74` / `5B1 74` |
+| **The library powering the glass itself** | ✅ | `TX 1B1 04 52 02 FF FF`, ACKed, with nothing in the application asking for it |
+| **`setText("SUCCESS")` — 4-frame ISO-TP, `76` 8-cell encoding** | ✅ | user: *"SUCCESS IS HERE"*. Every CF answered `30 01 00`, terminal `521 74` |
+| `replyToPing = false` on this family | ✅ | the panel pings ~500 ms and is **never** ponged; the session held for 63 s+ regardless. This was the open question the plan called "the first knob to turn" — it did not need turning |
+| Steady state | ✅ | 63 s, `rx 131 tx 72`, `txErr/rxErr/busErr` **0**, no drops, 1 Hz alive free-running |
+
+### The panel registers TWO channels, and our gate survived on luck
+
+```
+[    2910] RX 1C1  70 ..     <- CARMINAT's key id
+[    2921] TX 5C1  74 ..
+[    2921] RX 0A9  70 ..     <- UpdateList's key id, 11 ms later
+[    2931] TX 4A9  74 ..
+```
+
+`_peerChannelSeen` was set by the **`1C1`**, because it came first. The gate is id-agnostic
+— any `70` on a frame we auto-ACK — and that is the only reason this worked. **Do not
+"tighten" it to the family's own key id.** A future reader will see `0A9` in
+`UpdateListConstants.h` and assume that is what the gate waits for; it is not, and on this
+panel that assumption would have cost the whole session.
+
+### What this run did NOT prove, listed so it is not assumed
+
+| | Why not |
+|---|---|
+| That the burst answers the **first** request (`helloRequiresAnnounce = false`) | ⬜ Our announce went out at 2796 ms, *before* the request at 2899 ms, because the panel's `69` armed it. "Answers the first request" and "answers a request that follows our announce" both fit this log. It did not matter here; it is not settled either |
+| The `61 11`-while-registered teardown | ⬜ never triggered — the panel did not deauthorize us in 63 s |
+| The LCD `7F` text-plus-icons encoding | ⬜ `UpdateListMenuDisplay` untried; only the `76` form was rendered |
+| `setTime` | ⬜ this family has no clock command at all — see below |
+
+### The panel shows a clock we did not set, and we have two untried ways to set it
+
+Observed on the glass beside `SUCCESS`: **`5:51`**. Nothing in this driver writes it, so it
+is the panel's own free-running clock, counting from whenever the panel last had power —
+the same behaviour seen on 2026-07-28, when a Carminat `10:00` free-ran to `10:11` eleven
+minutes later. The panel keeps the time; it just has no idea what the time is.
+
+`UpdateListConstants.h` has no clock command and that is correct — the reference driver has
+none. But this is a **universal panel**, and there are two candidates, neither tried:
+
+1. **`3EF A6 <hours> <minutes>`** — three bytes, DLC 3, **no PCI and no SF_DL**, so it does
+   not go through the transport at all and must be sent with a raw `ICanLink::send()`.
+   Transcribed from an OEM radio↔cluster capture (`ClusterConstants.h`, `PROTOCOL-NOTES.md`
+   §9) and never put on a bus by this library.
+2. **Carminat's `151 05 56 "HHMM"`** — which **this exact panel has already accepted**, on
+   2026-07-28, read off the glass as `10:00`. It would mean adding `0x151` to the UpdateList
+   function table so the `70` probe registers it, then sending the Carminat payload. Ugly,
+   cross-family, and very likely to work precisely because the panel is universal.
+
+(2) is the better first experiment: it is the only one with evidence behind it on this
+physical unit.
+
+---
+
 ## Session of 2026-08-04 — the captured opening, on a real Carminat
 
 The first run against the **OEM-capture-derived** handshake (`docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`),

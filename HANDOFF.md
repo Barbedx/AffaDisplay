@@ -36,6 +36,12 @@ it never lights and every counter reports success.
 Both families run this same machine. UpdateList's only remaining difference is that its
 burst answers the panel's *first* request rather than its second.
 
+**And UpdateList works on glass, as of 2026-08-04.** The bench panel is universal: driven by
+`examples/10_updatelist` it opened, registered, powered and rendered `SUCCESS` on the first
+attempt, 220 ms of wire time, every counter zero. That family had never put a frame on a bus
+before — its sequencing was an argument until that run. `docs/BENCH-VERIFIED.md` records what
+it proved and, more usefully, the four things it did **not**.
+
 Three rows scroll at independent speeds; pause/resume, per-row text and speed, clock entry,
 wire-log download, WiFi setup and OTA all work from the web console.
 
