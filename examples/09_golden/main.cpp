@@ -212,6 +212,16 @@ volatile bool     g_screenBusy = false;
 // because this example painted rows without ever sending power-on.
 enum class Stage : uint8_t { NeedPower, WarmUp, Live };
 Stage    g_stage      = Stage::NeedPower;
+
+// The popup demo: a `BOOOO!` over the top of the scrolling rows, once every ten seconds,
+// held for three. It shares the ONE-SCREEN-IN-FLIGHT discipline with the marquee — the
+// panel gets one acknowledged message at a time and nothing here jumps that queue.
+constexpr uint32_t kPopupEveryMs = 10000;   // show to show, not gap between
+constexpr uint32_t kPopupHoldMs  = 3000;
+constexpr const char* kPopupText = "BOOOO!";
+bool     g_popupUp    = false;
+uint32_t g_popupShownAt = 0;
+uint32_t g_nextPopupAt  = 0;
 uint32_t g_warmUntil  = 0;
 constexpr uint32_t kWarmUpMs = 750;   // the panel does not announce that its glass is lit
 
@@ -267,6 +277,35 @@ void pumpRows(uint32_t now) {
 
   if (g_screenBusy) return;
 
+  // THE POPUP GOES FIRST, and it has to: the marquee below repaints on every visible change,
+  // so a popup that waited its turn behind "is anything different" would never get one at
+  // this scroll rate. It is deliberately NOT Urgent — it is a demo, not an alarm, and a
+  // render that overtakes an in-flight screen is the preemption trap the library documents.
+  if (!g_popupUp && static_cast<int32_t>(now - g_nextPopupAt) >= 0) {
+    if (g_task.showPopupText(kPopupText) != affa::rtos::kNoRequest) {
+      g_screenBusy   = true;
+      g_popupUp      = true;
+      g_popupShownAt = now;
+    }
+    return;
+  }
+  if (g_popupUp && static_cast<int32_t>(now - (g_popupShownAt + kPopupHoldMs)) >= 0) {
+    if (g_task.hidePopup() != affa::rtos::kNoRequest) {
+      g_screenBusy  = true;
+      g_popupUp     = false;
+      g_nextPopupAt = g_popupShownAt + kPopupEveryMs;
+      // The popup covered the rows, and the panel does not put them back by itself. Forget
+      // what we believe is on the glass so the next pass repaints unconditionally —
+      // otherwise the marquee resumes only when its text happens to move, and a paused or
+      // slow row stays blank behind a popup that is no longer there.
+      for (auto& s : g_shown) s[0] = 0;
+    }
+    return;
+  }
+  // While the popup is up the rows keep SCROLLING (above) but are not redrawn. It comes
+  // back in the right place rather than jumping back three seconds.
+  if (g_popupUp) return;
+
   char w[3][kRowWidth + 2];
   for (int i = 0; i < 3; ++i) windowOf(g_row[i], w[i], sizeof(w[i]));
   if (!strcmp(w[0], g_shown[0]) && !strcmp(w[1], g_shown[1]) && !strcmp(w[2], g_shown[2]))
@@ -294,6 +333,13 @@ PsychicHttpServer g_server;
 Preferences       g_prefs;
 constexpr const char* kCfgNs = "golden";
 
+// A SAVED SPEED OUTLIVES THE REASON IT WAS SAVED, and that is a real trap rather than a
+// hypothetical: a debug session set all three rows to 12 s to widen a wire-log window, the
+// value went into NVS, and every boot afterwards — including across a reflash — came up
+// looking broken-slow with nothing in the source to explain it. Bumping this discards saved
+// SPEEDS and keeps saved TEXT, which is the half a user actually typed.
+constexpr uint32_t kCfgVersion = 2;
+
 void saveRows() {
   Preferences p;
   if (!p.begin(kCfgNs, false)) return;
@@ -303,22 +349,29 @@ void saveRows() {
     snprintf(k, sizeof(k), "p%d", i); p.putUInt(k, g_row[i].periodMs);
   }
   p.putBool("paused", g_paused);
+  p.putUInt("ver", kCfgVersion);        // a speed the USER set is worth keeping
   p.end();
 }
 
 void loadRows() {
   Preferences p;
   if (!p.begin(kCfgNs, true)) return;
+  const bool speedsAreCurrent = p.getUInt("ver", 0) == kCfgVersion;
   for (int i = 0; i < 3; ++i) {
     char k[8];
     snprintf(k, sizeof(k), "t%d", i);
     const String t = p.getString(k, "");
     if (t.length()) snprintf(g_row[i].text, sizeof(g_row[i].text), "%s", t.c_str());
-    snprintf(k, sizeof(k), "p%d", i);
-    g_row[i].periodMs = p.getUInt(k, g_row[i].periodMs);
+    if (speedsAreCurrent) {
+      snprintf(k, sizeof(k), "p%d", i);
+      g_row[i].periodMs = p.getUInt(k, g_row[i].periodMs);
+    }
   }
   g_paused = p.getBool("paused", false);
   p.end();
+  if (!speedsAreCurrent)
+    logmsg("stored row speeds discarded (config v%lu) - using the built-in defaults",
+           static_cast<unsigned long>(kCfgVersion));
 }
 
 String statusText() {
@@ -712,9 +765,14 @@ void setup() {
   snprintf(g_row[0].text, sizeof(g_row[0].text), "AFFA DISPLAY - ROW ONE");
   snprintf(g_row[1].text, sizeof(g_row[1].text), "SECOND ROW MOVES SLOWER");
   snprintf(g_row[2].text, sizeof(g_row[2].text), "THIRD ROW SLOWEST OF ALL");
-  g_row[0].periodMs = 220;
-  g_row[1].periodMs = 380;
-  g_row[2].periodMs = 550;
+  // TWICE THE OLD PACE (was 220/380/550). The three speeds stay deliberately unequal —
+  // three rows scrolling in lockstep prove nothing, and the whole point of the demo is that
+  // they are independent. The repaint is self-limiting either way: a screen is only sent
+  // when the previous one COMPLETED and the visible text actually moved, so asking for a
+  // faster marquee than the bus can carry just paints as fast as the bus drains.
+  g_row[0].periodMs = 110;
+  g_row[1].periodMs = 190;
+  g_row[2].periodMs = 275;
   loadRows();
 
   if (!g_link.begin(kRxPin, kTxPin, kBitrate))
@@ -755,6 +813,10 @@ void loop() {
       for (auto& s : g_shown) s[0] = 0;
       g_screenBusy = false;
       g_stage = Stage::NeedPower;   // a new session starts with a dark panel
+      // …and with no popup on it. A `hidePopup` owed to a session the panel has forgotten
+      // is addressed to nothing; re-arming the cycle is the whole recovery.
+      g_popupUp     = false;
+      g_nextPopupAt = now + kPopupEveryMs;
     } else {
       logmsg("session LOST (#%lu): %s", static_cast<unsigned long>(st.sessionsLost),
              affa::lossReasonName(st.lastLossReason));
