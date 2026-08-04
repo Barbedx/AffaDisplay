@@ -63,6 +63,8 @@ bool AffaDisplayBase::begin() {
   _lastResult     = Result::Ok;
   _sessionsLost      = 0;                // counted since THIS begin(), so a re-begin() does
   _lastSessionLossMs = 0;                // not carry a previous run's drops into a soak
+  _lastLossReason    = LossReason::None;
+  _lossReasonNext    = LossReason::None;
   _lastOverflow   = _link.stats().ringOverflow;
   _lastRxMs       = now;                 // the deaf watchdog measures from here, and stays
   _rxHeard        = false;               // disarmed until a frame actually arrives
@@ -376,6 +378,7 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
       if (hasFlag(_sync, SyncState::FuncsReg)) {
         AFFA_LOGW(kTag, "61 11 %02X while registered - the panel voided us; reopening",
                   static_cast<unsigned>(f.data[2]));
+        _lossReasonNext = LossReason::PanelVoided;
         setSync(SyncState::Failed, EventKind::SyncChanged);
         invalidateInFlightForSession(now);
         _authRequestObserved = false;
@@ -482,6 +485,7 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
       // clear, a registration is either pending or in flight and must be left alone.
       if (hasFlag(_sync, SyncState::FuncsReg)) {
         AFFA_LOGW(kTag, "panel reports registration void (61 11 01) — re-registering");
+        _lossReasonNext = LossReason::PanelVoided;
         dropRegistrations();
         s &= ~SyncState::FuncsReg;
         // The re-registration this provokes takes time the held renders were never
@@ -812,6 +816,7 @@ void AffaDisplayBase::pumpLink() {
   // the glass, they are already bounded by their own hold windows, and dropping them here
   // would put the "re-issue it yourself" burden straight back where this release took it
   // from.
+  _lossReasonNext = LossReason::LinkRestarted;
   setSync(SyncState::Failed | SyncState::Start, EventKind::PeerLost);
   dropRegistrations();
   // A newly installed controller must not resurrect an old Carminat session by itself.
@@ -1090,6 +1095,7 @@ void AffaDisplayBase::pumpSync() {
     // forever. It is a wall-clock deadline here, and it always will be.
     AFFA_LOGW(kTag, "peer lost: no 0x%02X ping within %d ms",
               static_cast<unsigned>(kSyncPeerAlive), static_cast<int>(AFFA_PEER_TIMEOUT_MS));
+    _lossReasonNext = LossReason::PeerTimeout;
     setSync(SyncState::Failed, EventKind::PeerLost);   // every other bit, FuncsReg
                                                        // included, is dropped
     // Wait for its next 61 11 — but not for ever. A panel that went to sleep will never
@@ -1156,8 +1162,12 @@ void AffaDisplayBase::setSync(SyncState s, EventKind extra) {
   if (hasFlag(prev, SyncState::FuncsReg) && !hasFlag(s, SyncState::FuncsReg)) {
     ++_sessionsLost;
     _lastSessionLossMs = _clock.millis();
+    _lastLossReason    = _lossReasonNext;
+    AFFA_LOGW(kTag, "session lost (#%lu): %s",
+              static_cast<unsigned long>(_sessionsLost), lossReasonName(_lastLossReason));
     if (_cachedControl.valid) _cachedControl.pending = true;
   }
+  _lossReasonNext = LossReason::None;   // never leaks into the next, unrelated transition
 
   if (_syncCb) _syncCb(s, _syncCtx);
 
@@ -2069,6 +2079,7 @@ Phase AffaDisplayBase::phase() const {
 
 uint32_t AffaDisplayBase::sessionsLost() const { return _sessionsLost; }
 uint32_t AffaDisplayBase::lastSessionLossMs() const { return _lastSessionLossMs; }
+LossReason AffaDisplayBase::lastLossReason() const { return _lastLossReason; }
 
 SyncState AffaDisplayBase::syncState() const { return _sync; }
 bool AffaDisplayBase::synced() const {

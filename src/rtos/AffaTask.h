@@ -72,6 +72,7 @@ struct Status {
   // that reports neither is a soak that cannot see fourteen deauthorizations.
   uint32_t  sessionsLost      = 0;
   uint32_t  lastSessionLossMs = 0;
+  LossReason lastLossReason   = LossReason::None;
   bool      running    = false;
   bool      registered = false;
   bool      busy       = false;

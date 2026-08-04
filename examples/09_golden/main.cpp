@@ -116,6 +116,32 @@ portMUX_TYPE g_wireMux = portMUX_INITIALIZER_UNLOCKED;
 
 bool g_logHeartbeats = false;   // the 1 Hz B9/69 pair floods a ring you want for a handshake
 
+// ---------------------------------------------------------------------------
+// The drop snapshot — because the evidence scrolls away
+// ---------------------------------------------------------------------------
+// THE PANEL DROPS THE SESSION ABOUT EVERY SEVEN MINUTES AND NOBODY HAS SEEN WHY. Fourteen
+// times in a 1 h 36 m soak, every driver counter at zero across all of them, intervals from
+// 15 s to 1409 s. It is invisible because the FSM self-heals in a few hundred milliseconds.
+//
+// The reason it has stayed open is not that it is subtle — it is that by the time anyone
+// looks, the ring holds the frames of the RECOVERY, not of the cause. Downloading /wire.txt
+// promptly is a race nobody wins at 2 a.m.
+//
+// So: freeze a copy at the transition. This is the same mechanism 04_rows had for its DEAF
+// watchdog, moved rather than reinvented. The FIRST drop wins and nothing overwrites it —
+// later drops are counted, but a snapshot that keeps being replaced is one you can only read
+// if you are watching, which is the problem this exists to solve. Clear it from the console
+// to arm the next one.
+WireRec  g_frozen[kWireRing];
+size_t   g_frozenHead   = 0;
+uint32_t g_frozenSeq    = 0;
+uint32_t g_frozenAtMs   = 0;      // 0 = nothing captured yet
+uint32_t g_frozenDrop   = 0;      // which drop this was: 1 = the first
+affa::LossReason g_frozenReason = affa::LossReason::None;
+affa::Phase      g_frozenPhase  = affa::Phase::Silent;
+affa::Stats      g_frozenStats{};
+uint32_t g_frozenTxErr = 0, g_frozenRxErr = 0, g_frozenBusErr = 0, g_frozenArbLost = 0;
+
 void onWire(const affa::Frame& f, affa::Direction d, void*) {
   const bool tx = (d == affa::Direction::Tx);
   // HEARTBEATS ARE 4 FRAMES A SECOND AND THEY NEVER COALESCE, because B9 and 69 alternate.
@@ -303,7 +329,7 @@ String statusText() {
   char b[720];
   snprintf(b, sizeof(b),
            "%s   %s %s   img %.8s\nup %lus\n\n"
-           "phase   %s   drops %lu  last %lus ago\n"
+           "phase   %s   drops %lu  last %lus ago  (%s)\n"
            "sync    0x%02X  %s%s%s\n"
            "screens ok %lu  failed %lu  lastResult %u  inFlight %s\n"
            "rows    %s\n"
@@ -321,6 +347,7 @@ String statusText() {
            static_cast<unsigned long>(st.sessionsLost),
            static_cast<unsigned long>(
                st.lastSessionLossMs ? (millis() - st.lastSessionLossMs) / 1000 : 0),
+           affa::lossReasonName(st.lastLossReason),
            static_cast<unsigned>(st.sync),
            affa::hasFlag(st.sync, affa::SyncState::Failed) ? "FAILED " : "",
            affa::hasFlag(st.sync, affa::SyncState::PeerAlive) ? "PEER_ALIVE " : "",
@@ -414,6 +441,10 @@ void routes() {
     // Forms, not JavaScript: a GET form is the smallest thing that works everywhere.
     out += g_paused ? "<a href='/pause?on=0'>[ RESUME ]</a> " : "<a href='/pause?on=1'>[ PAUSE ]</a> ";
     out += "<a href=/wire.txt><b>[ DOWNLOAD WIRE LOG ]</b></a> ";
+    // Only offered once there is something behind it: a link that always says "nothing yet"
+    // trains you to stop clicking it, which is the one habit this must not create.
+    if (g_frozenAtMs) out += "<a href='/deregistered.txt'><b>[ DROP SNAPSHOT ]</b></a> "
+                             "<a href='/deregistered.txt?clear=1'>[ re-arm ]</a> ";
     out += g_logHeartbeats ? "<a href='/heartbeats?on=0'>[ hide heartbeats ]</a> "
                            : "<a href='/heartbeats?on=1'>[ show heartbeats ]</a> ";
     out += "<a href='/update'>[ OTA ]</a> <a href='/wifi'>[ WiFi ]</a><br><br>";
@@ -486,6 +517,89 @@ void routes() {
     char fname[96];
     snprintf(fname, sizeof(fname), "attachment; filename=affa-wire-%lus.txt",
              static_cast<unsigned long>(millis() / 1000));
+    res.addHeader("Content-Disposition", fname);
+    res.setContent(out.c_str());
+    return res.send();
+  });
+
+  // THE FRAMES FROM BEFORE THE DROP, and the state of everything at that instant. Empty
+  // until the panel first deauthorizes us; `?clear=1` arms it for the next one.
+  //
+  // What to look for when it finally has something in it: the reason line first — a
+  // PanelVoided drop and a PeerTimeout drop are completely different investigations — then
+  // whether anything of OURS is out of place in the last half second before the transition.
+  // Every driver counter has been zero across all fourteen observed drops, so the answer is
+  // not electrical and is not in the receive path; it is in what we said or failed to say.
+  g_server.on("/deregistered.txt", HTTP_GET, [](PsychicRequest* r) {
+    if (r->hasParam("clear")) {
+      g_frozenAtMs = 0;
+      logmsg("drop snapshot cleared - armed for the next one");
+      PsychicResponse res(r);
+      res.setCode(303);
+      res.addHeader("Location", "/");
+      res.setContent("");
+      return res.send();
+    }
+
+    String out;
+    out.reserve(kWireRing * 64 + 768);
+    char line[220];
+    if (!g_frozenAtMs) {
+      snprintf(line, sizeof(line),
+               "# no session has been lost yet (%lu counted). Nothing to show.\n",
+               static_cast<unsigned long>(g_task.status().sessionsLost));
+      out += line;
+      return r->reply(200, "text/plain", out.c_str());
+    }
+
+    const affa::rtos::Status st = g_task.status();
+    snprintf(line, sizeof(line),
+             "# AffaDisplay %s  img %.8s\n"
+             "# DROP #%lu at %lu ms (%lus ago), leaving phase %s\n"
+             "# reason: %s\n"
+             "# drops so far: %lu\n",
+             kVersion, ESP.getSketchMD5().c_str(),
+             static_cast<unsigned long>(g_frozenDrop),
+             static_cast<unsigned long>(g_frozenAtMs),
+             static_cast<unsigned long>((millis() - g_frozenAtMs) / 1000),
+             affa::phaseName(g_frozenPhase), affa::lossReasonName(g_frozenReason),
+             static_cast<unsigned long>(st.sessionsLost));
+    out += line;
+    snprintf(line, sizeof(line),
+             "# at the transition: driver txErr %lu rxErr %lu busErr %lu arbLost %lu\n"
+             "#                    lib rx %lu tx %lu txDropped %lu ringOverflow %lu\n"
+             "# heartbeats (3AF B9 / 3CF 69) were %s\n"
+             "#   first    last   xN dir  id  data\n",
+             static_cast<unsigned long>(g_frozenTxErr),
+             static_cast<unsigned long>(g_frozenRxErr),
+             static_cast<unsigned long>(g_frozenBusErr),
+             static_cast<unsigned long>(g_frozenArbLost),
+             static_cast<unsigned long>(g_frozenStats.rxFrames),
+             static_cast<unsigned long>(g_frozenStats.txFrames),
+             static_cast<unsigned long>(g_frozenStats.txDropped),
+             static_cast<unsigned long>(g_frozenStats.ringOverflow),
+             g_logHeartbeats ? "INCLUDED" : "filtered out");
+    out += line;
+
+    for (size_t i = 0; i < kWireRing; ++i) {
+      const WireRec& w = g_frozen[(g_frozenHead + i) % kWireRing];
+      if (!w.count) continue;
+      int n = snprintf(line, sizeof(line), "%8lu %7lu %4lu  %s %03X ",
+                       static_cast<unsigned long>(w.firstMs),
+                       static_cast<unsigned long>(w.lastMs),
+                       static_cast<unsigned long>(w.count),
+                       w.tx ? "TX" : "RX", static_cast<unsigned>(w.id));
+      for (uint8_t b = 0; b < 8; ++b)
+        n += snprintf(line + n, sizeof(line) - n, " %02X", static_cast<unsigned>(w.d[b]));
+      out += line; out += '\n';
+    }
+
+    PsychicResponse res(r);
+    res.setCode(200);
+    res.setContentType("text/plain");
+    char fname[96];
+    snprintf(fname, sizeof(fname), "attachment; filename=affa-drop-%lums.txt",
+             static_cast<unsigned long>(g_frozenAtMs));
     res.addHeader("Content-Disposition", fname);
     res.setContent(out.c_str());
     return res.send();
@@ -630,14 +744,38 @@ void loop() {
   const uint32_t now = millis();
 
   static bool s_wasRegistered = false;
-  const bool registered = affa::hasFlag(g_task.status().sync, affa::SyncState::FuncsReg);
+  const affa::rtos::Status st = g_task.status();
+  const bool registered = affa::hasFlag(st.sync, affa::SyncState::FuncsReg);
   if (registered != s_wasRegistered) {
     s_wasRegistered = registered;
-    logmsg(registered ? "panel REGISTERED - rows are live" : "registration lost");
     if (registered) {
+      logmsg("panel REGISTERED - rows are live");
       for (auto& s : g_shown) s[0] = 0;
       g_screenBusy = false;
       g_stage = Stage::NeedPower;   // a new session starts with a dark panel
+    } else {
+      logmsg("session LOST (#%lu): %s", static_cast<unsigned long>(st.sessionsLost),
+             affa::lossReasonName(st.lastLossReason));
+      // FREEZE THE RING HERE, not on the next status refresh. loop() runs with no delay in
+      // it, so this lands within a millisecond or so of the transition — before the
+      // recovery's own BA/B0/151/1F1 traffic has evicted the frames that caused it. Only
+      // the first drop is kept; see the note on g_frozen.
+      if (!g_frozenAtMs) {
+        const affa::CanCommonLink::Driver d = g_link.driver();
+        portENTER_CRITICAL(&g_wireMux);
+        memcpy(g_frozen, g_wire, sizeof(g_frozen));
+        g_frozenHead = g_wireHead;
+        g_frozenSeq  = g_wireSeq;
+        portEXIT_CRITICAL(&g_wireMux);
+        g_frozenAtMs   = now ? now : 1;       // 0 is the "nothing captured" sentinel
+        g_frozenDrop   = st.sessionsLost;
+        g_frozenReason = st.lastLossReason;
+        g_frozenPhase  = st.phase;
+        g_frozenStats  = st.stats;
+        g_frozenTxErr = d.txErr; g_frozenRxErr = d.rxErr;
+        g_frozenBusErr = d.busErr; g_frozenArbLost = d.arbLost;
+        logmsg("wire ring FROZEN - see /deregistered.txt");
+      }
     }
   }
 

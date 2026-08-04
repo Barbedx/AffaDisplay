@@ -356,6 +356,7 @@ void AffaTask::publish(uint32_t iterUs) {
   s.phase             = _d->phase();
   s.sessionsLost      = _d->sessionsLost();
   s.lastSessionLossMs = _d->lastSessionLossMs();
+  s.lastLossReason    = _d->lastLossReason();
   s.running        = !_stop;
   s.registered     = _d->registered();
   s.busy           = _d->busy();

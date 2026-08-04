@@ -136,6 +136,29 @@ enum class Phase : uint8_t {
   Ready,             // registered and past the quiet interval: rendering permitted
 };
 
+// WHY THE LAST SESSION ENDED. There are exactly four ways to leave FUNCSREG and they call
+// for completely different investigations, but the counters look identical from outside: a
+// panel that deauthorized us, a panel that went quiet, a controller that restarted under us,
+// and our own begin(). The 1 h 36 m soak of 2026-08-04 lost fourteen sessions with every
+// driver counter at zero, which rules out the third and says nothing about the first two —
+// and nothing recorded which it was, so the question is still open. This records it.
+enum class LossReason : uint8_t {
+  None,           // no session has been lost since begin()
+  PanelVoided,    // a complete `61 11 xx` arrived while we held registrations
+  PeerTimeout,    // no ping within AFFA_PEER_TIMEOUT_MS
+  LinkRestarted,  // the CAN controller was recovered under us; the panel's view is stale
+};
+
+inline const char* lossReasonName(LossReason r) {
+  switch (r) {
+    case LossReason::None:          return "none";
+    case LossReason::PanelVoided:   return "panel voided us (61 11 while registered)";
+    case LossReason::PeerTimeout:   return "peer timeout (no 69)";
+    case LossReason::LinkRestarted: return "CAN controller restarted";
+  }
+  return "?";
+}
+
 // For logs and status pages. Never parse it; it is prose, not protocol.
 inline const char* phaseName(Phase p) {
   switch (p) {

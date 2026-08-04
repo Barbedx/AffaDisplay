@@ -739,6 +739,12 @@ void test_phase_falls_back_when_the_panel_voids_the_session(void) {
   TEST_ASSERT_FALSE_MESSAGE(r.d.registered(), "and FUNCSREG goes with it");
   TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, r.d.sessionsLost(),
                                    "…and the drop is COUNTED, which is the whole point");
+  // AND ATTRIBUTED. A panel that deauthorizes us and a panel that goes quiet produce
+  // identical counters and require completely different investigations; the open ~7-minute
+  // drop is unresolved partly because nothing ever recorded which of the two it was.
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(static_cast<uint8_t>(LossReason::PanelVoided),
+                                  static_cast<uint8_t>(r.d.lastLossReason()),
+                                  "a 61 11 while registered is PanelVoided, not a timeout");
 
   // It re-opens on its own: our BA is long since on the wire, so this request draws the
   // burst directly rather than arming another announce.
@@ -1124,6 +1130,12 @@ void test_peer_deadline_fires_at_5001ms_and_drops_funcsreg(void) {
   TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "peer loss is declared on the CLOCK");
   TEST_ASSERT_FALSE_MESSAGE(r.d.registered(),
                             "FUNCSREG does not survive a resync — the panel forgot us too");
+  // THE OTHER WAY TO LOSE A SESSION, and it must not be confusable with the first. Both
+  // produce the same counters and the same Phase fallback; only this distinguishes them.
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, r.d.sessionsLost(), "a timeout is a lost session too");
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(static_cast<uint8_t>(LossReason::PeerTimeout),
+                                  static_cast<uint8_t>(r.d.lastLossReason()),
+                                  "silence is PeerTimeout, never PanelVoided");
   // Carminat recovery waits silently for the panel's next 61 11 instead of spraying BA.
   drain(r.link);
   r.clk.advance(1000);

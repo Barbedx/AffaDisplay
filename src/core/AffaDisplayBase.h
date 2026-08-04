@@ -134,6 +134,9 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // the panel deauthorized us FOURTEEN times, because nothing counted it.
   uint32_t sessionsLost() const;
   uint32_t lastSessionLossMs() const;   // 0 if none since begin()
+  // WHICH of the four ways it went. The counters cannot tell a deauthorizing panel from a
+  // silent one, and that is exactly the distinction the open ~7-minute drop needs.
+  LossReason lastLossReason() const;
 
   SyncState syncState() const override;
   bool      synced()     const;   // !hasFlag(state, Failed)
@@ -540,6 +543,11 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // Sessions the panel has taken away since begin(). See sessionsLost().
   uint32_t  _sessionsLost      = 0;
   uint32_t  _lastSessionLossMs = 0;
+  LossReason _lastLossReason   = LossReason::None;
+  // Armed immediately before the setSync() that drops FuncsReg, and consumed by setSync()
+  // on that falling edge. A separate field rather than a setSync() parameter because most
+  // setSync() calls are not losses and should not have to name a reason they do not have.
+  LossReason _lossReasonNext   = LossReason::None;
   uint32_t  _lastOverflow = 0;  // last ICanLink ringOverflow we reported
   uint32_t  _txDropCount  = 0;  // frames ICanLink::trySend() hard-refused, counted here so the
                                 // LinkError event does not need a driver status read
