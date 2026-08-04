@@ -245,7 +245,8 @@ Those older logs are historical evidence only; the current bench rig uses the as
 
 **On Carminat we make the first move, and the panel answers it.** The order is:
 
-1. **we announce**: one bounded `3AF B9` + `3AF BA` pair into a silent bus. `BA` is the
+1. **we announce**: one bounded bare `3AF BA` into a silent bus — no `B9` in front of it,
+   that is the heartbeat and it does not start until registration completes. `BA` is the
    precondition for everything after it, and it must never become a periodic stream.
 2. panel requests: `3CF 61 11 xx`, on its own ~104 ms timer. `xx` is `00` or `01` and they
    are **the same request** — the low bit reports panel state, not authorization. This first

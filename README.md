@@ -6,7 +6,7 @@
 **[English](#english) · [Українська](#українська)**
 
 MIT · ESP32 / ESP32-C3 · Arduino + PlatformIO · no heap after `begin()` · no `delay()` anywhere ·
-244 host tests, no hardware required
+259 host tests, no hardware required
 
 ---
 
@@ -83,7 +83,7 @@ void setup() {
   // Named struct: the two pins cannot be swapped at the call site, and they have been.
   g_link.begin(affa::CanPins{.rx = GPIO_NUM_3, .tx = GPIO_NUM_4}, 500000);
   g_display.onKey(&onKey, nullptr);
-  g_display.begin();                                  // Carminat stays silent until the panel asks
+  g_display.begin();                                  // we announce `BA` first; the panel answers
 }
 
 void loop() {
@@ -97,7 +97,7 @@ later through `onComplete(cb, ctx)`, carrying the same `TxTicket` the call issue
 
 > ### ⚠️ Vehicle-bus session ownership
 >
-> Carminat/AFFA3 NAV opens with a bounded `3AF B9` + `3AF BA` announce from us; the display
+> Carminat/AFFA3 NAV opens with a bounded bare `3AF BA` announce from us; the display
 > then answers on `0x3CF: 61 11 xx` and the session proceeds. Other panel profiles have their
 > own session cadence. The library answers registration with `0x74` on `id | 0x400`; on a live
 > vehicle bus, make sure no factory node owns the same role. Prefer a bench harness — see
@@ -131,8 +131,9 @@ is needed because the package has no external CAN dependency.
 > **Settled 2026-08-04 against four passive captures of a real OEM Renault radio driving a
 > real Carminat panel.** Derivation: [`docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`](docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md).
 >
-> **We speak first.** Into a silent bus the library announces one bounded `3AF B9` + `3AF BA`
-> pair. The panel then requests on `0x3CF: 61 11 xx` (DLC ≥ 3) on its own ~104 ms timer. The
+> **We speak first.** Into a silent bus the library announces one bounded bare `3AF BA` —
+> no `B9` in front of it; that is the heartbeat, and it does not start until registration
+> completes. The panel then requests on `0x3CF: 61 11 xx` (DLC ≥ 3) on its own ~104 ms timer. The
 > first request only *arms* the announce; the panel's **next** request draws the three-frame
 > burst `B0 14 11 00 1F 00 00 00` ×3, **30.75 ms** after it, 31 ms apart.
 >
@@ -199,9 +200,9 @@ The bench board is an **ESP32-C3 SuperMini** plus a 3.3 V CAN transceiver
 > an older, differently soldered rig.
 
 **Carminat/AFFA3 NAV opening is a two-sided exchange, and we move first.** The library
-announces one bounded `3AF B9` + `3AF BA` pair, the panel replies on `0x3CF: 61 11 xx`, and
+announces one bounded bare `3AF BA`, the panel replies on `0x3CF: 61 11 xx`, and
 its *next* request draws the `B0` announce burst 31 ms later. A powered bench with no panel
-therefore shows the `B9`/`BA` pair and then nothing further — that is correct behaviour, not
+therefore shows a lone `BA`, repeated every ~30 s, and then nothing further — that is correct behaviour, not
 a fault. (This paragraph used to say the library transmits nothing at all until the panel
 speaks; the OEM captures show our `BA` first, with the panel's request arriving 7.24 ms
 after it.)
@@ -607,7 +608,7 @@ commands is **[`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HA
 
 1. **Laptop only — no board at all.**
    ```
-   pio test -e native            # 206 cases, ~14 s
+   pio test -e native            # 259 cases
    ```
    The whole library runs on the host over `LoopbackLink`, with `setSelfAck(true)` supplying
    the per-frame ACK a panel would and one injected `61 11` completing the handshake. To
@@ -624,9 +625,10 @@ commands is **[`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HA
    You get the live frame ring, the decoded glass, key
    injection and the latency counters in a browser.
 3. **A real panel on a bench.** Wiring as above, 500 kbit/s, mind the `(rx, tx)` trap, and
-   remember that **the panel opens the conversation** — nothing happens until it pings.
-   Flash `examples/01_link_check` first: it names every known frame and, on a two-node bus,
-   `txErr == 0` is the proof the panel is acknowledging you.
+   remember that **we open the conversation**: the library announces a bare `BA` into a
+   silent bus every ~30 s, and the panel answers on `0x3CF: 61 11 xx`. Flash
+   `examples/01_bringup` first — it proves the link in the order it has to be proved, and on
+   a two-node bus `txErr == 0` is the proof the panel is acknowledging you.
 
 The same document also covers capturing your own traffic, diffing it against
 `docs/WIRE-SPEC.md`, and adding a fourth panel family.
@@ -646,8 +648,8 @@ diagnostic only.
 ### Documents and tests
 
 ```
-pio test -e native      # 244 host test cases across 14 suites, no hardware
-pio run                 # all 15: two host environments plus 13 ESP32-C3 targets
+pio test -e native      # 259 host test cases across 17 suites, no hardware
+pio run                 # all 13: one host environment plus 12 ESP32 targets
 ```
 
 | Document | What it is |
@@ -742,7 +744,7 @@ void setup() {
   // Іменована структура: два піни неможливо переплутати на місці виклику, а їх плутали.
   g_link.begin(affa::CanPins{.rx = GPIO_NUM_3, .tx = GPIO_NUM_4}, 500000);
   g_display.onKey(&onKey, nullptr);
-  g_display.begin();                                  // Carminat мовчить, доки не запитає панель
+  g_display.begin();                                  // ми першими оголошуємо `BA`; панель відповідає
 }
 
 void loop() {
@@ -756,8 +758,8 @@ void loop() {
 
 > ### ⚠️ Хто починає сесію на шині автомобіля
 >
-> Carminat/AFFA3 NAV відкриває сесію з нашого боку: після `begin()` бібліотека оголошує одну
-> обмежену пару `3AF B9` + `3AF BA`, і вже на неї дисплей відповідає запитом
+> Carminat/AFFA3 NAV відкриває сесію з нашого боку: після `begin()` бібліотека оголошує один
+> обмежений `3AF BA`, і вже на нього дисплей відповідає запитом
 > `0x3CF: 61 11 xx`. Інші профілі панелей мають власний ритм сесії.
 > Бібліотека відповідає на реєстрацію `0x74` на `id | 0x400`; на живій шині автомобіля
 > переконайтеся, що цю саму роль не виконує штатний вузол. Краще починати зі стенда — див.
@@ -813,8 +815,9 @@ TJA1051T-3, *не* 5 В TJA1050 без узгодження рівнів).
 > а не схема підключення. `examples/01_bringup` має явний legacy-перемикач лише для старого
 > стенду з іншим паянням.
 
-**Carminat/AFFA3 NAV: першими говоримо ми.** Після `begin()` бібліотека оголошує одну
-обмежену пару `3AF B9` + `3AF BA` у тишу. Далі дисплей надсилає `0x3CF: 61 11 xx` за власним
+**Carminat/AFFA3 NAV: першими говоримо ми.** Після `begin()` бібліотека оголошує в тишу один
+обмежений `3AF BA` — без `B9` попереду: це серцебиття, і воно не стартує до завершення
+реєстрації. Далі дисплей надсилає `0x3CF: 61 11 xx` за власним
 таймером ~104 мс; **перший** запит лише зводить курок, а сплеск із трьох однакових кадрів
 `B0 14 11 00 1F 00 00 00` (31 мс один від одного) виходить через **30.75 мс після
 наступного** запиту. Між `B0`#1 і `B0`#2 панель надсилає `1C1 70`, і ми **зобов'язані**
@@ -1237,7 +1240,7 @@ platformio_footprint.ini` відтворює всі числа звідси, в�
 
 1. **Лише ноутбук — узагалі без плати.**
    ```
-   pio test -e native            # 206 випадків, ~14 с
+   pio test -e native            # 259 випадків
    ```
    Уся бібліотека працює на хості поверх `LoopbackLink`: `setSelfAck(true)` дає покадровий
    ACK замість панелі, а один вкинутий `61 11` завершує handshake. Щоб перевіряти те, що
@@ -1254,9 +1257,10 @@ platformio_footprint.ini` відтворює всі числа звідси, в�
    пасивне декодування поруч зі справжньою. У браузері ви отримуєте живе кільце кадрів,
    декодоване «скло», ін'єкцію кнопок і лічильники затримок.
 3. **Справжня панель на столі.** Підключення як вище, 500 кбіт/с, пам'ятайте про пастку
-   `(rx, tx)` і про те, що **розмову починає панель** — доки вона не подасть голос, не
-   станеться нічого. Спершу прошийте `examples/01_link_check`: він називає кожен відомий
-   кадр, і на шині з двох вузлів `txErr == 0` є доказом того, що панель вас підтверджує.
+   `(rx, tx)` і про те, що **розмову починаємо ми**: бібліотека кидає в тишу `BA` кожні
+   ~30 с, і панель відповідає на `0x3CF: 61 11 xx`. Спершу прошийте `examples/01_bringup` —
+   він доводить лінк у тому порядку, у якому це треба робити, і на шині з двох вузлів
+   `txErr == 0` є доказом того, що панель вас підтверджує.
 
 Той самий документ описує, як зняти власний трафік, як звірити його з `docs/WIRE-SPEC.md` і
 як додати четверту родину панелей.
@@ -1276,8 +1280,8 @@ platformio_footprint.ini` відтворює всі числа звідси, в�
 ### Документи і тести
 
 ```
-pio test -e native      # 200 хостових тестів у 13 наборах, без заліза
-pio run                 # усі 15: два хостові середовища плюс 13 цілей ESP32-C3
+pio test -e native      # 259 хостових тестів у 17 наборах, без заліза
+pio run                 # усі 13: одне хостове середовище плюс 12 цілей ESP32
 ```
 
 | Документ | Що це |

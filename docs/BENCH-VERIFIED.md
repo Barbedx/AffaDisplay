@@ -60,7 +60,100 @@ panel that assumption would have cost the whole session.
 | The LCD `7F` text-plus-icons encoding | ⬜ `UpdateListMenuDisplay` untried; only the `76` form was rendered |
 | `setTime` | ⬜ this family has no clock command at all — see below |
 
-### The panel shows a clock we did not set, and we have two untried ways to set it
+### ❌ 23 candidate clock frames, 162 probes, NOTHING moved the clock
+
+Tested 2026-08-05 with `examples/12_ulclock`, on the same universal panel, in an UpdateList
+session that was registered, lit and rendering. **Seven complete passes over 23 candidates —
+162 frames — and the clock did not move once.** Every one is therefore ruled out:
+
+| | candidate | result |
+|---|---|---|
+| 1, 2 | `3EF A6 <hh> <mm>`, decimal and BCD | ❌ no reply of any kind, no effect |
+| 3 | `121 05 56 "1234"` — Carminat's clock command on this family's text id | ❌ ACKed `521 74`, no effect |
+| 4 | `1B1 05 56 "1234"` — the same on the control id | ❌ ACKed `5B1 74`, no effect |
+| 5 | `151 05 56 "1234"` raw — the frame this panel accepted as Carminat | ❌ no effect on an unregistered channel |
+| 6, 7 | `3DF 70 1A 11 00 <hh> <mm> 00 01` — the hello's unexplained bytes | ❌ no effect |
+| 8–19 | `121 05 <cmd> "1234"`, cmd `50 51 53 54 55 57 58 59 5A 60 63 64` | ❌ all ACKed, none had an effect |
+| 20–23 | `1B1 05 <cmd> "1234"`, cmd `56 57 63 64` | ❌ same |
+
+**THE ACK IS WORTHLESS AS A SIGNAL HERE, and that is the finding worth carrying forward.**
+The panel answered `74` — a terminal DONE — to command bytes it has almost certainly never
+seen in its life, on both registered functions. It does not validate the command byte at
+all. Anyone probing this family by watching for ACKs will conclude they have found something
+twenty times over. Only the glass counts.
+
+The session also **survived all 162 of them** with exactly one `61 11` in the log (the
+opening one) and zero drops across ~17 minutes. The panel is far more tolerant of nonsense
+than it is useful about it.
+
+#### ✅ AND AN INDEPENDENT PROJECT CONFIRMS OUR OPENING, FRAME FOR FRAME
+
+Searching for prior art on the clock turned up something more valuable: a three-part
+reverse-engineering series on **this exact display** by an unrelated author, working from a
+different car, years before this repository existed —
+[Hackaday.io "Reverse engineering the Renault Update List display"](https://hackaday.io/project/27439-smart-car-radio/log/67942-reverse-engineering-the-renault-update-list-display-part-3).
+
+Its documented opening sequence is **identical to what `10_updatelist` puts on the wire**:
+
+| their step | their frame | ours |
+|---|---|---|
+| Start Sync | `3DF 7A 01 81 81 81 81 81 81` | identical — our announce |
+| Sync OK | `3DF 79 00 81 81 81 81 81 81` | identical — our alive |
+| Sync Display | `3DF 70 1A 11 00 00 00 00 01` | identical — our hello |
+| Init Display | `121 70 81 81 81 81 81 81 81` | identical — our first registration probe |
+| Register | `1B1 70 81 81 81 81 81 81 81` | identical — our second |
+| Enable | `1B1 04 52 02 FF FF 81 81 81` | identical — the power-on the LIBRARY now sends |
+
+This matters more than it looks. Those bytes reached this repository through
+`notes/archive_mhroczny/affa3.c` and were carried forward on the argument that the
+reference driver was trustworthy. An unrelated project arriving at the same six frames from
+its own captures turns that argument into corroboration. **The order is confirmed too**, which
+is the part step 8 changed on reasoning alone: registration belongs to the opening.
+
+[`manu-t/autoradio-interface`](https://github.com/manu-t/autoradio-interface/blob/master/UpdateListDisplay/UpdateListDisplay.ino)
+independently corroborates the two panel channels we were surprised by, and names them:
+**`0x1C1` is the display's own query channel and `0x0A9` is the remote control**. Both are
+answered with `74 81 81 …` on `0x5C1` and `0x4A9` — exactly the reflex our base emits.
+
+#### …and none of the three projects sets the clock
+
+[Part 1](https://hackaday.io/project/27439-smart-car-radio/log/67874-reverse-engineering-the-renault-update-list-display-part-1),
+[part 2](https://hackaday.io/project/27439-smart-car-radio/log/67926-reverse-engineering-the-renault-update-list-display-part-2),
+[part 3](https://hackaday.io/project/27439-smart-car-radio/log/67942-reverse-engineering-the-renault-update-list-display-part-3),
+`manu-t/autoradio-interface` and
+[`Tomasz-Mankowski/MeganeBT`](https://github.com/Tomasz-Mankowski/MeganeBT) between them
+document text, registration, keep-alive, remote-control keys and display enable. **Not one of
+them contains a clock or temperature frame.**
+
+And the Hackaday series describes the panel as *"a simple 8 characters display with great
+contrast, with **integrated** features including a clock and external temperature"* — that
+word is doing the work. The clock is the DISPLAY's feature, not a thing the head unit
+supplies. Which fits everything measured: 162 probes ignored, no clock command in the
+reference driver, no clock command in three independent implementations.
+
+**Working conclusion: on this family the radio does not set the clock, and the panel does.**
+Not proven — an absence of evidence across four sources is still an absence — but it is now
+the hypothesis with everything behind it, and hypothesis 3 below has been promoted to first.
+
+#### What that leaves
+
+The clock is not reachable by putting a plausible payload on a function this family
+registers. The remaining hypotheses, reordered after the search above:
+
+1. **The panel owns its clock and the radio cannot set it on this family.** Now the leading
+   explanation: no clock command in the reference driver, none in three independent
+   implementations, 162 probes ignored, and the display is described as having an
+   *integrated* clock. **If you need to set the clock on this panel, drive it as Carminat** —
+   `151 05 56 "HHMM"` is proven on this exact unit — and accept that AFFA2 has no equivalent.
+2. **A function id we never register.** The panel registers TWO channels of its own
+   (`1C1` and `0A9`) and we only ever probe `121` and `1B1`. A `70` probe sweep over
+   candidate ids would make the panel *tell us* which functions it accepts — it answers
+   `<id>|0x400 74` for each one. Cheap, and it would settle (1) rather than assuming it.
+3. **A different payload shape**, not a different command byte — BCD digits rather than
+   ASCII, or a different SF_DL, on the `56` command that already ACKs. Weakest of the three:
+   nothing suggests the command byte is right in the first place.
+
+### The panel shows a clock we did not set, and two ways to set it — BOTH NOW DISPROVEN
 
 Observed on the glass beside `SUCCESS`: **`5:51`**. Nothing in this driver writes it, so it
 is the panel's own free-running clock, counting from whenever the panel last had power —
@@ -79,8 +172,13 @@ none. But this is a **universal panel**, and there are two candidates, neither t
    function table so the `70` probe registers it, then sending the Carminat payload. Ugly,
    cross-family, and very likely to work precisely because the panel is universal.
 
-(2) is the better first experiment: it is the only one with evidence behind it on this
-physical unit.
+**Both were tried on 2026-08-05 and both failed** — see the table above. The reasoning is
+kept because it was sound: (2) really was the better first experiment, being the only
+candidate with evidence behind it on this physical unit. It simply turned out that a frame
+this panel accepts on `0x151` as a Carminat radio does nothing on `0x121` as an UpdateList
+one, which is itself worth knowing: **the panel routes by function id, and the function
+decides what a payload means.** `0x121` is text on this family, and `05 56 …` is evidently
+not text, so it is taken and discarded.
 
 ---
 

@@ -15,7 +15,7 @@ Bus parameters: **500 kbit/s, standard (11-bit) identifiers.**
 > derivation in `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`, which is authoritative for
 > everything in this note; the captures are `docs/captures/*.csv`.
 >
-> **We speak first.** Into silence we send one bounded `3AF B9` + `3AF BA` pair; `BA` is the
+> **We speak first.** Into silence we send one bounded bare `3AF BA`; `BA` is the
 > precondition for everything that follows and is **never periodic**. The panel then requests
 > with `3CF 61 11 xx` (DLC ≥ 3) on its own ~104 ms timer. **`xx` may be `00` or `01` and they
 > are the same request** — the low bit reports panel state, not an authorization grade. The
@@ -231,8 +231,9 @@ Three of these contradict, refine or close something stated elsewhere:
 1. **The panel's padding varies, but `data[2]` of a full `61 11` is protocol state for
    current Carminat.** The historical corpus has `69:A3:A3:…` and `61:11:A3:A3:…`, while
    the live request reads `61 11 00 A3…`; neither makes `data[2]` safely ignorable. The
-   library requires `len >= 3`, answers every `xx` with hello, interprets `01` as bootstrap,
-   and permits application output only after `00` (§5.3). Bytes 3..7 remain don't-care.
+   library requires `len >= 3`, answers every `xx` with hello, and **does not read `data[2]`
+   at all** — any complete request is the same request, and the gate is our own `BA` rather
+   than the byte (corrected 2026-08-04; §5.3). Bytes 3..7 remain don't-care.
 2. **`0x1C1` carries panel→radio traffic that is not a key** (`02 64 0F`, `05 63 "0037"`).
    The key decoder's `03 89` guard is load-bearing, not defensive coding (§7.1).
 3. **`0x1F1` is registered but the OEM radio does write to it**, with a 12-bit ISO-TP
@@ -567,9 +568,23 @@ ISO 15765-2 first frame. **[CAP]**, corroborated by
 
 ---
 
-## 4. Lazy function registration
+## 4. Lazy function registration — HISTORICAL ON BOTH FAMILIES SINCE 2026-08-04
 
-Source: `AffaDisplayBase.cpp:122-169`.
+> **This section describes the legacy sender, and it is no longer how either family
+> registers.** Registration is part of the **opening** now: it is emitted after the announce
+> burst, gated on the panel opening a channel of its own, with no application involvement at
+> all — so a build that never renders still registers. Measured `[OEM 4/4]` on Carminat
+> (§3), and confirmed on UpdateList hardware on 2026-08-04 (`docs/BENCH-VERIFIED.md`) and
+> independently by the Hackaday "Update List" series, whose documented opening emits
+> `121 70` and `1B1 70` in exactly this position.
+>
+> The lazy path survives only as a **fallback**, for a session that was voided while renders
+> were queued. The description below remains accurate about the *bytes* and the *order*,
+> which never changed.
+
+Source: `AffaDisplayBase.cpp:122-169` — a line reference from before the file was split into
+`AffaDisplayBase.cpp` / `AffaSync.cpp` / `AffaTx.cpp` / `AffaObserve.cpp`; the code is now in
+`AffaTx.cpp::queueRegistrations()`.
 
 On the first `affa3_send()` after `FUNCSREG` is clear, and only when `_skipFuncReg` is
 false, the sender walks the **whole** function table in declaration order and sends a
@@ -662,8 +677,8 @@ Three independent facts kill the pong reading:
 > **Retracted 2026-08-04:** this paragraph read *"The Carminat library is silent before the
 > panel's opening request. Its bootstrap `01` produces one `B9` as part of the bounded
 > discovery sequence."* Wrong on both counts. We are **not** silent — we announce first, with
-> one bounded `B9` + `BA` pair into a silent bus, and in the co-boot capture the panel's first
-> `61 11 00` arrives **7.24 ms after our `BA`**, answering it. And nothing about that pair is
+> one bounded bare `BA` into a silent bus, and in the co-boot capture the panel's first
+> `61 11 00` arrives **7.24 ms after our `BA`**, answering it. And nothing about that announce is
 > conditional on `01`.
 
 A heartbeat is never authorization for output.
@@ -682,7 +697,8 @@ UpdateList  TX  3DF  7A 01 81 81 81 81 81 81
 Carminat's `data[1]` is the filler (`0x00`); UpdateList's is a literal `0x01`.
 
 **`BA` is announced into silence and is the precondition for the whole opening.** `[OEM 4/4]`
-We send one bounded `B9` + `BA` pair; the panel then requests on `3CF 61 11 xx`, and the
+We send one bounded bare `BA` — the `B9` that once led it is gone, it is the heartbeat and
+starts only after registration; the panel then requests on `3CF 61 11 xx`, and the
 *next* such request draws the B0 burst 30.75 ms later. Slow repetition (seconds apart) is
 acceptable if nothing answers; **a periodic BA stream is not, ever**.
 

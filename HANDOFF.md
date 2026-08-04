@@ -1,13 +1,28 @@
-# Handoff — 2026-08-04, end of the day the protocol was settled
+# Handoff — 2026-08-04, the day both families worked
 
-The previous handoff (2026-07-29) described a bench that could decode the panel but never
-establish a link. **That problem is solved and the whole protocol is now proven on glass.** It
-is archived at `docs/HANDOFF-2026-07-29.md`; almost every open question in it is answered here.
+Library **0.5.0**. The previous handoff (2026-07-29) described a bench that could decode the
+panel but never establish a link. That problem was solved earlier today; this one records
+what happened after.
 
-The refactor planned in [`docs/REFACTOR-PLAN.md`](docs/REFACTOR-PLAN.md) **landed in full on
-2026-08-04**, all nine steps, and **it has been on glass**: the refactored firmware opens the
-session, powers the panel and renders unattended, 6.2 s from boot, with nothing in the
-application asking it to. Read that file second. Read this one first.
+Two things landed, and the second is the bigger one:
+
+1. **The refactor is complete** — all nine steps of
+   [`docs/REFACTOR-PLAN.md`](docs/REFACTOR-PLAN.md) — and it has been on glass. The
+   refactored firmware opens the session, powers the panel and renders unattended in 6.2 s
+   from boot with nothing in the application asking it to.
+2. **The UpdateList (AFFA2) family works on real hardware, for the first time ever.** It had
+   never put a frame on a bus. Its sequencing was an *argument* — that the two families were
+   nearly the same code, and that the surviving reference driver worked rather than being
+   right. The bench panel turned out to be universal, and the argument held: opening to
+   `SUCCESS` in 220 ms of wire time, first attempt.
+
+Read this file first, then the refactor plan, then `docs/BENCH-VERIFIED.md` for what has
+actually been seen on glass as opposed to what the code believes.
+
+**0.5.0 is a BREAKING release.** `SyncProfile` lost six fields; a downstream profile that
+set any of them will not compile, which is deliberate — every one of them encoded a fact the
+captures have since settled, and silently ignoring them would be worse. See
+`src/core/AffaSyncProfile.h`, which names each deleted field and where its rule now lives.
 
 ---
 
@@ -48,10 +63,16 @@ wire-log download, WiFi setup and OTA all work from the web console.
 | | |
 |---|---|
 | board | ESP32 DevKit V1, **CRX → GPIO5, CTX → GPIO4**, 500 kbit/s |
-| flash | `pio run -e ex09_golden -t upload --upload-port COM5` |
+| panel | **UNIVERSAL** — the same physical unit answers as Carminat *and* as UpdateList. Both were driven on it today |
+| flash Carminat | `pio run -e ex09_golden -t upload --upload-port COM5` |
+| flash UpdateList | `pio run -e ex10_updatelist -t upload --upload-port COM5`, then `pio device monitor -e ex10_updatelist` |
 | console | `http://192.168.100.97/` (joins the saved network; falls back to AP `AffaGolden`/`affagolden`) |
-| tests | `pio test -e native` → **257/257**. `rm -rf .pio/build/native` first if results look odd — a stale build has hidden real failures here twice |
+| tests | `pio test -e native` → **259/259**. `rm -rf .pio/build/native` first if results look odd — a stale build has hidden real failures here twice |
 | protocol truth | `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`, derived from `docs/captures/*.csv` |
+| what is proven | `docs/BENCH-VERIFIED.md` — and it is careful about what is *not* |
+
+**Whatever is on the board right now is probably not `09_golden`.** The day ended with
+`11_boom` flashed. Check before assuming, and reflash before starting a soak.
 
 The C3 SuperMini at `192.168.100.85` **cannot receive** — its CANRX reads permanently dominant.
 Diagnosis is in memory and in the ground-truth doc; do not debug firmware against it.
@@ -98,18 +119,27 @@ ISO-TP: DLC 8 always; first frame `10 <len>`; **the first consecutive frame is `
 flashed and running, and it opens the session, lights the glass and renders unattended. What
 is left is a long soak.
 
-### 1. Let it soak, and read the drop line
+### 1. THE LONG SOAK. It is the one thing owed, and it has been owed all day
 
 ```
+pio run -e ex09_golden -t upload --upload-port COM5     # then leave it ALONE
 http://192.168.100.97/          ->   phase / drops / reason on the third line
 http://192.168.100.97/deregistered.txt        the frames from BEFORE the first drop
 ```
 
-The step-2/3/6 build ran **31.7 min, 246 screens, zero drops, every counter zero**, where the
-proven build lost fourteen sessions in 96 min. **That is not a fix claim** — the reasoning,
-including why it is only ~1 % surprising, is in `docs/REFACTOR-PLAN.md` under "The drop did
-not happen". Run the next one long. `/deregistered.txt` lives in RAM: **download it before
-re-flashing.**
+Three soaks were attempted and **all three were cut short by reflashing the board underneath
+them** — 31.7, 20.8 and 15.5 minutes, zero drops in every one. Against a build that lost
+fourteen sessions in 96 minutes that is encouraging and *nothing more*: half an hour clean is
+only about 1 % surprising if the rate were unchanged, the observed intervals ran from 15 s to
+1409 s so even that number is generous, and **nothing in the refactor has a mechanism that
+would stop a panel deauthorizing us.** The reasoning is in `docs/REFACTOR-PLAN.md` under "The
+drop did not happen"; it is deliberately not written up as fixed.
+
+What is different now is that a drop can no longer hide. The status page counts them and
+names the cause, and the first one freezes the wire ring. **`/deregistered.txt` lives in RAM
+— download it before re-flashing.**
+
+So: flash `09_golden`, walk away for a few hours, and read the third line when you come back.
 
 ### 2. Know that `Ready` now means the glass is on
 
@@ -123,19 +153,40 @@ point `Ready` means what it used to mean. `09_golden` is the worked example: it 
 sending power and kept only its 750 ms warm-up, which is a property of the glass rather than
 of the protocol.
 
-### 3. Then the two open items below
+### 3. The clock, if you want a small win
+
+The panel shows a time nobody set — it free-runs from its own power-on. UpdateList has no
+clock command and that is correct; the reference driver has none. But the panel is universal
+and there are two untried candidates, written up in `docs/BENCH-VERIFIED.md`:
+
+* **Carminat's `151 05 56 "HHMM"`** — already accepted by *this physical panel* on
+  2026-07-28, read off the glass as `10:00`. It needs `0x151` added to the UpdateList
+  function table so the `70` probe registers it. Cross-family and ugly; the only one with
+  evidence.
+* **`3EF A6 <hh> <mm>`** — three bytes, DLC 3, no PCI, no SF_DL, so it bypasses the
+  transport entirely and needs a raw `ICanLink::send()`. Transcribed from an OEM
+  radio↔cluster capture and never put on a bus by this library. It is the *designed* answer
+  for a panel whose head unit has no clock button, which is exactly this situation.
+
+Try the first for the evidence, then the second — because if the second works it is the
+right answer rather than the working one, and it needs no registration at all.
+
+### 4. Then the two open items below
 
 Neither blocks anything. The half-open-session hole needs a rule no capture provides; the
 ~7-minute drop now reports itself.
 
-### Two decisions already made, do not relitigate
+### Decisions already made, do not relitigate
 
-* **UpdateList adopts the Carminat rules** (owner, 2026-08-04). Its bytes are confirmed correct
-  against the reference implementation; its *logic* differed in five ways and all five are
-  deliberately removed. Its only remaining difference is that it answers the **first** `61 11`
-  with no announce precondition.
-* **The periodic session drop is backlogged, not blocking.** It self-heals. Step 6 of the plan
-  makes it visible instead of fixing it blind.
+* **UpdateList adopts the Carminat rules** (owner, 2026-08-04) — and this is no longer a
+  decision, it is a measurement. Four of the five differences it removed are now confirmed on
+  glass. Its only remaining difference is that it answers the **first** `61 11` with no
+  announce precondition, and even that is *unproven* rather than wrong: in the one hardware
+  run, our announce went out before the request anyway.
+* **The library owns power-before-render** (owner, 2026-08-04): universal, with
+  `setAutoPower(false)` as the opt-out. `Phase::Ready` means the glass is on.
+* **The periodic session drop is backlogged, not blocking.** It self-heals, and it now
+  reports itself instead of being invisible.
 
 ---
 

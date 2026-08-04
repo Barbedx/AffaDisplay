@@ -19,12 +19,25 @@ have since disproven. That is what this file exists to prevent.
 | `03_hello` | ESP32-C3 | library over ESP-IDF TWAI | The smallest correct program: power on, `SUCCESS`, clock. ~170 lines, no WiFi, cable-flashed. Read this to understand the API shape. |
 | `04_rows` | ESP32-C3 | library over ESP-IDF TWAI | Live three-row screen with a console. The TWAI-stack counterpart to `09_golden`. |
 
+## The other panel family
+
+| example | board | what it is |
+|---|---|---|
+| **`10_updatelist`** | DevKit V1 | **The AFFA2 / UpdateList example, and the only one.** A first-contact diagnostic: serial only, every frame in both directions, every phase transition, queue depths twice a second, and a 15-second verdict that names the frame that never arrived. After the proof frame the panel cycles random phrases, which turns it into a continuous soak of the ISO-TP path. **This is the file that proved the family on hardware** — 2026-08-04, first attempt, opening to `SUCCESS` in 220 ms of wire time. Its header lists the failure shapes and which knob each implicates; that table was written *before* the run and kept. |
+
+## Fun, and harder soaks than they look
+
+| example | board | what it is |
+|---|---|---|
+| `11_boom` | DevKit V1 | A T-10 countdown with a burning fuse, then a nine-frame three-row ASCII explosion, then again. Countdown length, tick and frame time are set from a web form and persisted, so retuning costs no reflash. **The harshest soak in the tree**: every frame is a complete fullscreen — fourteen acknowledged ISO-TP frames — at ~180 ms, which is only about three times the duration of one transfer, so a bus falling behind shows as a visible stutter rather than hiding in a gap. |
+
 ## Diagnostics — reach for these when something is wrong
 
 | example | what it answers |
 |---|---|
 | `01_bringup` | Does the link come up at all, in the order it has to be proved? |
 | `02_canspy` | Is the ESP32 seeing CAN frames *at all*? Strips the library out entirely (`build_src_filter = -<*>`), so a result here is a statement about the driver and the wire with AffaDisplay removed from the equation. |
+| `10_updatelist` | Is this panel an AFFA2 panel, and if the opening stalls, **where**? It prints the phase on every change, and a phase that will not advance names the missing frame. |
 
 ## The protocol by hand — correct, but not the way to build an application
 

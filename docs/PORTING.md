@@ -230,7 +230,7 @@ panel; carrying it for `AffaRing` (a 40-line power-of-two ring) is not a trade w
 If you keep none of this, `docs/WIRE-SPEC.md` is the file you want; it is written to be
 sufficient on its own. The pieces you cannot skip, in the order they bite:
 
-1. **The handshake — and on Carminat *you* open it.** Announce one bounded `B9` + `BA` pair
+1. **The handshake — and on Carminat *you* open it.** Announce one bounded bare `BA`
    on `0x3AF` into silence; the panel then requests `61 11 xx` on `0x3CF` (`00` and `01` are
    **the same request**), and its **next** request +30.75 ms draws your hello burst on
    `0x3AF`/`0x3DF` — Carminat sends **three byte-identical** frames 31 ms apart, and that is

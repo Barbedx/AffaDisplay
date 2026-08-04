@@ -80,7 +80,11 @@ no `std::function`, no heap after `begin()`.
 | `core/AffaConstants.h` | Protocol constants shared by all panels: `kPacketLength`, `kKeyHoldMask`, `kReplyFlag`, ISO-TP opcodes, ACK bytes. No panel-specific IDs. | `<cstdint>` | yes |
 | `core/AffaSyncProfile.h` | `SyncProfile`; the two profile constants live in the panel folders, not here. | `<cstdint>` | yes |
 | `core/AffaRing.h` | `AffaRing<T,N>` — lock-free single-producer/single-consumer ring. | `<cstdint>`, `<atomic>` | yes |
-| `core/AffaDisplayBase.{h,cpp}` | The sync FSM, the ISO-TP transmit FSM, the RX drain, the key decoder, `pressKey`/`nav`, the three-layer observation seam (tap, subscription table, event sink), the capability defaults. | `core/*`, `util/*` | yes |
+| `core/AffaDisplayBase.h` | The whole class. One header, four implementation files below — split 2026-08-04 when it passed 2100 lines spanning four unrelated jobs. | `core/*`, `util/*` | yes |
+| `core/AffaDisplayBase.cpp` | Lifecycle, `poll()` orchestration, the RX drain, the key decoder, `pressKey`/`nav`, the public surface, the capability defaults. | `core/*`, `util/*` | yes |
+| `core/AffaSync.cpp` | The opening: the `Phase` table, the announce, the hello burst, the panel-channel reflex, the heartbeat, the peer watchdog. | `core/*`, `util/*` | yes |
+| `core/AffaTx.cpp` | The transmit queue, ISO-TP segmentation, flow control, retries, registration probes, the durable-control cache. | `core/*`, `util/*` | yes |
+| `core/AffaObserve.cpp` | The three-layer observation seam (tap, subscription table, event sink), `txFrame()` — the choke point every frame passes through in both directions — and inbound text reassembly. | `core/*`, `util/*` | yes |
 | `util/AffaLog.h` | `ILogSink`, `AFFA_LOG*` macros, level gating. | `AffaConfig.h`, `<cstdarg>` | yes |
 | `util/AffaLog.cpp` | Formatter + sink dispatch. **Entire body gated on `AFFA_ENABLE_LOG`.** | `<cstdio>` | yes |
 | `util/AffaText.{h,cpp}` | `toAscii`, `normalizeTitle`. Pure C API, no allocation. **`.cpp` body gated on `AFFA_ENABLE_TRANSLITERATION`.** | `<cstdint>`, `<cstddef>`, `<cstring>` | yes |
@@ -110,7 +114,7 @@ no `std::function`, no heap after `begin()`.
 
 * **`src/rtos/` is the single exception to "Host" above, and it is fenced.** FreeRTOS
   headers appear in `rtos/AffaTask.h` and nowhere else; `core/`, `util/`, `proto/` and
-  `widget/` remain compilable against nothing but C++17, which is why the 208-case host
+  `widget/` remain compilable against nothing but C++17, which is why the 259-case host
   suite is untouched by the owned-task mode. The poll-owner guard the mode needs inside
   `core/` is a **function pointer** (`AffaDisplayBase::TaskIdFn`) precisely so that `core/`
   does not learn what a task is — and it is host-tested through that seam
@@ -649,9 +653,10 @@ struct SyncProfile {
   uint8_t  helloCount;    // Carminat 3, UpdateList 1
   bool replyToPing = false;   // MUST stay false for Carminat: `B9` is a free-running 500 ms
                               // heartbeat, not a pong. Setting it true doubles our `B9` rate.
-                              // Genuinely unsettled for UpdateList, whose reference driver
-                              // pongs every `0x69` — the first knob to turn if that family
-                              // ever stalls in the handshake.
+                              // CONFIRMED false for UpdateList too, on glass 2026-08-04: its
+                              // panel pings ~500 ms, is never ponged, and the session holds.
+                              // Its reference driver pongs every `0x69`; ours does not, and
+                              // the panel does not care.
   bool waitForPanel = false;      // stay silent until the panel speaks
   bool sendSyncRequest = true;    // may we probe with `BA` as periodic recovery
   bool requireAuthRequest = false;// a bare `69` is not permission; a complete `61 11 xx` is
@@ -1118,7 +1123,7 @@ class AffaDisplayBase : public IDisplay, public IPanel {
 is called.
 
 > **Carminat override — rewritten 2026-08-04.** Read the following as generic FSM structure,
-> not as the Carminat wire sequence. Carminat announces one bounded `B9` + `BA` pair into
+> not as the Carminat wire sequence. Carminat announces one bounded bare `BA` into
 > silence; a complete `3CF 61 11 xx` (DLC ≥ 3, **`xx` unread — `00` and `01` are the same
 > request**) that arrives after that `BA` arms the announce, and the panel's **next** request
 > ~104 ms later stages B0/B0/B0 at +31 ms gaps from *that request*. Each B0 only needs
@@ -1236,7 +1241,7 @@ call `failAllQueued(r)` — the payload behind it completes with the registratio
 failure, exactly as the legacy `affa3_send` propagated it. If `ticket != kNoTicket`,
 record `_lastCompleted = ticket`, `_lastResult = r`, and fire `CompleteCb`.
 
-**Lazy function registration, byte-identical to the legacy wire order.** Inside
+**Lazy function registration — A FALLBACK ON BOTH FAMILIES NOW, not the opening.** Inside
 `enqueue()`, before pushing the payload job:
 
 > **This is a fallback on Carminat, not the wire contract — corrected 2026-08-04.** The OEM

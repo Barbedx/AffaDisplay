@@ -20,7 +20,7 @@ Read this before changing any constant. Read `WIRE-SPEC.md` before emitting one.
 >
 > What it overturned, so you do not re-derive it from these notes:
 >
-> * **We speak first.** One bounded `3AF B9` + `3AF BA` pair into silence; the panel answers
+> * **We speak first.** One bounded bare `3AF BA` into silence; the panel answers
 >   `61 11 xx` 7.24 ms later in the co-boot capture.
 > * **`61 11 00` and `61 11 01` are the same request.** One capture completes an entire
 >   session on sixteen `01` frames and zero `00`. The low bit is panel state, not
