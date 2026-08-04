@@ -92,16 +92,52 @@ being unconditional, `61 11 xx` being one request regardless of byte 2, the burs
 It is the stack proven end to end this session, and the one most existing Renault/ESP32 code
 already uses. `Esp32CanLink` stays for raw-TWAI builds.
 
-## UpdateList
+## UpdateList — the hypothesis was half right, and the other half is load-bearing
 
-The working hypothesis, from the owner: **same logic, different bytes** — with a shipped
-reference implementation in `MeganeCAN/src/display/UpdateList/` that drove a real panel.
+The working hypothesis was **same logic, different bytes**. The reference implementation
+(`MeganeCAN/src/display/UpdateList/`, which drove a real panel) was read against all ten
+questions the Carminat model answers. Result:
 
-This is a hypothesis backed by an implementation, not a guess, and the profile above is
-designed to express it: if UpdateList really is the same machine, it is `SyncProfile` data plus
-possibly `Opening::PanelLeads`. **But the byte-level facts must be extracted from that reference
-before any unification**, and where the reference and our current port disagree, that disagreement
-is the finding.
+**The bytes are right — completely.** Every literal in `src/updatelist/` matches the reference:
+ids (`3DF`/`3CF`, funcs `121`/`1B1`, panel channel `0A9` → `4A9`), filler `0x81`, hello
+`70 1A 11 00 00 00 00 01`, alive `79 00`, request `7A 01` (a real argument, not filler),
+registration order, ACK `0x74` and flow control `30 01 00`, power `04 52 02 FF FF`, and both
+setText encodings including the 29-byte segment payload. **No byte-level disagreement was found
+anywhere.** The golden vectors in WIRE-SPEC are correct.
+
+**The logic is NOT the same machine.** Five structural differences, each read from the shipped
+driver rather than inferred:
+
+| Carminat, proven on glass 2026-08-04 | UpdateList reference |
+|---|---|
+| our `BA` precedes the burst; the panel's **second** request draws it | answers the **first** `61 11` immediately, from inside `recv()`; no announce precondition |
+| registration is part of the opening, pipelined | **lazy** — triggered by the first render — and **serial**, each probe waiting for its own ACK |
+| the panel's `1C1 70` must arrive and be acknowledged before we register | `0A9 70` is acknowledged, but **nothing gates on it** |
+| any `61 11 xx` while registered voids the session | **no `61 11` teardown at all**; `FUNCSREG` survives. Only the peer watchdog drops it |
+| `03 52 09` must precede any render or the glass stays dark | **no such rule**; builds routinely render having never sent `0x1B1` |
+
+**So the two families do not collapse into one behaviour, and the three knobs in the profile
+above are exactly what they are for.** `Opening`, `registerInOpening` and a peer-channel gate
+carry the whole difference. Forcing UpdateList onto the Carminat rules would break a family
+nobody can currently test on hardware — which is the failure this plan exists to avoid.
+
+### The one finding to act on first
+
+**`replyToPing = false` is unverified for UpdateList and may be wrong.** The reference calls
+`tick()` from its `0x69` handler, so every panel ping provokes an immediate `3DF 79 00 …` —
+and until March 2026 that pong was the driver's **only** heartbeat; the free-running 1 Hz timer
+was added later and the pong left in. Our port removed it. The removal is justified by four
+**Carminat** captures (B9 free-running at σ 0.33 against a 69 at σ 4.60, phase wrapping past
+zero) and there is **no UpdateList evidence either way**. If an UpdateList panel ever stalls in
+the handshake, this is the first knob to turn.
+
+### Also unverified, and not to be assumed
+
+* Lazy registration — the reference is lazy, but the one real OEM bus using these function ids
+  registers 400 ms *ahead* of content, i.e. as part of the opening.
+* `04 52 <state> FF FF` versus an OEM head unit's observed `03 52 <state> 00`.
+* The panel's own filler byte — genuinely unknown. `0x84` and `0xA2` are the only peer fillers
+  seen anywhere near this family; do **not** port Carminat's `0xA3` as an expectation.
 
 `test_updatelist_wire` must stay green throughout. It is the only thing standing between a
 refactor and silently changing a family nobody can currently test on hardware.
