@@ -1601,9 +1601,28 @@ void onSync(affa::SyncState s, void*) {
 }  // namespace
 
 void setup() {
+  // RELEASE THE BUS BEFORE ANYTHING ELSE, INCLUDING Serial.
+  //
+  // On ESP32-C3 the CAN TX pin is a floating input through reset and early boot, and it
+  // stays that way until the TWAI driver claims the matrix — which, in this build, is after
+  // Serial and the filesystem. TXD low means DOMINANT: for that whole window the
+  // transceiver can be holding the bus down, and a dominant that never releases is not
+  // "noise" to the other node, it is a stuck-bus fault. It would be seen by the display on
+  // EVERY board reset, which is exactly the cadence at which this panel has been going mute.
+  //
+  // Recessive is HIGH, so drive it HIGH before anything can block. Cheap, and it cannot make
+  // things worse: TWAI reassigns the pin a moment later.
+  //
+  // NOT PROVEN, DELIBERATELY STATED AS A HYPOTHESIS: the panel's silence has not yet been
+  // caught in the act, and the alternative explanation (it simply sleeps when its radio
+  // disappears) still fits. See [[affa-display-sleeps-on-board-reset]].
+  pinMode(kPins.tx, OUTPUT);
+  digitalWrite(kPins.tx, HIGH);
+
   Serial.begin(115200);
   delay(300);
   Serial.println("\nAffaDisplay 04_rows");
+  Serial.println("[can] TX held recessive (HIGH) through boot - bus released");
 
   // ===========================================================================
   // CAN FIRST. WIFI SECOND. THIS ORDER IS THE POINT OF THIS BUILD.
