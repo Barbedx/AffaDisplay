@@ -40,6 +40,37 @@ example's own FSM) — the first hardware run since the handshake work:
 That `setText` is the first proof that the **segmented** transmit path works against real
 glass under the captured opening — a strictly harder path than the single-frame clock.
 
+### `09_golden` soak — the whole stack, unattended
+
+ESP32 DevKit V1 (CRX=GPIO5, CTX=GPIO4), the **library** over `can_common` via
+`CanCommonLink`. Left running untouched and filmed by the owner.
+
+| | measured |
+|---|---|
+| uptime | **5744 s** (1 h 36 m), no intervention |
+| fullscreen screens delivered | **24 912**, `failed 0` |
+| frames on the wire | ~350 000 — each screen is 14 ISO-TP frames, every one flow-controlled |
+| `txErr` / `rxErr` / `busErr` / `arbLost` | **0 / 0 / 0 / 0** |
+| `rxMissed` / `ringOverflow` / queue depth | **0 / 0 / rx 0 tx 0** |
+| session | `sync 0x08 REGISTERED` throughout |
+
+| Capability | | Evidence |
+|---|---|---|
+| Three independent rows, 220/380/550 ms | ✅ | filmed scrolling at their own rates |
+| Pause / resume from the web console | ✅ | owner: *"pause play works as supposed"* |
+| Recovery without intervention | ✅ | re-announces, re-registers, re-powers the glass and resumes painting on its own |
+| Whole protocol behind the library API | ✅ | the example contains no handshake, no ISO-TP, no ACK handling |
+
+**Nothing in that run is hand-written protocol.** The application calls
+`showFullscreenText()` and reads status; `src/` does the rest. Compare `07_cantime` and
+`08_rows3`, which implement the same wire by hand at ~700 lines each — and in which the
+`0x21`-not-`0x20` consecutive-frame bug was made and found.
+
+**A zero here is worth more than a success elsewhere.** `rxMissed 0` and `ringOverflow 0`
+over 350 000 frames say the receive path kept up; `queued tx 0` says nothing ever backed up
+behind a stalled transfer. Those three are the counters that were missing when this rig spent
+a week looking like a wire fault.
+
 **The transmit-failure signature that dogged this rig for a week was `frame.ss = 1`**
 (single-shot). Same wiring, same session, only that flag changed: `TX+ 43 / TX- 334` and
 `busErr 63 120` became `TX+ 973 / TX- 0` and `busErr 0`. See
