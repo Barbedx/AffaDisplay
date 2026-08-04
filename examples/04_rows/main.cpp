@@ -920,6 +920,10 @@ PsychicHttpServer g_server;
 bool     g_otaRunning = false;
 uint32_t g_rebootAt   = 0;
 
+// Bump on every upload. The image MD5 in /api/build is what actually PROVES freshness;
+// this is the human-readable label that says what the upload was FOR.
+constexpr const char* kBuildVersion = "0.7.0";
+
 const char kPage[] PROGMEM = R"HTML(<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>AffaDisplay 04_rows</title>
@@ -938,6 +942,8 @@ input{background:#000;color:#ddd;border:1px solid #444;border-radius:4px;padding
 a{color:#8ab}
 </style>
 <h1>AffaDisplay <span id=v>04_rows</span> &middot; <a href=/update>OTA</a></h1>
+<div id=build style="font:12px ui-monospace,monospace;color:#7a7;margin:-6px 0 12px">
+build &hellip;</div>
 
 <fieldset><legend>display</legend>
 <button onclick=go('/api/power?on=1')>power on</button>
@@ -999,6 +1005,8 @@ collapsed into one row with a repeat count.</div>
 async function go(u){ try{ await fetch(u) }catch(e){} tick() }
 async function tick(){
   try{
+    document.getElementById('build').textContent =
+      await (await fetch('/api/build')).text()
     s.textContent = await (await fetch('/api/status')).text()
     f.textContent = await (await fetch('/api/frames')).text()
     l.textContent = await (await fetch('/api/log')).text()
@@ -1136,6 +1144,26 @@ void routes() {
   // THE RAW WIRE, oldest first. This is the answer to "what does the display send us": if
   // this shows only TX lines, the other end is not talking and no amount of render debugging
   // will help.
+  // WHICH FIRMWARE IS ACTUALLY ON THIS BOARD.
+  //
+  // kBuildVersion is bumped by hand and lies the moment somebody forgets. __DATE__/__TIME__
+  // are better but only move when THIS translation unit is recompiled — a library-only
+  // change relinks a different image behind an unchanged timestamp, which is the exact case
+  // that wasted a bench session today (the board ran 0.3.0 while the tree said 0.4.1).
+  //
+  // ESP.getSketchMD5() is the hash of the flashed image itself. It cannot be stale: any
+  // change anywhere that alters a byte of the binary changes it, and a rebuild that changes
+  // nothing leaves it identical. That is the authoritative field — the other two are for
+  // human readability.
+  g_server.on("/api/build", HTTP_GET, [](PsychicRequest* r) {
+    char out[160];
+    snprintf(out, sizeof(out), "build %s  %s %s  img %.8s  up %lus",
+             kBuildVersion, __DATE__, __TIME__,
+             ESP.getSketchMD5().c_str(),
+             static_cast<unsigned long>(millis() / 1000));
+    return r->reply(200, "text/plain", out);
+  });
+
   g_server.on("/api/frames", HTTP_GET, [](PsychicRequest* r) {
     // STATIC, not a local. This snapshot is ~900 B and esp_http_server's task stack is what
     // the config above sets; a handler that overflows it dies silently and returns an empty
@@ -1152,8 +1180,27 @@ void routes() {
     frozenAt = g_frozenAtMs;
     portEXIT_CRITICAL(&g_frameMux);
 
+    // PAGINATED, AND THAT IS NOT A NICETY. A 160-row ring formatted in one go is a ~10 KB
+    // String allocated on the HTTP task for every poll of this page; under WiFi memory
+    // pressure that allocation fails and PsychicHttp answers with an EMPTY BODY. The
+    // failure mode is vicious because it is load-dependent: a quiet bus shows a few rows
+    // fine, and the page goes blank exactly when the display finally starts talking and
+    // there is something worth reading. Reported from the bench as "saw some bytes, then it
+    // refreshed and was silent again".
+    //
+    // Newest LAST, and by default only the newest kPageRows of them, so the common case is
+    // a small response. `?from=N` walks the whole ring for anyone who wants all of it.
+    constexpr uint16_t kPageRows = 40;
+    uint16_t from = 0;
+    bool     tail = true;
+    if (r->hasParam("from")) {
+      const long v = r->getParam("from")->value().toInt();
+      from = (v < 0) ? 0 : static_cast<uint16_t>(v);
+      tail = false;
+    }
+
     String out;
-    out.reserve(kFrameRing * 64 + 128);
+    out.reserve(kPageRows * 64 + 256);
     char hdr[160];
     snprintf(hdr, sizeof(hdr), "%lu frames observed. trace %s%s\n"
                                "  t-first   t-last   xN  dir  id  data\n",
@@ -1161,9 +1208,20 @@ void routes() {
              frozen ? "FROZEN at " : "live",
              frozen ? String(frozenAt).c_str() : "");
     out += hdr;
-    for (uint8_t i = 0; i < kFrameRing; ++i) {
+
+    // Oldest-to-newest order, skipping slots never written. Count first so a tail request
+    // knows where the last page starts.
+    uint16_t written = 0;
+    for (uint16_t i = 0; i < kFrameRing; ++i)
+      if (snap[(head + i) % kFrameRing].count) ++written;
+    if (tail) from = (written > kPageRows) ? static_cast<uint16_t>(written - kPageRows) : 0;
+
+    uint16_t seen = 0, emitted = 0;
+    for (uint16_t i = 0; i < kFrameRing; ++i) {
       const FrameRec& f = snap[(head + i) % kFrameRing];
       if (!f.count) continue;                     // never written
+      if (seen++ < from) continue;
+      if (emitted++ >= kPageRows) break;
       char line[112];
       int n = snprintf(line, sizeof(line), "%9lu %8lu %5lu  %s  %03X ",
                        static_cast<unsigned long>(f.firstMs),
@@ -1175,6 +1233,15 @@ void routes() {
       out += line;
       out += '\n';
     }
+
+    char foot[96];
+    if (from + emitted < written)
+      snprintf(foot, sizeof(foot), "rows %u..%u of %u   next: /api/frames?from=%u\n",
+               from, from + emitted, written, from + emitted);
+    else
+      snprintf(foot, sizeof(foot), "rows %u..%u of %u%s\n", from, from + emitted, written,
+               from ? "" : "   (all)");
+    out += foot;
     return r->reply(200, "text/plain", out.c_str());
   });
 
@@ -1564,7 +1631,11 @@ void startHttp() {
   // does not check the return, so the route is simply absent. This example has nine routes
   // plus ElegantOTA's three; the headroom is deliberate, because the failure mode is a board
   // that needs a cable.
-  g_server.config.max_uri_handlers  = 32;
+  // 64, NOT 32. Nineteen app routes plus ElegantOTA overflowed the table and SIXTEEN routes
+  // silently failed to register — /api/status, /api/frames and /api/send all 404 while /
+  // and /api/log still answered, which reads exactly like a dead board instead of a full
+  // table. Overshoot it; the cost is a few bytes of handler slots.
+  g_server.config.max_uri_handlers  = 64;
   g_server.config.stack_size        = 8192;
 
   g_server.listen(80);
