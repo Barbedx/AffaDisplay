@@ -76,11 +76,17 @@ inline void completeCarminatAuth(D& d, L& l, FakeClock& clk) {
   l.inject(panelSyncRequest());
   d.poll();
   clk.advance(affa::carminat::kHelloFirstDelayMs);
-  d.poll();
+  d.poll();                                     // B0 #1
+  // THE DISPLAY REGISTERS ITS OWN CHANNEL FIRST, and the harness has to model that or it is
+  // not modelling this panel. Measured 4/4: `1C1 70` lands 0.81-1.55 ms after B0#1 — between
+  // the first and second announce frames — and our `151 70` follows ~61 ms later. Without it
+  // the library correctly refuses to register, and every rig built on this helper stalls.
+  l.inject(mk(0x1C1, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
   clk.advance(affa::carminat::kHelloFrameGapMs);
-  d.poll();
+  d.poll();                                     // 5C1 74 reflex, then B0 #2
   clk.advance(affa::carminat::kHelloFrameGapMs);
-  d.poll();
+  d.poll();                                     // B0 #3
+  d.poll();                                     // and the 0x70 probes it now permits
 }
 
 // A self-ACK rig has to let both 0x70 registrations complete before the profile's measured

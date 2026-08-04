@@ -162,7 +162,7 @@ RowScreen g_rows{rowGeometry()};
 // HTTP task. A spinlock rather than "it is only diagnostics": a torn record here is exactly
 // the kind of thing that sends you hunting a protocol bug that does not exist.
 struct LogRec { uint32_t ms = 0; char msg[96] = {0}; };
-constexpr uint8_t kLogRing = 48;
+constexpr uint8_t kLogRing = 96;
 LogRec            g_log[kLogRing];
 uint8_t           g_logHead = 0;
 portMUX_TYPE      g_logMux  = portMUX_INITIALIZER_UNLOCKED;
@@ -222,7 +222,7 @@ struct FrameRec {
   uint8_t  len     = 0;
   uint8_t  d[8]    = {0};
 };
-constexpr uint8_t kFrameRing = 48;
+constexpr uint8_t kFrameRing = 160;   // a rolling wire log, not a 48-row death snapshot
 FrameRec     g_frames[kFrameRing];
 uint8_t      g_frameHead = 0;      // slot AFTER the newest, i.e. the next one to overwrite
 uint32_t     g_frameSeq  = 0;      // total frames observed, uncoalesced
@@ -239,6 +239,8 @@ uint32_t g_lastRxMs = 0;
 // the evidence has been overwritten by a thousand of our own retries. Frozen, the ring holds
 // the last frames before the panel went quiet — including whatever we transmitted into it.
 bool     g_traceFrozen = false;
+// See the DEAF handler: the trace is a rolling wire log by default, not a one-shot snapshot.
+constexpr bool kFreezeTraceOnDeaf = false;
 uint32_t g_frozenAtMs  = 0;
 
 void onTap(const affa::Frame& f, affa::Direction d, void*) {
@@ -833,10 +835,18 @@ void pumpGate(uint32_t now) {
   }
 
   ++g_deafEvents;
-  portENTER_CRITICAL(&g_frameMux);
-  const bool froze = !g_traceFrozen;
-  if (froze) { g_traceFrozen = true; g_frozenAtMs = now; }
-  portEXIT_CRITICAL(&g_frameMux);
+  // FREEZING IS OPT-IN NOW. It was built to catch the first moment of a fault nobody
+  // understood, and it earned its keep — but that fault is settled (single-shot), and a
+  // trace that stops recording four seconds after the last RX is useless as a WIRE LOG:
+  // it self-destructs exactly when you want to watch a handshake retry. Default is a
+  // rolling ring; set kFreezeTraceOnDeaf to get the old death-snapshot behaviour back.
+  bool froze = false;
+  if (kFreezeTraceOnDeaf) {
+    portENTER_CRITICAL(&g_frameMux);
+    froze = !g_traceFrozen;
+    if (froze) { g_traceFrozen = true; g_frozenAtMs = now; }
+    portEXIT_CRITICAL(&g_frameMux);
+  }
 
   logmsg("DEAF after %lu ms of talking, %lu frames heard - trace %s",
          static_cast<unsigned long>(now - g_gateOpenMs),
@@ -1170,6 +1180,49 @@ void routes() {
 
   // Re-arm: clear the ring and let it record again. The whole ring, not just the flag —
   // a re-armed trace that still holds the last death is worse than no trace.
+  // RAW FRAME INJECTION — drive the handshake by hand.
+  //   /api/send?id=3AF&d=BA00000000000000        one BA, exactly as the OEM radio sends it
+  //   /api/send?id=3AF&d=B90000000000000000      alive
+  //   /api/send?id=3AF&d=B014110 01F000000       (spaces/odd nibbles are rejected, not padded)
+  //   /api/send?id=151&d=0556313030300000        the clock, "1000"
+  // Bytes are zero-padded to DLC 8, which is what every frame on this bus is. The frame goes
+  // out through the SAME link the library uses, so it appears in /api/frames as TX and is
+  // subject to the same TX gate.
+  g_server.on("/api/send", HTTP_GET, [](PsychicRequest* r) {
+    const String idStr  = r->getParam("id")  ? r->getParam("id")->value()  : String();
+    const String hexStr = r->getParam("d")   ? r->getParam("d")->value()   : String();
+    if (idStr.isEmpty() || hexStr.isEmpty())
+      return r->reply(400, "text/plain", "usage: /api/send?id=3AF&d=BA00000000000000\n");
+
+    const long id = strtol(idStr.c_str(), nullptr, 16);
+    if (id <= 0 || id > 0x7FF)
+      return r->reply(400, "text/plain", "id must be 1..7FF hex\n");
+    if ((hexStr.length() % 2) != 0 || hexStr.length() > 16)
+      return r->reply(400, "text/plain", "d must be an even number of hex digits, max 16\n");
+
+    affa::Frame f{};
+    f.id  = static_cast<uint32_t>(id);
+    f.len = 8;                                   // every frame on this bus is DLC 8
+    for (size_t i = 0; i < hexStr.length(); i += 2) {
+      char byteHex[3] = {hexStr[i], hexStr[i + 1], 0};
+      char* end = nullptr;
+      const long v = strtol(byteHex, &end, 16);
+      if (end != byteHex + 2)
+        return r->reply(400, "text/plain", "d contains a non-hex digit\n");
+      f.data[i / 2] = static_cast<uint8_t>(v);
+    }
+
+    const affa::TxDisposition sent = g_link.trySend(f);
+    char msg[96];
+    snprintf(msg, sizeof(msg), "0x%03lX %s\n", static_cast<unsigned long>(f.id),
+             sent == affa::TxDisposition::Accepted ? "accepted by the controller"
+             : sent == affa::TxDisposition::Busy   ? "BUSY - controller queue full"
+                                                   : "REJECTED - link down");
+    logmsg("console: raw send 0x%03lX %s", static_cast<unsigned long>(f.id),
+           sent == affa::TxDisposition::Accepted ? "accepted" : "refused");
+    return r->reply(sent == affa::TxDisposition::Accepted ? 200 : 503, "text/plain", msg);
+  });
+
   g_server.on("/api/trace", HTTP_GET, [](PsychicRequest* r) {
     portENTER_CRITICAL(&g_frameMux);
     memset(g_frames, 0, sizeof(g_frames));

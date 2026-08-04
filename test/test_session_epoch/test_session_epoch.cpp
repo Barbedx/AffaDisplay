@@ -110,6 +110,10 @@ constexpr Frame kReg151 =
     {0x151, 8, {0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false};
 constexpr Frame kReg1F1 =
     {0x1F1, 8, {0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false};
+// The reflex reply we owe the display's own `1C1 70` channel registration. [CAP] 12/12
+// across the four OEM captures, answered in 0.288/0.453/0.470/0.483 ms.
+constexpr Frame kPanelChannelAck =
+    {0x5C1, 8, {0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false};
 constexpr Frame kPowerOn =
     {0x151, 8, {0x03, 0x52, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00}, false};
 constexpr Frame kTime1000 =
@@ -136,8 +140,17 @@ void runHelloToFirstRegistration(Rig& r, const char* phase) {
   r.display.poll();
   expectFrame(r.link, kHello, "B0 #1");
 
+  // THE DISPLAY REGISTERS ITS OWN CHANNEL FIRST, and ours is gated on it. [CAP] measured
+  // 4/4: `1C1 70` lands 0.81-1.55 ms after B0#1 — between the first and second announce
+  // frames — we answer `5C1 74 00 …` in 0.25-0.48 ms, and only 60.69-61.34 ms later, after
+  // B0#3, does `151 70` follow. The reflex leaves from the RX pump, so it precedes B0#2 in
+  // the same poll. A session that never sees a 1C1 never registers, by design, so every
+  // opening modelled here has to include one — and each session reset clears the latch, so
+  // it is re-injected on every pass through this helper.
+  r.link.inject(mk(0x1C1, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
   r.clock.advance(carminat::kHelloFrameGapMs);
   r.display.poll();
+  expectFrame(r.link, kPanelChannelAck, "5C1 74 reflex, ahead of B0 #2");
   expectFrame(r.link, kHello, "B0 #2");
 
   r.clock.advance(carminat::kHelloFrameGapMs);
@@ -173,13 +186,17 @@ void completeFreshRegistration(Rig& r, const char* first, const char* second) {
 
 // A `61 11 01` that arrives while we have NOT yet put a BA on the wire. The display is
 // calling into what is, as far as it can tell, an empty bus, and it earns exactly one
-// bounded B9 -> BA discovery transaction — never the announce burst.
+// bounded discovery frame — never the announce burst.
+//
+// THAT FRAME IS A BARE `BA`, NOT A B9 -> BA PAIR. SyncProfile::bootstrapAliveFrame is false
+// on this family: [CAP] the reattach capture "aknowledge offed display.csv" at 84945066
+// shows the radio re-finding a sleeping display with a single unprompted `3AF BA`. B9 is the
+// heartbeat of an ESTABLISHED session, and there is no session here yet to be alive in.
 void revokeSession(Rig& r, const char* why) {
   r.link.inject(affatest::panelSyncStart());
   r.display.poll();
-  expectFrame(r.link, kAlive, why);
   expectFrame(r.link, kRequest, why);
-  expectNoFrame(r, "START bootstrap is exactly B9 + BA");
+  expectNoFrame(r, "START bootstrap is exactly one BA, with no B9 in front of it");
   TEST_ASSERT_FALSE_MESSAGE(r.display.synced(), "61 11 01 revokes usable authorization");
   TEST_ASSERT_FALSE_MESSAGE(r.display.registered(), "61 11 01 revokes FUNCSREG");
 }
@@ -234,14 +251,17 @@ void assertBootstrapStormIsBounded(StuckLink::Mode mode) {
     clock.advance(AFFA_TX_RETRY_MS);
   }
 
-  TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(
-      2, link.aliveOffers,
-      "one-shot bootstrap gets at most its initial B9 offer and one bounded retry");
+  // The B9 bound is now ZERO rather than "at most two". bootstrapAliveFrame is false, so a
+  // B9 offered here at all would be a bug regardless of how few there were — pin it exactly,
+  // or this assertion becomes a bound on a frame that is never sent and stops meaning
+  // anything. The total then falls with it, from four offers to two.
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+      0, link.aliveOffers, "the bootstrap is BA-only: no B9 is ever offered to the driver");
   TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(
       2, link.requestOffers,
       "one-shot bootstrap gets at most its initial BA offer and one bounded retry");
   TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(
-      4, link.offers,
+      2, link.offers,
       "01/69 reminders cannot keep re-arming a permanently undeliverable bootstrap");
 }
 
@@ -337,9 +357,15 @@ void test_late_reassert_ack_cannot_clear_the_next_session_restore(void) {
 }
 
 // A bare 69 is not authorization, but it is enough evidence that a panel is present to
-// make the single discovery attempt.  The default profile must issue exactly B9 + BA once;
+// make the single discovery attempt.  The default profile must issue exactly one BA once;
 // it must not turn a ping retry stream into either periodic BA or application traffic.
-void test_bare_first_69_gets_one_discovery_pair_but_never_unlocks_output(void) {
+//
+// RENAMED from ..._one_discovery_pair_...: there is no pair any more. [CAP] the reattach
+// capture "aknowledge offed display.csv" at 84945066 opens with a bare `3AF BA`, so
+// bootstrapAliveFrame is false and the leading B9 is gone. The bound this test exists to
+// keep — ONE frame, ever, no matter how many pings arrive — is asserted at full strength on
+// the BA, and the absence of the B9 is now asserted too rather than assumed.
+void test_bare_first_69_gets_one_discovery_ba_but_never_unlocks_output(void) {
   Rig r;
   r.display.begin();
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Result::Ok),
@@ -347,21 +373,22 @@ void test_bare_first_69_gets_one_discovery_pair_but_never_unlocks_output(void) {
 
   r.link.inject(affatest::panelPeerAlive());
   r.display.poll();
-  expectFrame(r.link, kAlive, "first bare 69 gets one B9 discovery frame");
   expectFrame(r.link, kRequest, "first bare 69 gets one BA discovery frame");
-  expectNoFrame(r, "bare 69 sends no hello, registration, or held payload");
+  expectNoFrame(r, "no B9, no hello, no registration and no held payload");
   TEST_ASSERT_FALSE_MESSAGE(r.display.synced(), "69 alone is not 61 11 00 authorization");
   TEST_ASSERT_FALSE_MESSAGE(r.display.registered(), "69 alone never registers functions");
 
   for (uint8_t i = 0; i < 32; ++i) r.link.inject(affatest::panelPeerAlive());
   r.display.poll();
-  expectNoFrame(r, "repeated bare 69 frames do not make B9/BA periodic");
+  expectNoFrame(r, "repeated bare 69 frames do not make the BA periodic");
   TEST_ASSERT_FALSE(r.display.synced());
   TEST_ASSERT_FALSE(r.display.registered());
 
   r.clock.advance(carminat::kSyncIntervalMs * 3);
   r.display.poll();
   expectNoFrame(r, "a bare 69 discovery never grows into an idle heartbeat stream");
+  TEST_ASSERT_FALSE_MESSAGE(carminat::kSync.bootstrapAliveFrame,
+                            "and the discovery frame itself carries no B9");
 }
 
 // A `69` that lands exactly on the paced-heartbeat deadline must still yield exactly ONE
@@ -383,8 +410,14 @@ void test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9(void) {
   r.clock.advance(carminat::kHelloFirstDelayMs);
   r.display.poll();
   expectFrame(r.link, kHello, "B0 #1");
+  // The display opens its own channel between B0#1 and B0#2 ([CAP] 0.81-1.55 ms behind it,
+  // 4/4) and we answer `5C1 74 00 …` on sight. That reflex is what authorizes our own 0x70
+  // probes: without it this rig — which queues no payload at all — would never register, and
+  // then the heartbeat below would never start either.
+  r.link.inject(mk(0x1C1, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
   r.clock.advance(carminat::kHelloFrameGapMs);
   r.display.poll();
+  expectFrame(r.link, kPanelChannelAck, "5C1 74 reflex, ahead of B0 #2");
   expectFrame(r.link, kHello, "B0 #2");
   r.clock.advance(carminat::kHelloFrameGapMs);
   r.display.poll();
@@ -395,6 +428,18 @@ void test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9(void) {
   expectFrame(r.link, kReg151, "the opening registers 151 with no application payload");
   expectNoFrame(r, "and 1F1 waits for the 551 ACK, not for the clock");
   TEST_ASSERT_TRUE(r.display.synced());
+
+  // THE HEARTBEAT DOES NOT EXIST UNTIL REGISTRATION IS COMPLETE. [CAP] in the reattach
+  // capture the radio's first `3AF B9` is 15.3 ms after the display's `5F1 74`, with nothing
+  // on 0x3AF between B0#3 and it. So both 74s are delivered here — at t = 93, so the paced
+  // deadline the test is about is still the one the 61 11 00 armed at t = 0.
+  r.link.inject(ack(0x151));
+  r.display.poll();
+  expectFrame(r.link, kReg1F1, "551 releases the second probe");
+  r.link.inject(ack(0x1F1));
+  r.display.poll();
+  TEST_ASSERT_TRUE_MESSAGE(r.display.registered(), "5F1 latches FUNCSREG and arms B9");
+  expectNoFrame(r, "completing registration is not itself a heartbeat");
 
   r.clock.advance(carminat::kSyncIntervalMs - 3 * carminat::kHelloFrameGapMs);  // t = 500
   r.link.inject(affatest::panelPeerAlive());
@@ -411,7 +456,12 @@ void test_rejected_one_shot_bootstrap_is_bounded_under_repeated_01_and_69(void) 
   assertBootstrapStormIsBounded(StuckLink::Mode::Rejected);
 }
 
-void test_busy_ba_retries_only_ba_without_a_second_b9(void) {
+// RENAMED from ..._without_a_second_b9. There is no FIRST B9 to have a second of any more:
+// bootstrapAliveFrame is false, so the discovery bootstrap is a bare BA ([CAP] "aknowledge
+// offed display.csv" at 84945066). The phase machine this test exists to pin is intact and
+// is if anything easier to get wrong now — a Busy BA must be retried as a BA, exactly once,
+// and the retry must not decide that a heartbeat belongs in front of it.
+void test_busy_ba_retries_only_ba_and_never_grows_a_b9(void) {
   BaBusyOnceLink link;
   FakeClock clock;
   CarminatDisplay display(link, clock);
@@ -419,10 +469,10 @@ void test_busy_ba_retries_only_ba_without_a_second_b9(void) {
 
   link.inject(affatest::panelPeerAlive());
   display.poll();
-  expectFrame(link, kAlive, "discovery B9 was accepted");
   Frame f;
   TEST_ASSERT_FALSE_MESSAGE(link.takeSent(f), "first BA offer was Busy and did not leave CAN");
-  TEST_ASSERT_EQUAL_UINT32(1, link.aliveOffers);
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, link.aliveOffers,
+                                   "the bootstrap never OFFERS a B9, busy or not");
   TEST_ASSERT_EQUAL_UINT32(1, link.requestOffers);
   TEST_ASSERT_FALSE(display.synced());
   TEST_ASSERT_FALSE(display.registered());
@@ -430,9 +480,9 @@ void test_busy_ba_retries_only_ba_without_a_second_b9(void) {
   clock.advance(AFFA_TX_RETRY_MS);
   display.poll();
   expectFrame(link, kRequest, "only the pending BA retries after a Busy controller");
-  TEST_ASSERT_FALSE_MESSAGE(link.takeSent(f), "BA retry must not duplicate the accepted B9");
-  TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, link.aliveOffers,
-                                    "accepted B9 is never re-offered with the BA retry");
+  TEST_ASSERT_FALSE_MESSAGE(link.takeSent(f), "the BA retry brings nothing along with it");
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, link.aliveOffers,
+                                   "and the retry does not invent a heartbeat either");
   TEST_ASSERT_EQUAL_UINT32(2, link.requestOffers);
   TEST_ASSERT_FALSE(display.synced());
   TEST_ASSERT_FALSE(display.registered());
@@ -445,10 +495,10 @@ int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_late_registration_ack_cannot_revive_the_old_session);
   RUN_TEST(test_late_reassert_ack_cannot_clear_the_next_session_restore);
-  RUN_TEST(test_bare_first_69_gets_one_discovery_pair_but_never_unlocks_output);
+  RUN_TEST(test_bare_first_69_gets_one_discovery_ba_but_never_unlocks_output);
   RUN_TEST(test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9);
   RUN_TEST(test_busy_one_shot_bootstrap_is_bounded_under_repeated_01_and_69);
   RUN_TEST(test_rejected_one_shot_bootstrap_is_bounded_under_repeated_01_and_69);
-  RUN_TEST(test_busy_ba_retries_only_ba_without_a_second_b9);
+  RUN_TEST(test_busy_ba_retries_only_ba_and_never_grows_a_b9);
   return UNITY_END();
 }

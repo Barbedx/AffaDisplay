@@ -474,7 +474,21 @@ void test_first_send_after_a_resync_registers_both_functions_in_order(void) {
   // The opening's own B0 frames (and any paced B9) sit in the link buffer ahead of the
   // probes. This test is about the probe ORDER, not the sync channel, so step over 0x3AF
   // rather than draining indiscriminately and losing the frames under test.
+  //
+  // THE FIRST NON-SYNC FRAME OF THE OPENING IS NOT OURS. [CAP] the display's own `1C1 70`
+  // lands 0.81-1.55 ms after B0#1 — between the first and second announce frames — and we
+  // answer `5C1 74 00 …` within 0.25-0.48 ms, 12/12 across the four captures. Our `151 70`
+  // is 60.69-61.34 ms behind that 1C1, after B0#3. So the reflex necessarily precedes the
+  // first probe on the wire, and it is asserted here rather than skipped because it is the
+  // event that authorizes the probes at all: no `1C1 70`, no registration.
   Frame got;
+  do {
+    TEST_ASSERT_TRUE_MESSAGE(r.link.takeSent(got),
+                             "the opening must answer the display's own 1C1");
+  } while (got.id == 0x3AF);
+  TEST_ASSERT_EQUAL_HEX32_MESSAGE(0x5C1, got.id, "5C1 answers the panel's channel first");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x74, got.data[0], "and it is a DONE, not a partial");
+
   do {
     TEST_ASSERT_TRUE_MESSAGE(r.link.takeSent(got), "the opening must emit the first probe");
   } while (got.id == 0x3AF);

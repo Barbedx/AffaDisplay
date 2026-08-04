@@ -66,6 +66,17 @@ static const Frame kCarminatPowerOn =
 static const Frame kCarminatTime1000 =
     {0x151, 8, {0x05, 0x56, 0x31, 0x30, 0x30, 0x30, 0x00, 0x00}, false};
 
+// THE DISPLAY REGISTERS ITS OWN CHANNEL FIRST, and that is now a precondition of ours.
+// [CAP] measured 4/4 across the OEM captures: the display's `1C1 70` lands 0.81-1.55 ms
+// after B0#1 — i.e. BETWEEN the first and second announce frames — we answer `5C1 74 00 …`
+// within 0.25-0.48 ms (12/12), and only 60.69-61.34 ms later, after B0#3, does the radio put
+// its own `151 70` on the wire. A rig that never injects the 1C1 is not modelling this panel
+// at all: the library then correctly refuses to register, for ever.
+static const Frame kPanelChannelReg =
+    {0x1C1, 8, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}, false};
+static const Frame kPanelChannelAck =
+    {0x5C1, 8, {0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false};
+
 void expectNoFrame(CarRig& r, const char* what) {
   Frame f;
   TEST_ASSERT_FALSE_MESSAGE(r.link.takeSent(f), what);
@@ -80,8 +91,14 @@ void finishCarminatHello(CarRig& r) {
   r.d.poll();
   expectFrame(r.link, kCarminatHello, "Carminat B0 1/3 at +31 ms");
 
+  // The display opens ITS channel here, in the measured gap between B0#1 and B0#2, and the
+  // reflex `5C1 74` leaves in the same poll that drained it — ahead of B0#2, because the RX
+  // pump runs before the sync pump. See kPanelChannelReg for the capture evidence. This is
+  // what unlocks our own `151 70` when B0#3 lands; without it nothing registers.
+  r.link.inject(kPanelChannelReg);
   r.clk.advance(carminat::kHelloFrameGapMs);
   r.d.poll();
+  expectFrame(r.link, kPanelChannelAck, "5C1 74 reflex answers 1C1 70 ahead of B0#2");
   expectFrame(r.link, kCarminatHello, "Carminat B0 2/3 at +62 ms");
 
   r.clk.advance(carminat::kHelloFrameGapMs);
@@ -94,6 +111,24 @@ void finishCarminatHello(CarRig& r) {
 void finishCarminatRegistration(CarRig& r) {
   for (int i = 0; i < 8 && !r.d.registered(); ++i) r.d.poll();
   TEST_ASSERT_TRUE_MESSAGE(r.d.registered(), "Carminat functions should register");
+}
+
+// The whole measured opening, up to and including a COMPLETED registration, with the link
+// drained and the clock left at request-time + 93 ms.
+//
+// THE KEEP-ALIVE DOES NOT EXIST BEFORE FUNCSREG. [CAP] in "aknowledge offed display.csv" the
+// radio's first `3AF B9` is at 85055726 — 15.3 ms after the display's `5F1 74` completed the
+// registration — and there is nothing whatsoever on 0x3AF between B0#3 and it. So a test
+// about heartbeat PACING must first get the session all the way open; a rig that stops at
+// B0#3 measures the absence of a heartbeat that has not been allowed to start, which is a
+// different and much weaker statement. Self-ACK stands in for the display's 551/5F1.
+void openCarminatSession(CarRig& r) {
+  r.d.setSelfAck(true);
+  r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+  finishCarminatHello(r);
+  finishCarminatRegistration(r);
+  drain(r.link);
 }
 
 // Counts what left on the sync id, by leading byte. Everything else is counted separately
@@ -145,10 +180,19 @@ void test_carminat_hello_is_three_paced_b0_frames(void) {
   expectFrame(r.link, kCarminatHello, "Carminat B0 1/3 at +31 ms");
   TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "first B0 does not unlock output");
 
+  // THE DISPLAY'S OWN REGISTRATION LANDS HERE, and it does not disturb the B0 schedule.
+  // [CAP] `1C1 70` is 0.81-1.55 ms behind B0#1 in all four captures, and the `5C1 74 00 …`
+  // reflex 0.25-0.48 ms behind that — both comfortably inside the 31 ms gap, and neither one
+  // pulls B0#2 forward. The reflex leaves from pumpRx, so it precedes anything pumpSync
+  // decides to send in the same poll.
+  r.link.inject(kPanelChannelReg);
   r.clk.advance(carminat::kHelloFrameGapMs - 1);
   r.d.poll();
-  expectNoFrame(r, "second B0 waits a further +31 ms");
+  expectFrame(r.link, kPanelChannelAck, "the 1C1 70 reflex is answered on sight, mid-hello");
+  expectNoFrame(r, "second B0 still waits its full further +31 ms");
   TEST_ASSERT_FALSE(r.d.synced());
+  TEST_ASSERT_FALSE_MESSAGE(r.d.registered(),
+                            "the PANEL's channel is open; ours is still not");
 
   r.clk.advance(1);
   r.d.poll();
@@ -165,11 +209,13 @@ void test_carminat_hello_is_three_paced_b0_frames(void) {
   expectFrame(r.link, kCarminatHello, "Carminat B0 3/3 at +93 ms");
   TEST_ASSERT_TRUE_MESSAGE(r.d.synced(), "third B0 completes good authorization");
 
-  // REGISTRATION IS PART OF THE OPENING. [CAP] In all four OEM captures the radio puts
-  // `151 70` on the wire 0.014-0.302 ms after B0#3 and `1F1 70` 0.311-0.587 ms after it,
-  // with no application involvement whatsoever — this rig never rendered anything. So the
-  // hello is exactly B0 x3 on the SYNC id, and the frames that follow it are the two
-  // function registrations, not a fourth announce.
+  // REGISTRATION IS PART OF THE OPENING, AND IT IS SECOND. [CAP] In all four OEM captures
+  // the radio puts `151 70` on the wire 0.014-0.302 ms after B0#3 and `1F1 70` 0.311-0.587 ms
+  // after it, with no application involvement whatsoever — this rig never rendered anything.
+  // But it is 60.69-61.34 ms behind the display's `1C1 70`, never in front of it: we answer
+  // the display's channel first and only then open ours. So the hello is exactly B0 x3 on the
+  // SYNC id, and the frames that follow it are the two function registrations, not a fourth
+  // announce.
   expectFrame(r.link, kCarminatRegText, "151 registration leaves with B0#3");
   expectNoFrame(r, "the captured hello is exactly B0 x3, then 151 waits for its 551 ACK");
   TEST_ASSERT_FALSE_MESSAGE(r.d.registered(),
@@ -195,12 +241,18 @@ void test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00(vo
   r.d.poll();
   drain(r.link);
 
+  // THE 01 BOOTSTRAP IS A BARE `BA` NOW, NOT A B9 + BA PAIR — SyncProfile::bootstrapAliveFrame
+  // is false on both Carminat profiles. [CAP] the reattach capture, "aknowledge offed
+  // display.csv" at 84945066, shows the radio re-finding a sleeping display with a single
+  // unprompted `3AF BA`. The two captures that DO show a B9 before registration are both
+  // consistent with a free-running 500 ms heartbeat that happened to tick during the opening,
+  // so the quieter reading is taken: BA asks the question, B9 only ever says "still here".
   r.link.inject(affatest::panelSyncStart());
   r.d.poll();
-  expectFrame(r.link, kCarminatAlive, "legacy 01 bootstrap B9");
   expectFrame(r.link, kCarminatRequest, "legacy 01 bootstrap BA");
   Frame f;
-  TEST_ASSERT_FALSE_MESSAGE(r.link.takeSent(f), "legacy 01 has no hello and no output");
+  TEST_ASSERT_FALSE_MESSAGE(r.link.takeSent(f),
+                            "legacy 01 has no B9, no hello and no output");
   TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "legacy profile still rejects 61 11 01");
 
   r.link.inject(affatest::panelSyncRequest());
@@ -210,13 +262,23 @@ void test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00(vo
   expectFrame(r.link, kLegacyH0, "legacy hello 70");
   expectFrame(r.link, kCarminatHello, "legacy hello first B0");
   expectFrame(r.link, kCarminatHello, "legacy hello second B0");
-  // Same panel, same registration rule: the compatibility profile differs only in the
-  // SPELLING and pacing of the three opening frames, so `151 70` still follows the last of
-  // them without any application render. [CAP] B0#3 -> 151 70 measures 0.014-0.302 ms.
-  expectFrame(r.link, kCarminatRegText, "legacy opening also registers 151 immediately");
+  // NOT YET. The compatibility profile differs from the captured one only in the SPELLING
+  // and pacing of the three opening frames — the registration RULE is shared, and it is the
+  // display's own `1C1 70` that opens the door, not the end of the hello. This zero-gap
+  // profile emits all three frames in one poll, so the display has had no opportunity to
+  // register its channel and we must not have registered ours.
   TEST_ASSERT_FALSE_MESSAGE(r.link.takeSent(f),
                             "legacy profile emits exactly 70/B0/B0 on the sync id");
   TEST_ASSERT_TRUE_MESSAGE(r.d.synced(), "legacy profile authorizes only after 61 11 00");
+
+  // Now the display opens its channel. [CAP] the reflex `5C1 74 00 …` answers it in
+  // 0.25-0.48 ms, and our own `151 70` follows on its heels — the same order the captured
+  // profile keeps, just without the 31 ms announce pacing in between.
+  r.link.inject(kPanelChannelReg);
+  r.d.poll();
+  expectFrame(r.link, kPanelChannelAck, "legacy 5C1 74 reflex");
+  expectFrame(r.link, kCarminatRegText, "151 70 follows the DISPLAY's registration, not hello");
+  TEST_ASSERT_FALSE_MESSAGE(r.link.takeSent(f), "1F1 still waits for the 551 ACK");
   TEST_ASSERT_TRUE_MESSAGE(carminat::kLegacyMeganeCanSync.registerAfterHello,
                            "only the hello spelling differs between the two profiles");
 }
@@ -241,18 +303,46 @@ void test_updatelist_hello_is_exactly_one_frame(void) {
 // Panel-initiated Carminat startup
 // ---------------------------------------------------------------------------
 
-void test_carminat_waits_for_a_panel_message_before_transmitting(void) {
+void test_carminat_announces_into_a_silent_bus_slowly_and_ba_only(void) {
   CarRig r;
+  // The heartbeat cannot start before registration completes (see below), so the rig has to
+  // be able to finish one. Self-ACK is armed before anything is injected, exactly as the
+  // instructions for a Carminat opening require.
+  r.d.setSelfAck(true);
   r.d.begin();
 
-  // The initial FAILED state is local bookkeeping, not permission to put BA probes on
-  // the wire.  AFFA3 NAV starts only after the panel's 61 11 authorization request.
+  // The initial FAILED state is local bookkeeping, not permission to put BA probes on the
+  // wire. AFFA3 NAV stays quiet for a full announce interval first.
   r.d.poll();
-  r.clk.advance(5000);
+  r.clk.advance(carminat::kSync.announceWhenSilentMs - 1);
   r.d.poll();
+  SyncTally quiet = tally(r.link, 0x3AF, 0xB9, 0xBA);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, quiet.alive, "silent for the whole first interval");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, quiet.request, "no BA-per-second startup traffic");
+
+  // BUT SILENCE IS NOT THE END STATE, and that is the correction. A display that has gone to
+  // sleep never sends 61 11, so a node that waits for one waits for ever — measured on the
+  // bench as rx 0 / tx 0, both sides waiting for the other. The OEM radio breaks that tie by
+  // announcing into the silence.
+  //
+  // THE ANNOUNCE IS A BARE `BA`, NOT A PAIR. This used to assert alive == request, on the
+  // strength of a B9 appearing near the BA in "aknowledge on on display.csv". The reattach
+  // capture, "aknowledge offed display.csv" at 84945066, is the clean one — a display that
+  // was asleep and is being re-found — and the radio's announce there is a single unprompted
+  // `3AF BA` with NO B9 in front of it. B9 is the heartbeat of an ESTABLISHED session; on a
+  // bus where the handshake has not started it is pure noise in the phase that can least
+  // afford it. So the guarantee is "slow, bare and bounded": BA alone, at most one per
+  // elapsed announce interval, never the BA-per-second storm waitForPanel was added to kill.
+  r.clk.advance(5 * carminat::kSync.announceWhenSilentMs);
+  for (int i = 0; i < 8; ++i) r.d.poll();
   SyncTally t = tally(r.link, 0x3AF, 0xB9, 0xBA);
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.alive, "no heartbeat before the panel speaks");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "no BA-per-second startup traffic");
+  TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, t.request,
+                                       "a silent bus is announced into, not waited on");
+  TEST_ASSERT_LESS_OR_EQUAL_INT_MESSAGE(
+      2, t.request, "one announce per elapsed interval, never a per-poll storm");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.alive, "the announce is a bare BA: no B9 accompanies it");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.hello, "and no B0 announce before a 61 11 00");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.other, "nothing else belongs on 0x3AF here");
 
   // A good request starts the measured B0 schedule, not an immediate heartbeat. Once the
   // third B0 completes authorization, B9 is profile-paced at 500 ms and BA stays absent.
@@ -263,11 +353,20 @@ void test_carminat_waits_for_a_panel_message_before_transmitting(void) {
   TEST_ASSERT_TRUE(r.d.synced());
 
   // B0#3 carries the opening's registration with it — measured at 0.014-0.302 ms behind the
-  // third announce in every capture — so it must be consumed here before the heartbeat
-  // window is examined. Without a self-ACK rig the second probe stays behind 551.
+  // third announce in every capture — and the heartbeat waits for that registration to
+  // COMPLETE, not merely to be sent. [CAP] in the reattach capture the radio's first B9 is
+  // 15.3 ms after the display's `5F1 74`, with nothing at all on 0x3AF between B0#3 and it.
+  // So both probes and both ACKs are driven out here before the heartbeat window is examined.
   expectFrame(r.link, kCarminatRegText, "151 registration is part of the opening");
   expectNoFrame(r, "1F1 waits for the 551 ACK, not for the clock");
+  r.d.poll();
+  expectFrame(r.link, kCarminatRegNav, "1F1 follows the 551 ACK for 151");
+  r.d.poll();
+  TEST_ASSERT_TRUE_MESSAGE(r.d.registered(), "the 5F1 ACK completes FUNCSREG");
+  expectNoFrame(r, "completing registration emits nothing by itself");
 
+  // The B9 phase is owned by the 61 11 00, not by registration: the panel request was the
+  // last thing to arm _nextSyncMs, and it is 500 ms from THERE.
   r.clk.advance(carminat::kSyncIntervalMs - (3 * carminat::kHelloFrameGapMs) - 1);
   r.d.poll();
   expectNoFrame(r, "B9 is not early during the first 500-ms interval");
@@ -282,11 +381,19 @@ void test_carminat_ping_alone_never_starts_authentication(void) {
   // registration, or a render queued by application code before the panel sends its separate
   // GOOD `61 11 00` authorization request.
   //
-  // What a first bare `69` DOES earn is one bounded B9 -> BA discovery transaction: in
-  // "aknowledge offed display cONNECT OT POWER.csv" the display is already powered and
-  // pinging into an empty bus, and the radio's opening move is precisely that pair. It is a
-  // probe, not an answer and not a session — see test_carminat_never_pongs_between_heartbeats
-  // for the separate proof that a `69` on an OPEN session produces nothing at all.
+  // What a first bare `69` DOES earn is one bounded discovery probe: in "aknowledge offed
+  // display cONNECT OT POWER.csv" the display is already powered and pinging into an empty
+  // bus, and the radio answers by opening a discovery transaction. It is a probe, not an
+  // answer and not a session — see test_carminat_never_pongs_between_heartbeats for the
+  // separate proof that a `69` on an OPEN session produces nothing at all.
+  //
+  // AND THE PROBE IS A BARE `BA`. SyncProfile::bootstrapAliveFrame is false on this family:
+  // [CAP] the reattach capture "aknowledge offed display.csv" at 84945066 shows the radio
+  // re-finding a sleeping display with one unprompted `3AF BA` and no B9 in front of it. The
+  // B9s visible before registration in the other two captures are consistent with a
+  // free-running 500 ms heartbeat ticking through the opening, so they are not evidence of a
+  // pair. BA asks "is anyone there"; B9 only ever says "still here", and there is no session
+  // to still be here in yet.
   CarRig r;
   r.d.begin();
   TEST_ASSERT_EQUAL(Result::Ok, r.d.setPower(true)); // held until real 61 11 00
@@ -294,16 +401,18 @@ void test_carminat_ping_alone_never_starts_authentication(void) {
   r.link.inject(affatest::panelPeerAlive());
   r.d.poll();
   SyncTally first = tally(r.link, 0x3AF, 0xB9, 0xBA);
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, first.alive, "the first bare 69 earns one discovery B9");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, first.request, "…followed by exactly one BA");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, first.request, "the first bare 69 earns exactly one BA");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, first.alive, "…and no B9 rides in front of it");
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, first.hello, "69 must not start Carminat auth");
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, first.other, "queued output stays held before auth");
   TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "a bare 69 must not clear FAILED");
   TEST_ASSERT_FALSE_MESSAGE(r.d.registered(), "and it registers no function");
+  TEST_ASSERT_FALSE_MESSAGE(carminat::kSync.bootstrapAliveFrame,
+                            "the discovery bootstrap is BA-only on the captured profile");
 
   // ONE-SHOT MEANS ONE. An un-ACKed display repeats `69` on its own timer — 504 ms in the
   // captures, line rate on a bench with no CAN ACK — and none of those repeats may re-arm
-  // the discovery pair or start a BA-per-second stream.
+  // the discovery probe or start a BA-per-second stream.
   for (int i = 0; i < 64; ++i) r.link.inject(affatest::panelPeerAlive());
   r.clk.advance(3000);
   r.d.poll();
@@ -311,7 +420,7 @@ void test_carminat_ping_alone_never_starts_authentication(void) {
   SyncTally t = tally(r.link, 0x3AF, 0xB9, 0xBA);
   TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "a bare 69 must not clear FAILED");
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.hello, "69 must not start Carminat auth");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.alive, "the discovery B9 is spent, never repeated");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.alive, "and never grows a B9 on a repeat either");
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "and never becomes a BA stream");
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.other, "queued output stays held before auth");
 
@@ -327,9 +436,14 @@ void test_carminat_ping_alone_never_starts_authentication(void) {
 }
 
 void test_carminat_bootstrap_is_held_until_good_auth(void) {
-  // 01 is discovery only for the capture-backed profile: exactly B9 + BA, no B0
+  // 01 is discovery only for the capture-backed profile: exactly one BA, no B0
   // announce, registration, or screen traffic. Only a later complete 61 11 00 begins
   // the staged announce that releases output.
+  //
+  // THE PAIR LOST ITS B9. [CAP] "aknowledge offed display.csv" at 84945066 — the reattach,
+  // which is the cleanest look at a radio opening a conversation — is a bare `3AF BA`.
+  // bootstrapAliveFrame is false here for that reason, and the flag is pinned below so a
+  // silent flip cannot pass.
   TEST_ASSERT_TRUE_MESSAGE(carminat::kSync.requireAuthRequest,
                            "Carminat requires a display-originated auth request");
   TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00, carminat::kSync.authRequestByte2,
@@ -338,6 +452,8 @@ void test_carminat_bootstrap_is_held_until_good_auth(void) {
                            "Carminat preserves the one-shot legacy START bootstrap");
   TEST_ASSERT_FALSE_MESSAGE(carminat::kSync.helloOnNonAuthRequest,
                             "01 must not receive the captured B0 x3 announce");
+  TEST_ASSERT_FALSE_MESSAGE(carminat::kSync.bootstrapAliveFrame,
+                            "and the bootstrap it DOES receive is a bare BA");
   CarRig r;
   r.d.begin();
   r.d.setSelfAck(true);
@@ -346,17 +462,16 @@ void test_carminat_bootstrap_is_held_until_good_auth(void) {
 
   r.link.inject(affatest::panelSyncStart());
   r.d.poll();
-  expectFrame(r.link, kCarminatAlive, "01 bootstrap B9");
   expectFrame(r.link, kCarminatRequest, "01 bootstrap BA");
-  expectNoFrame(r, "01 gets exactly B9 + BA, not a hello");
+  expectNoFrame(r, "01 gets exactly one BA — no B9 in front of it, and no hello");
   TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "01 is bootstrap, not a usable session");
   TEST_ASSERT_FALSE_MESSAGE(r.d.registered(), "no function can register from 01");
 
-  // A no-ACK display may retransmit 01 at line rate. The B9 + BA pair is exactly once;
+  // A no-ACK display may retransmit 01 at line rate. The BA is exactly once;
   // no per-second BA stream and no B0 reply may return.
   for (int i = 0; i < 64; ++i) r.link.inject(affatest::panelSyncStart());
   r.d.poll();
-  expectNoFrame(r, "01 retransmissions are silent after their one B9 + BA pair");
+  expectNoFrame(r, "01 retransmissions are silent after their one BA");
   TEST_ASSERT_FALSE(r.d.synced());
   TEST_ASSERT_FALSE(r.d.registered());
 
@@ -449,9 +564,16 @@ void test_carminat_ignores_unknown_full_auth_until_00(void) {
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "unknown auth gets no BA");
 }
 
-void test_carminat_does_not_cancel_start_pair_when_00_follows_immediately(void) {
-  // Legacy leaves START set until its tick emits B9+BA, even when 00 follows 01 before
-  // that tick. Keep the one pair, but defer usable authorization until 00's paced hello.
+void test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediately(void) {
+  // Legacy leaves START set until its tick emits the bootstrap, even when 00 follows 01
+  // before that tick. Keep the one announce, but defer usable authorization until 00's
+  // paced hello.
+  //
+  // RENAMED from ..._start_pair_...: the bootstrap is no longer a pair. [CAP] the reattach
+  // capture "aknowledge offed display.csv" at 84945066 opens with a bare `3AF BA`, so
+  // bootstrapAliveFrame is false and the B9 that used to lead is gone. What the test pins is
+  // unchanged in strength — a 00 arriving in the same RX drain must neither cancel the START
+  // announce nor duplicate it.
   CarRig r;
   r.d.begin();
   r.link.inject(affatest::panelSyncStart());
@@ -459,15 +581,15 @@ void test_carminat_does_not_cancel_start_pair_when_00_follows_immediately(void) 
   r.d.poll();
 
   TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "00's staged B0 sequence still gates output");
-  expectFrame(r.link, kCarminatAlive, "START B9 survives an immediately following 00");
   expectFrame(r.link, kCarminatRequest, "START BA survives an immediately following 00");
-  expectNoFrame(r, "01 still contributes no B0 announce");
+  expectNoFrame(r, "…and gains no B9, and 01 still contributes no B0 announce");
 
   finishCarminatHello(r);
   TEST_ASSERT_TRUE_MESSAGE(r.d.synced(), "00 becomes usable only after B0#3");
   // The only thing B0#3 is allowed to bring with it is the opening's first registration
-  // probe (0.014-0.302 ms behind it in every capture). In particular NOT a second BA: the
-  // START pair is spent, and completing the announce burst does not re-arm it.
+  // probe (0.014-0.302 ms behind it in every capture, and behind the display's own 1C1 that
+  // finishCarminatHello injects). In particular NOT a second BA: the START announce is
+  // spent, and completing the burst does not re-arm it.
   expectFrame(r.link, kCarminatRegText, "B0#3 carries the opening's 151 registration");
   expectNoFrame(r, "the one START BA is not retried");
 }
@@ -566,10 +688,9 @@ void test_a_stalled_loop_does_not_produce_a_catch_up_burst(void) {
   // ten seconds owes the panel one heartbeat, not ten.
   CarRig r;
   r.d.begin();
-  r.link.inject(affatest::panelSyncRequest());
-  r.d.poll();
-  finishCarminatHello(r);
-  drain(r.link);
+  // Registration must COMPLETE before there is a heartbeat to stall in the first place —
+  // see openCarminatSession() for the capture that pins B9 behind the display's 5F1.
+  openCarminatSession(r);
 
   r.clk.advance(10000);
   r.link.inject(affatest::panelPeerAlive());
@@ -608,10 +729,11 @@ void test_carminat_never_pongs_between_heartbeats(void) {
   // implementation consumes the cadence and would shift that deadline.
   CarRig r;
   r.d.begin();
-  r.link.inject(affatest::panelSyncRequest());   // t = 0, so the first B9 is due at t = 500
-  r.d.poll();
-  finishCarminatHello(r);                        // t = 93
-  drain(r.link);
+  // t = 0 for the request, so the first B9 is due at t = 500; the opening (announce plus a
+  // completed registration) leaves the clock at t = 93. Registration has to finish here or
+  // there is no heartbeat at all to have a phase — that gate is change (3), and it does not
+  // touch the property under test, which is that a ping never moves the phase.
+  openCarminatSession(r);                        // t = 93
 
   r.clk.advance(200);                            // t = 293, well inside the interval
   r.link.inject(affatest::panelPeerAlive());
@@ -639,10 +761,9 @@ void test_a_ping_storm_never_moves_the_free_running_heartbeat(void) {
   // heartbeat's phase.
   CarRig r;
   r.d.begin();
-  r.link.inject(affatest::panelSyncRequest());   // first B9 due at t = 500
-  r.d.poll();
-  finishCarminatHello(r);
-  drain(r.link);
+  // First B9 due at t = 500, counted from the 61 11 00 the opening starts with. Registration
+  // is completed inside the helper because the heartbeat does not start before FUNCSREG.
+  openCarminatSession(r);                        // t = 93
 
   r.clk.advance(1);                              // t = 94, clear of the paced tick
   for (int i = 0; i < 126; ++i) r.link.inject(affatest::panelPeerAlive());
@@ -676,10 +797,10 @@ void test_neither_family_pongs(void) {
 
   CarRig c;
   c.d.begin();
-  c.link.inject(affatest::panelSyncRequest());
-  c.d.poll();
-  finishCarminatHello(c);
-  drain(c.link);
+  // Open the session all the way to FUNCSREG. Stopping at B0#3 would leave the heartbeat
+  // suppressed by change (3) and `tc.alive == 0` would then be true for a reason that has
+  // nothing to do with pongs — a vacuous pass. Here B9 is armed and simply is not a reply.
+  openCarminatSession(c);
   c.clk.advance(200);
   c.link.inject(affatest::panelPeerAlive());
   c.d.poll();
@@ -745,11 +866,12 @@ void test_recovery_reasserts_cached_power_before_held_time(void) {
   CarRig r;
   armed(r); // power on is ACKed/cached and the first session is idle
 
+  // A lost session re-opens with the same bare BA the first one did — bootstrapAliveFrame is
+  // false, so there is no B9 in front of it. [CAP] "aknowledge offed display.csv" @ 84945066.
   r.link.inject(affatest::panelSyncStart());
   r.d.poll();
-  expectFrame(r.link, kCarminatAlive, "lost session discovery B9");
   expectFrame(r.link, kCarminatRequest, "lost session discovery BA");
-  expectNoFrame(r, "lost 01 has no B0 or application payload");
+  expectNoFrame(r, "lost 01 has no B9, no B0 and no application payload");
   TEST_ASSERT_FALSE(r.d.synced());
   TEST_ASSERT_FALSE(r.d.registered());
 
@@ -855,12 +977,12 @@ int main(int, char**) {
   RUN_TEST(test_carminat_hello_is_three_paced_b0_frames);
   RUN_TEST(test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00);
   RUN_TEST(test_updatelist_hello_is_exactly_one_frame);
-  RUN_TEST(test_carminat_waits_for_a_panel_message_before_transmitting);
+  RUN_TEST(test_carminat_announces_into_a_silent_bus_slowly_and_ba_only);
   RUN_TEST(test_carminat_ping_alone_never_starts_authentication);
   RUN_TEST(test_carminat_bootstrap_is_held_until_good_auth);
   RUN_TEST(test_carminat_acks_panel_registration_as_a_reflex_without_unlocking_output);
   RUN_TEST(test_carminat_ignores_unknown_full_auth_until_00);
-  RUN_TEST(test_carminat_does_not_cancel_start_pair_when_00_follows_immediately);
+  RUN_TEST(test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediately);
   RUN_TEST(test_short_dlc_carminat_auth_request_stays_silent);
   RUN_TEST(test_short_dlc_peer_alive_is_honoured);
   RUN_TEST(test_a_foreign_cluster_token_is_not_answered);

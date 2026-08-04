@@ -134,44 +134,59 @@ void test_busy_hello_does_not_authorize_until_the_full_burst_is_accepted(void) {
   r.clock.advance(AFFA_TX_RETRY_MS);
   r.display.poll();
   TEST_ASSERT_FALSE_MESSAGE(r.display.synced(), "B0 #1 alone is not authorization");
+
+  // The display opens its OWN channel here, in the measured gap between B0#1 and B0#2
+  // ([CAP] 0.81-1.55 ms behind it, 4/4), and the `5C1 74 00 …` reflex answers it inside the
+  // same poll. That reflex is not authorization — but it IS what licenses our own 0x70
+  // probe when B0#3 finally lands, so a busy-link test that omitted it would be measuring a
+  // registration that was suppressed for the wrong reason.
+  r.link.inject(affatest::mk(0x1C1, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
   r.clock.advance(carminat::kHelloFrameGapMs);
   r.display.poll();
-  TEST_ASSERT_FALSE_MESSAGE(r.display.synced(), "B0 #2 alone is not authorization");
+  TEST_ASSERT_FALSE_MESSAGE(r.display.synced(),
+                            "B0 #2 is not authorization, and neither is the 5C1 reflex");
   r.clock.advance(carminat::kHelloFrameGapMs);
   r.display.poll();
   TEST_ASSERT_TRUE_MESSAGE(r.display.synced(), "only the accepted full hello opens auth");
-  // FOUR, not three: the three B0 frames plus the first 0x70 registration probe, which the
-  // OEM radio puts on the wire 0.10-0.59 ms after B0#3 with no application involvement at
-  // all (carminat::kSync.registerAfterHello). The second probe follows once this one is
+  // FIVE, not three: the three B0 frames, the 5C1 74 that answers the display's own channel
+  // registration, and the first 0x70 registration probe, which the OEM radio puts on the
+  // wire 0.10-0.59 ms after B0#3 with no application involvement at all
+  // (carminat::kSync.registerAfterHello). The second probe follows once this one is
   // acknowledged, which nothing does on this deliberately unhelpful link.
-  TEST_ASSERT_EQUAL_UINT32(4, drainCount(r.link));
+  TEST_ASSERT_EQUAL_UINT32(5, drainCount(r.link));
 }
 
-// The one-shot START pair is not issued just because it was scheduled. A Busy B9 leaves the
-// pair pending; the next permitted retry sends both B9 and BA, and a later 01 does not repeat
-// them after that successful issue.
-void test_busy_start_pair_is_retried_and_only_marked_issued_after_b9_and_ba(void) {
+// The one-shot START announce is not issued just because it was scheduled. A Busy BA leaves
+// it pending; the next permitted retry sends it, and a later 01 does not repeat it after that
+// successful issue.
+//
+// RENAMED from ..._start_pair_..._after_b9_and_ba: the bootstrap is a bare BA now.
+// SyncProfile::bootstrapAliveFrame is false on this family — [CAP] the reattach capture
+// "aknowledge offed display.csv" at 84945066 opens with one unprompted `3AF BA` and no B9.
+// The property being pinned is unchanged and is now sharper, because "issued" can no longer
+// be half-true: there is exactly one frame, and it is either out or it is not.
+void test_busy_start_announce_is_retried_and_only_marked_issued_after_ba(void) {
   Rig r;
   r.display.begin();
-  r.link.busyOnOffer = 1;  // the first bootstrap B9 is locally busy
+  r.link.busyOnOffer = 1;  // the first bootstrap BA is locally busy
   r.link.inject(panelSyncStart());
   r.display.poll();
   TEST_ASSERT_FALSE(r.display.synced());
-  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(), "busy B9 does not leave the link");
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(), "busy BA does not leave the link");
   drain(r.link);
 
   r.clock.advance(AFFA_TX_RETRY_MS);
   r.display.poll();
-  Frame b9, ba;
-  TEST_ASSERT_TRUE(r.link.takeSent(b9));
-  TEST_ASSERT_TRUE(r.link.takeSent(ba));
-  TEST_ASSERT_EQUAL_HEX8(0xB9, b9.data[0]);
+  Frame ba;
+  TEST_ASSERT_TRUE_MESSAGE(r.link.takeSent(ba), "the pending BA retries once permitted");
+  TEST_ASSERT_EQUAL_HEX32(0x3AF, ba.id);
   TEST_ASSERT_EQUAL_HEX8(0xBA, ba.data[0]);
-  TEST_ASSERT_EQUAL_UINT32(0, r.link.sentCount());
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(),
+                                   "and the retry does not grow a B9 alongside it");
 
   r.link.inject(panelSyncStart());
   r.display.poll();
-  // A repeat remains strict-discovery only: it never sends hello or a second B9 + BA pair.
+  // A repeat remains strict-discovery only: it never sends hello or a second BA.
   TEST_ASSERT_EQUAL_UINT32(0, drainCount(r.link));
 }
 
@@ -217,7 +232,7 @@ int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_busy_offer_never_commits_payload_bytes_or_started_state);
   RUN_TEST(test_busy_hello_does_not_authorize_until_the_full_burst_is_accepted);
-  RUN_TEST(test_busy_start_pair_is_retried_and_only_marked_issued_after_b9_and_ba);
+  RUN_TEST(test_busy_start_announce_is_retried_and_only_marked_issued_after_ba);
   RUN_TEST(test_busy_panel_control_ack_retries_before_the_next_b0);
   return UNITY_END();
 }

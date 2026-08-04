@@ -503,11 +503,15 @@ void test_sync_registered_and_txcomplete_fire_at_the_right_moment(void) {
   r.d.poll();
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_ev.sync, "auth remains closed before B0 #3");
   r.clk.advance(carminat::kHelloFirstDelayMs);
-  r.d.poll();
+  r.d.poll();                                  // B0 #1
+  // The display opens its OWN channel between B0#1 and B0#2 ([CAP] 4/4, 0.81-1.55 ms behind
+  // it), and our 0x70 probes are gated on having seen it. Without this the session never
+  // registers and the Registered event under test never fires.
+  r.link.inject(mk(0x1C1, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
   r.clk.advance(carminat::kHelloFrameGapMs);
-  r.d.poll();
+  r.d.poll();                                  // 5C1 74 reflex, then B0 #2
   r.clk.advance(carminat::kHelloFrameGapMs);
-  r.d.poll();
+  r.d.poll();                                  // B0 #3
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_ev.sync, "the handshake is one transition");
   TEST_ASSERT_TRUE(hasFlag(g_ev.prev, SyncState::Failed));
   TEST_ASSERT_FALSE(hasFlag(g_ev.now, SyncState::Failed));
@@ -572,7 +576,13 @@ void test_the_key_event_fires_whether_or_not_the_menu_consumed_it(void) {
 
 void test_linkerror_reports_a_dropped_transmission(void) {
   Rig r;
-  r.sync();
+  // THE HEARTBEAT IS THE FRAME THAT GETS DROPPED HERE, and it does not exist until the
+  // session is fully open. [CAP] "aknowledge offed display.csv": the radio's first `3AF B9`
+  // is 15.3 ms after the display's `5F1 74` completed registration, with nothing at all on
+  // 0x3AF between B0#3 and it — so a rig that stops at the announce has nothing periodic to
+  // refuse. up() drives both 0x70 probes to their 74s, which arms the 500 ms B9 timer; the
+  // dead link then refuses the first one that comes due.
+  r.up();
   g_ev = EventLog{};
   r.d.onEvent(&record, nullptr);
 

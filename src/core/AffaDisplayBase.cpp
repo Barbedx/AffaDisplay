@@ -49,6 +49,10 @@ bool AffaDisplayBase::begin() {
   _unauthControlStage     = BootstrapStage::None;
   _unauthControlBusyRetries = 0;
   _nextUnauthControlMs    = now;
+  // One full interval of politeness before we announce: give a panel that is merely slow
+  // to boot the chance to speak first, exactly as it does in the captures.
+  _nextAnnounceMs         = now + _profile.announceWhenSilentMs;
+  _peerChannelSeen        = false;
   _genericAckPending      = false;
   _genericAckId           = 0;
   _genericAckBusyRetries  = 0;
@@ -267,8 +271,11 @@ void AffaDisplayBase::pumpRx() {
     // unanswered for ever. Scope comes from shouldAutoAck() (exactly 0x1C1) and from
     // isOurTxId(), not from the handshake phase. This ACK is deliberately separate from
     // linkReady(): our registration, power, text and time stay locked behind the opening.
-    if (!_passive && !isOurTxId(static_cast<uint16_t>(f.id)) && shouldAutoAck(f))
+    if (!_passive && !isOurTxId(static_cast<uint16_t>(f.id)) && shouldAutoAck(f)) {
+      // The display opening its own channel is the gate for opening ours. See pumpSync().
+      if (f.len >= 1 && f.data[0] == kRegisterByte) _peerChannelSeen = true;
       sendGenericAck(static_cast<uint16_t>(f.id));
+    }
 
 #if AFFA_ENABLE_ISOTP_RX
     pumpText(f);
@@ -797,7 +804,7 @@ void AffaDisplayBase::pumpLink() {
   // A newly installed controller must not resurrect an old Carminat session by itself.
   // The panel owns the opening message; wait for its next 61 11 and keep this node silent
   // until then.  Other profiles retain their existing proactive behavior.
-  if (_profile.waitForPanel) _panelObserved = false;
+  if (_profile.waitForPanel) { _panelObserved = false; _nextAnnounceMs = _clock.millis() + _profile.announceWhenSilentMs; }
   _syncRequestObserved  = false;
   _authRequestObserved  = false;
   _authHelloPending     = false;
@@ -807,6 +814,7 @@ void AffaDisplayBase::pumpLink() {
   _unauthControlIssued  = false;
   _unauthControlSpent   = false;
   _nextUnauthControlMs  = now;
+  _peerChannelSeen      = false;   // a new session means the display re-opens its channel
   _genericAckPending    = false;
   _genericAckBusyRetries = 0;
   _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
@@ -879,6 +887,10 @@ void AffaDisplayBase::armUnauthControl(uint32_t now) {
 // Without that bound a stuck controller turns the CAN task into an infinite B9/BA producer.
 void AffaDisplayBase::pumpUnauthControl(uint32_t now) {
   if (!expired(now, _nextUnauthControlMs)) return;
+
+  // Straight to the request on profiles that keep B9 for an established session.
+  if (_unauthControlStage == BootstrapStage::None && !_profile.bootstrapAliveFrame)
+    _unauthControlStage = BootstrapStage::Alive;
 
   if (_unauthControlStage == BootstrapStage::None) {
     const TxDisposition sent = sendAlive();
@@ -980,12 +992,8 @@ void AffaDisplayBase::pumpHello(uint32_t now) {
       setSync((_sync & ~SyncState::Failed & ~SyncState::Start), EventKind::SyncChanged);
     }
 
-    // REGISTRATION IS PART OF THE OPENING, NOT PART OF RENDERING — on the families that
-    // profile it. The OEM Carminat radio puts `151 70` and `1F1 70` on the wire 0.10-0.59 ms
-    // after the third B0, with no application involvement whatsoever. Driving that from
-    // enqueue() instead — as the lazy path still does for UpdateList — means a build that
-    // never renders never registers, and the panel sits in a half-open session for ever.
-    if (_profile.registerAfterHello) (void)queueRegistrations();
+    // Registration is queued from pumpSync(), not here: it additionally waits for the
+    // display's OWN channel registration. See the ordering note there.
     return;
   } while (_helloPending && expired(now, _nextHelloMs));
 }
@@ -1010,13 +1018,44 @@ void AffaDisplayBase::pumpSync() {
   // the authorization gate because the final B0 is what clears that gate.
   pumpHello(now);
 
+  // WE REGISTER AFTER THE DISPLAY DOES, AND THE ORDER IS MEASURED 4/4. In every OEM capture
+  // the display's own `1C1 70` arrives 0.81-1.55 ms after B0#1 — between the first and
+  // second announce frames — and the radio's `151 70` follows 60.69-61.34 ms LATER, after
+  // B0#3. The display registers its channel first; we answer `5C1 74`; only then do we
+  // register ours. Firing `151 70` off hello completion alone gets the order right only by
+  // luck, and on a panel that is slow to open its channel it is simply wrong.
+  if (_profile.registerAfterHello && _peerChannelSeen && !_helloPending &&
+      _authRequestObserved && !_authHelloPending &&
+      !hasFlag(_sync, SyncState::FuncsReg) && !registrationQueued()) {
+    (void)queueRegistrations();
+  }
+
   // AFFA3 NAV is panel-initiated.  `begin()` is deliberately quiet: treating the initial
   // FAILED state as permission to send BA was the source of a BA frame every second before
   // a display was even attached.  A valid panel frame flips this latch in handleSyncFrame().
-  if (_profile.waitForPanel && !_panelObserved) return;
+  if (_profile.waitForPanel && !_panelObserved) {
+    // ...but silence on BOTH sides is a deadlock, and the captures show the radio breaking
+    // it. Announce slowly until something answers. See SyncProfile::announceWhenSilentMs.
+    // BA ONLY, NO B9. The announce is a QUESTION ("is anyone there?"), and BA is the frame
+    // that asks it — in "aknowledge offed display.csv" the radio's reattach announce is a
+    // bare `3AF BA` with no B9 in front of it. B9 is the heartbeat of an established
+    // session and has no business on a bus where the handshake has not started; sending it
+    // here is pure noise during the phase that can least afford it.
+    if (_profile.announceWhenSilentMs == 0 || !expired(now, _nextAnnounceMs)) return;
+    _nextAnnounceMs = now + _profile.announceWhenSilentMs;
+    (void)sendSyncRequest();
+    return;
+  }
   // On AFFA3 NAV a `69` only says the panel is alive. Only the completed good `61 11 00`
   // authorization (and its hello) allows normal heartbeat, registration and rendering.
   if (_profile.requireAuthRequest && (!_authRequestObserved || _authHelloPending)) return;
+  // KEEP-ALIVE STARTS AFTER REGISTRATION, not after the hello. In the reattach capture the
+  // radio's first B9 is at 85055726 — 15.3 ms after the display's `5F1 74` completed the
+  // registration, and nothing on 0x3AF between B0#3 and it. B9 is the heartbeat of an
+  // ESTABLISHED session; emitting it mid-opening is noise in the phase that can least
+  // afford it. The opening still has its own traffic (B0, the 0x70 probes, the 5C1 reflex),
+  // and a silent bus is still answered by the BA announce above, so this cannot deadlock.
+  if (_profile.registerAfterHello && !hasFlag(_sync, SyncState::FuncsReg)) return;
   if (!expired(now, _nextSyncMs)) return;
 
   // THE PACING FLOORS MUST NOT GO WRAP-STALE. Each is re-armed only by the event it gates
@@ -1061,9 +1100,15 @@ void AffaDisplayBase::pumpSync() {
               static_cast<unsigned>(kSyncPeerAlive), static_cast<int>(AFFA_PEER_TIMEOUT_MS));
     setSync(SyncState::Failed, EventKind::PeerLost);   // every other bit, FuncsReg
                                                        // included, is dropped
-    if (_profile.waitForPanel) _panelObserved = false; // wait for its next 61 11, silently
+    // Wait for its next 61 11 — but not for ever. A panel that went to sleep will never
+    // send one, so the slow announce re-arms here and starts calling it back.
+    if (_profile.waitForPanel) {
+      _panelObserved  = false;
+      _nextAnnounceMs = now + _profile.announceWhenSilentMs;
+    }
     _syncRequestObserved  = false;
     _authRequestObserved  = false;
+    _peerChannelSeen      = false;   // the display re-opens its 1C1 in the new session
     _authHelloPending     = false;
     _helloPending         = false;
     _helloIndex           = 0;
@@ -1181,6 +1226,13 @@ uint8_t AffaDisplayBase::dropUnstartedReasserts() {
 
 bool AffaDisplayBase::queueRegistrations() {
   if (_passive || hasFlag(_sync, SyncState::FuncsReg) || registrationQueued()) return true;
+  // WE REGISTER AFTER THE DISPLAY DOES, ON EVERY PATH. The gate lives here rather than at
+  // the pumpSync() call site because there are four callers, and three of them are the LAZY
+  // path — enqueue(), the pumpTx() head-of-queue check and the cached-control restore. A
+  // build that renders would otherwise register without ever having seen the display's own
+  // `1C1 70`, which is exactly the application-driven ordering this rule exists to remove.
+  // [CAP] 4/4: the display's 1C1 precedes our 151 by 60.69-61.34 ms, every time.
+  if (_profile.registerAfterHello && !_peerChannelSeen) return false;
   if (_qCount + _funcCount > AFFA_TX_QUEUE_DEPTH) return false;
 
   static const uint8_t kReg[1] = { kRegisterByte };

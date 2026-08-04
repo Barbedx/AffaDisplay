@@ -131,6 +131,33 @@ struct SyncProfile {
   // UpdateList has a separately validated startup contract in which registration is lazy
   // and follows the first payload, so this stays false for that family. Do not unify.
   bool registerAfterHello = false;
+
+  // THE RADIO ANNOUNCES ITSELF. In "aknowledge on on display.csv" the first frame on the bus
+  // is ours — `3AF B9 01`, unprompted — followed 8.2 ms later by `BA 00`, and only THEN does
+  // the display answer `61 11 00`. waitForPanel alone is therefore a deadlock against a
+  // display that has gone quiet: it stays silent waiting for us, we stay silent waiting for
+  // it, and `rx 0 / tx 0` is exactly what the bench showed.
+  //
+  // This is the interval between announce pairs while NO panel frame has ever been seen.
+  // It is deliberately slow. The defect waitForPanel was introduced to kill was a BA every
+  // second into an empty room; a few seconds apart keeps that cured while still waking a
+  // sleeping panel. Zero keeps the strictly-silent behaviour for other families.
+  uint32_t announceWhenSilentMs = 0;
+
+  // Does the one-shot discovery bootstrap lead with an alive frame, or go straight to the
+  // request? B9 is the heartbeat of an ESTABLISHED session; on a profile that starts its
+  // keep-alive only after registration, emitting one during the opening is noise in the
+  // phase that can least afford it, and it muddles the wire log at the exact moment you
+  // most want to read it.
+  //
+  // NOTE THE EVIDENCE IS MIXED, deliberately recorded here rather than smoothed over: two
+  // OEM captures DO show B9 before registration ("cONNECT OT POWER" at 147328246,
+  // "offed display 2" at 9850470), both consistent with a radio whose free-running 500 ms
+  // heartbeat simply ticked during the opening. The reattach capture
+  // ("offed display.csv" at 84945066) shows the announce as a bare BA with no B9. We take
+  // the quieter reading: BA asks the question, B9 answers "still here" only once there is
+  // a session to be still here in.
+  bool bootstrapAliveFrame = true;
 };
 
 } // namespace affa

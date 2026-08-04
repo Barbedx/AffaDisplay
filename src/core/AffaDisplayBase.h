@@ -472,11 +472,16 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // Separate from _nextSyncMs: a START/first-69 followed by 00 in the same RX drain still
   // emits its B9 + BA immediately, but never as a periodic local retry.
   uint32_t  _nextUnauthControlMs = 0;
+  // Next slow announce while no panel has ever been heard. See announceWhenSilentMs.
+  uint32_t  _nextAnnounceMs = 0;
 
   // A panel's 1C1 -> 5C1 registration ACK is control-plane traffic, not an application
   // render.  A locally full controller must not lose it behind the next B0; retain exactly
   // one pending reply and retry it once when the link was merely Busy.  A hard Rejected
   // offer belongs to the normal transport recovery/session reset path instead.
+  // The display has registered its OWN channel (its 1C1). We do not put our 0x70 probes on
+  // the wire until it has: measured 4/4, its 1C1 precedes our 151 by ~61 ms.
+  bool      _peerChannelSeen = false;
   bool      _genericAckPending = false;
   uint16_t  _genericAckId = 0;
   uint8_t   _genericAckBusyRetries = 0;

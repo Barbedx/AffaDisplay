@@ -106,7 +106,7 @@ enum class CarminatHelloProfile : uint8_t {
 //   replyToPing, waitForPanel, sendSyncRequest, requireAuthRequest, authRequestByte2,
 //   oneShotResyncOnStart, helloMinMs, helloOnNonAuthRequest, helloFirstDelayMs,
 //   helloFrameGapMs, payloadAfterRegistrationMs, syncIntervalMs, oneShotResyncOnPeerAlive,
-//   helloAfterBootstrapRequest
+//   helloAfterBootstrapRequest, registerAfterHello, announceWhenSilentMs
 inline constexpr SyncProfile kSync = {
     kIdSync, kIdSyncReply, 0x0400, 0xB9, 0xBA, 0x00, kFiller, kHello, 3,
     false, // B9 free-runs at 500 ms. The panel's 69 is an independent timer, not a request.
@@ -126,6 +126,10 @@ inline constexpr SyncProfile kSync = {
            // "cONNECT OT POWER" completes a whole session on 01 with zero 00 frames.
     true,  // 151 70 / 1F1 70 follow the third B0 by 0.10-0.59 ms, with no application
            // involvement. Registration belongs to the opening on this family.
+    30000, // Announce BA every 30 s into a SILENT bus. waitForPanel above is a deadlock
+           // on its own: a display that has gone to sleep never speaks, so neither do we
+           // (measured rx 0 / tx 0). The OEM radio initiates after a reattach.
+    false, // No B9 in the bootstrap either: BA asks, B9 only says "still here".
 };
 
 // Historical MeganeCAN compatibility profile.  It deliberately keeps the user's strict
@@ -150,6 +154,8 @@ inline constexpr SyncProfile kLegacyMeganeCanSync = {
     true,  // preserve the 69-first discovery path for this same panel family
     true,  // same panel, same 61 11 01 rule — only the hello spelling differs here
     true,  // same panel, same unconditional registration after the final hello frame
+    30000, // same panel, same need to break a two-way silence
+    false, // same panel, same BA-only bootstrap
 };
 
 inline constexpr const SyncProfile& syncProfile(CarminatHelloProfile profile) {
