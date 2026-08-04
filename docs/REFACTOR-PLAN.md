@@ -1,8 +1,15 @@
 # Refactor plan — one state machine, two families, no hedges
 
-**Status: design, not yet implemented.** Written 2026-08-04, immediately after the Carminat
-protocol was settled against OEM captures and proven on glass for 1 h 36 m at 24 912 screens
-with every error counter at zero.
+**Status: EXECUTED, 2026-08-04.** All nine steps are done and the result has been on glass.
+Written the same day, immediately after the Carminat protocol was settled against OEM
+captures and proven for 1 h 36 m at 24 912 screens with every error counter at zero.
+
+What is left is not implementation: a **long soak** of the final build (step 9's second half),
+and the two open questions at the end of this file — the half-open-session hole, and why the
+panel drops the session, which a 31.7-minute run of the intermediate build did not reproduce.
+
+The rest of this document is kept in the present tense on purpose. It is the reasoning, and
+the reasoning is the part worth re-reading when something on this bus surprises you.
 
 ## Why now, and why not before
 
@@ -210,41 +217,37 @@ The library works. Each step must keep it working, and "it compiles" is not evid
    **identical RAM (60580) and Flash (862377) byte counts with 7018 defined symbols on both
    sides, none added or removed.** 18 small leaf functions changed size by a few bytes —
    cross-TU inlining, which is exactly and only what splitting a translation unit causes.
-8. ~~**Move UpdateList onto the shared rules**~~ — **FOUR OF FIVE DONE** (`fc33740`).
+8. ~~**Move UpdateList onto the shared rules**~~ — **DONE** (`fc33740`, `e5020d9`).
    Registration in the opening, peer-channel gate, `61 11` teardown, heartbeat after
-   registration, `helloRequiresAnnounce = false` as the sole difference. Not one byte moved
-   and `test_updatelist_wire` is green. **Power-before-render is NOT done — see below.**
-9. **Flash and soak again.** The fully-refactored build is on the bench as of 2026-08-04 and
-   opened in 5.7 s. A green suite has already let a broken handshake through twice this
-   session; only glass counts.
+   registration, power before render, `helloRequiresAnnounce = false` as the sole
+   difference. Not one byte moved and `test_updatelist_wire` is green.
+9. ~~**Flash and soak again.**~~ — **FLASHED 2026-08-04** and verified on glass: the opening
+   completes in 6.2 s with the library lighting the panel itself, exactly one `03 52 09` on
+   the wire, phase `Ready`, every counter zero. **The long soak is the one thing still
+   outstanding.**
 
-### Step 8's fifth item is a policy decision, not an implementation gap
+### Step 8's fifth item, as decided
 
-*"`Phase::Ready` should mean registered AND the glass is on, with the library emitting the
-family's power frame itself on the way there."* Everything needed for that exists — the
-durable-control cache already replays power after **every re-registration**, on Carminat,
-today. What is missing is only the **first** one, i.e. the library lighting a panel that no
-application asked it to light.
+*"`Phase::Ready` should mean registered AND the glass is on."* Owner's call, 2026-08-04:
+**universal, with an opt-out.** `Phase::Powering` sits between `Settling` and `Ready`, and
+`AffaDisplayBase::setAutoPower(false)` turns it off for a build that must decide for itself.
 
-That is the part that is not mine to decide:
+Two details worth keeping, because both were got wrong once on the way in:
 
-* It changes the family that is currently proven on glass, and `09_golden` already manages
-  power itself through `Stage::NeedPower` — so the panel would get the command twice.
-  Harmless (it is idempotent) but it is a wire change to a proven build.
-* A build that deliberately wants the glass dark at boot would be fighting the library.
-* It cannot be validated at all for UpdateList.
+* **The command is queued on the FUNCSREG rising edge, not when the payload gate opens.**
+  `03 52 09` must precede any render, so it has to be *in the queue* before the
+  application's held work becomes eligible. Issued at the gate it merely races that work,
+  and the first version did exactly that — the frame arrived a poll late and landed in the
+  middle of other people's sequences.
+* **It stands down whenever somebody else has an opinion** — a queued or cached power state
+  (including a deliberate `setPower(false)`), a family with no power command, or the
+  opt-out. That is also why a *recovered* session does not re-issue it: the durable-control
+  cache already replays power after every re-registration, so the desired state exists.
 
-Three ways to go, in increasing order of how much the library decides:
-
-1. **Leave it to the application** and keep `Ready` meaning *registered*. The rule then lives
-   in documentation, which is exactly what failed before.
-2. **A profile knob** — `powerOnAfterRegistration`, default off, on for Carminat once soaked.
-   The library owns the rule, the application can opt out, `Ready` still means registered.
-3. **Universal, as the plan says.** `Ready` means the glass is on, `09_golden` drops its
-   power stage, and the sequence is one place for both families.
-
-(2) is the smallest thing that fixes the actual failure — a panel that ACKs a screen it never
-lights — without taking a decision away from a build that may have a reason for it.
+`09_golden` stopped sending power itself and now only waits for `Ready`. It kept its 750 ms
+warm-up, which is a property of the **glass**, not the protocol: the panel ACKs the command
+before the display is legible, and a screen drawn into that window is lost with every
+counter reporting success.
 
 ### Why step 4 was not done with 2 and 3, and the case for soaking first
 

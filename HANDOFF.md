@@ -4,10 +4,10 @@ The previous handoff (2026-07-29) described a bench that could decode the panel 
 establish a link. **That problem is solved and the whole protocol is now proven on glass.** It
 is archived at `docs/HANDOFF-2026-07-29.md`; almost every open question in it is answered here.
 
-The refactor planned in [`docs/REFACTOR-PLAN.md`](docs/REFACTOR-PLAN.md) **landed on
-2026-08-04** — steps 2, 3, 4, 6, 7 and four of step 8's five items — and **it has been on
-glass**: the fully-refactored firmware opens the session unattended in 5.7 s and renders.
-Read that file second. Read this one first.
+The refactor planned in [`docs/REFACTOR-PLAN.md`](docs/REFACTOR-PLAN.md) **landed in full on
+2026-08-04**, all nine steps, and **it has been on glass**: the refactored firmware opens the
+session, powers the panel and renders unattended, 6.2 s from boot, with nothing in the
+application asking it to. Read that file second. Read this one first.
 
 ---
 
@@ -20,9 +20,21 @@ announce, burst, the panel's `1C1`, registration, `03 52 09`, ISO-TP text — in
 boot, and soaked 31.7 minutes with zero session losses.
 
 The library is now **`Phase`-driven**: one ordered value, one writer, nine named edges.
+
+```
+Silent -> Announced -> HelloPending -> AwaitPeerChannel -> Registering -> Settling
+                                                                    -> Powering -> Ready
+```
+
 `phase` is the first line to read when the glass is dark — a phase that will not advance
 names the frame that never arrived. `AwaitPeerChannel` in particular means the panel never
-got our announce, which is a failure that once cost a whole session to recognise.
+got our announce, which is a failure that once cost a whole session to recognise. And
+**`Ready` means the glass is on**, not merely that we are registered: the library sends the
+family's power-on itself and waits for the ACK, because a panel that is not on ACKs a screen
+it never lights and every counter reports success.
+
+Both families run this same machine. UpdateList's only remaining difference is that its
+burst answers the panel's *first* request rather than its second.
 
 Three rows scroll at independent speeds; pause/resume, per-row text and speed, clock entry,
 wire-log download, WiFi setup and OTA all work from the web console.
@@ -76,8 +88,9 @@ ISO-TP: DLC 8 always; first frame `10 <len>`; **the first consecutive frame is `
 
 ## What to do next, in order
 
-**THE REFACTOR IS DONE — steps 2, 3, 4, 6, 7 and four-fifths of 8.** The fully-refactored
-build is flashed and running. What is left is a long soak (step 9) and one decision.
+**THE REFACTOR IS DONE — all nine steps of `docs/REFACTOR-PLAN.md`.** The final build is
+flashed and running, and it opens the session, lights the glass and renders unattended. What
+is left is a long soak.
 
 ### 1. Let it soak, and read the drop line
 
@@ -92,15 +105,17 @@ including why it is only ~1 % surprising, is in `docs/REFACTOR-PLAN.md` under "T
 not happen". Run the next one long. `/deregistered.txt` lives in RAM: **download it before
 re-flashing.**
 
-### 2. Decide who owns power-before-render
+### 2. Know that `Ready` now means the glass is on
 
-The one item of step 8 not done, because it is a policy call rather than an implementation
-gap: should the library light the glass itself at the end of the opening, on a panel no
-application asked it to light? Carminat already replays power after every *re*-registration;
-only the first one is missing. Three options are laid out in `docs/REFACTOR-PLAN.md` under
-"Step 8's fifth item is a policy decision" — the middle one, a profile knob defaulting off,
-is the smallest thing that fixes the real failure (a panel that ACKs a screen it never
-lights) without overriding a build that wants the glass dark.
+The library sends the family's power-on itself at the end of the opening and does not report
+`Phase::Ready` until the panel has acknowledged it. An application's whole share of *"`03 52
+09` before anything is drawn"* is now **do not draw before `Ready`**.
+
+It stands down whenever a desired power state already exists — queued, cached, or a
+deliberate `setPower(false)` — and `setAutoPower(false)` turns it off entirely, at which
+point `Ready` means what it used to mean. `09_golden` is the worked example: it stopped
+sending power and kept only its 750 ms warm-up, which is a property of the glass rather than
+of the protocol.
 
 ### 3. Then the two open items below
 
