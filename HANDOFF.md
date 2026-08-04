@@ -81,7 +81,9 @@ wire-log download, WiFi setup and OTA all work from the web console.
 | what is proven | `docs/BENCH-VERIFIED.md` — and it is careful about what is *not* |
 
 **Whatever is on the board right now is probably not `09_golden`.** The day ended with
-`11_boom` flashed. Check before assuming, and reflash before starting a soak.
+`12_ulclock` flashed — the clock probe, which cycles 23 candidate frames and will look like
+nonsense on the glass until you know what it is. Check before assuming, and reflash before
+starting a soak.
 
 The C3 SuperMini at `192.168.100.85` **cannot receive** — its CANRX reads permanently dominant.
 Diagnosis is in memory and in the ground-truth doc; do not debug firmware against it.
