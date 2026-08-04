@@ -54,12 +54,61 @@ inline constexpr uint8_t kHello[1][8] = {
     {0x70, 0x1A, 0x11, 0x00, 0x00, 0x00, 0x00, 0x01},
 };
 
+// THE SAME MACHINE AS CARMINAT, WITH ONE DIFFERENCE. Owner's decision, 2026-08-04, recorded
+// in docs/REFACTOR-PLAN.md: the two originals were nearly the same code — affa3.c is the
+// ancestor of both — the Carminat side has been reworked against OEM captures and proven on
+// glass for 96 minutes, and the UpdateList reference *worked* rather than being *right*. A
+// driver whose only heartbeat was a pong for most of its life, that registers lazily and
+// serially, and that cannot notice a panel deauthorizing it, is coincidence-shaped.
+//
+// So four of the five structural differences are deliberately removed:
+//
+//   registration is part of the OPENING, pipelined — not lazy on the first render
+//   the panel's own `0A9 70` GATES ours, instead of merely being acknowledged
+//   any complete `61 11 xx` while registered VOIDS the session
+//   the heartbeat starts after registration, and silence is broken by a slow announce
+//     rather than the reference's BA-every-second
+//
+// THE ONE EXCEPTION IS `helloRequiresAnnounce`. Carminat's burst answers the panel's SECOND
+// request, because 4/4 OEM captures put the radio's `BA` in between. There is no such
+// capture for this family and its reference answers the FIRST request straight out of
+// recv(), so it keeps that. Our announce should still provoke a request; it is simply not a
+// precondition here.
+//
+// NOT ONE BYTE CHANGES. Every literal above is unmoved and pinned by test_updatelist_wire;
+// what changes is WHEN frames go out. If a real UpdateList panel ever reaches a bench and
+// stalls, the first knob to turn is `replyToPing` (its reference pongs every `0x69`, and
+// that pong was its only heartbeat until March 2026) and the second is reverting
+// `registerAfterHello` to lazy.
+//
+//   syncId, syncReplyId, replyFlag, alive, request, requestArg, filler, hello, helloCount,
+//   replyToPing, waitForPanel, sendSyncRequest, requireAuthRequest, helloMinMs,
+//   helloFirstDelayMs, helloFrameGapMs, payloadAfterRegistrationMs, syncIntervalMs,
+//   registerAfterHello, announceWhenSilentMs, helloRequiresAnnounce
 inline constexpr SyncProfile kSync = {
     kIdSync, kIdSyncReply, kReplyFlag, kAliveByte, kRequestByte, kRequestArg, kFiller,
     kHello, 1,
+    false, // replyToPing — removed on four CARMINAT captures and no UpdateList evidence
+           // either way. The first knob to turn if a panel ever stalls. [GUESS]
+    true,  // waitForPanel — do not speak until the panel does...
+    false, // ...and never as a periodic BA probe. The reference's every-second request is
+           // the storm this pair exists to prevent.
+    true,  // a bare 69 is only a ping; a complete 61 11 xx is the request
+    0,     // helloMinMs — the generic AFFA_HELLO_MIN_MS floor; nothing measured here
+    0,     // helloFirstDelayMs — the reference answers from inside recv(), immediately, and
+    0,     // helloFrameGapMs — with ONE hello frame there is no gap to space anyway
+    0,     // payloadAfterRegistrationMs — Carminat's measured 400 ms is a CARMINAT number;
+           // there is no capture of this family's radio waiting, so it does not wait
+    0,     // syncIntervalMs — AFFA_SYNC_INTERVAL_MS, i.e. the reference's 1 Hz alive
+    true,  // registration belongs to the opening, gated on the panel's own 0A9
+    30000, // announce into a SILENT bus. waitForPanel alone deadlocks against a display
+           // that has gone quiet. The interval is Carminat's [GUESS] — nothing measures it
+           // here, and it is slow enough that being wrong is cheap.
+    false, // THE ONE DIFFERENCE: the burst answers the FIRST request, not the second.
 };
 
-// ORDER IS ON THE WIRE: it is the order the lazy 0x70 registration probes go out in.
+// ORDER IS ON THE WIRE: the order the 0x70 registration probes go out in — now during the
+// opening, right after the panel opens its own channel, rather than on the first render.
 inline constexpr uint16_t kFuncIds[]  = {kIdSetText, kIdDisplayCtrl};
 inline constexpr uint8_t  kFuncCount  = 2;
 

@@ -134,6 +134,25 @@ void openCarminatSession(CarRig& r) {
   drain(r.link);
 }
 
+// THE UPDATELIST OPENING, since 2026-08-04 the same machine as Carminat's.
+//
+// Two panel frames, not one. The request draws the single hello immediately — this family's
+// one remaining difference, SyncProfile::helloRequiresAnnounce is false — and then the
+// panel's OWN channel registration `0A9 70` unlocks our `121`/`1B1` probes, exactly as
+// `1C1 70` unlocks `151`/`1F1` on the other family. A rig that stops at the request leaves
+// this panel half-open and its heartbeat never starts, because the heartbeat now waits for
+// FUNCSREG on both families.
+void openUpdateListSession(UlRig& r) {
+  r.d.setSelfAck(true);                     // stands in for the panel's 521/5B1
+  r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+  r.link.inject(mk(0x0A9, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
+  for (int i = 0; i < 8 && !r.d.registered(); ++i) r.d.poll();
+  TEST_ASSERT_TRUE_MESSAGE(r.d.registered(),
+                           "the UpdateList opening registers without a render");
+  drain(r.link);
+}
+
 // Counts what left on the sync id, by leading byte. Everything else is counted separately
 // so a stray frame cannot hide inside "other".
 struct SyncTally {
@@ -875,9 +894,7 @@ void test_updatelist_heartbeat_is_paced_by_the_clock(void) {
   // storm of 0x79 and then tear the link down.
   UlRig r;
   r.d.begin();
-  r.link.inject(affatest::panelSyncRequest());
-  r.d.poll();
-  drain(r.link);
+  openUpdateListSession(r);
 
   for (uint32_t i = 0; i < 20000; ++i) {
     r.clk.t = 1 + (i * 1000) / 20000;          // sweep 1 .. 1000 ms
@@ -1180,8 +1197,14 @@ void test_the_request_argument_asymmetry_is_preserved(void) {
   TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x81, updatelist::kSync.filler, "UpdateList filler");
 
   // data[1] of the HEARTBEAT is a literal 0x00 in both families and is NOT the filler.
+  //
+  // It takes a whole opening to reach one now. This used to be `begin(); poll();` — the old
+  // profile treated FAILED as permission to transmit and put a 79 on the bus before a panel
+  // had said anything. The BYTES are what this test is about and they have not moved.
   UlRig r;
   r.d.begin();
+  openUpdateListSession(r);
+  r.clk.advance(AFFA_SYNC_INTERVAL_MS);
   r.d.poll();
   static const Frame kAlive =
       {0x3DF, 8, {0x79, 0x00, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81}, false};

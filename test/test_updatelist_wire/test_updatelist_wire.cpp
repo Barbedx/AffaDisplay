@@ -89,6 +89,17 @@ struct Rig {
 
   Rig() : d(link, clk) {}
 
+  // THE OPENING, AS THIS FAMILY NOW RUNS IT. Two frames from the panel, not one.
+  //
+  // The request draws the single hello frame immediately — that is this family's one
+  // remaining difference from Carminat (SyncProfile::helloRequiresAnnounce is false, the
+  // reference answered from inside recv()). But registration is no longer lazy and no
+  // longer ours to start whenever we like: the panel opens its OWN channel first, `0A9 70`,
+  // and only that unlocks our `121`/`1B1` probes.
+  //
+  // A rig that injects only the request is not modelling this panel any more. It was not
+  // modelling the Carminat one either, before the same gate landed there and every rig
+  // built on the old helper stalled — which is exactly the failure a real panel would show.
   void sync() {
     d.begin();
     // The panel pads with 0xA3. We never look at it, and this injection exists to make
@@ -98,10 +109,23 @@ struct Rig {
     TEST_ASSERT_TRUE(d.synced());
   }
 
+  // The panel's own channel registration. [REF] the reference driver acknowledged `0A9 70`
+  // and gated nothing on it; we gate on it, because the one real OEM bus using these
+  // function ids registers in that order.
+  void peerChannel() {
+    link.inject(mk(0x0A9, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
+    d.poll();
+  }
+
   void up() {
-    sync();
-    d.setSelfAck(true);
-    ASSERT_RESULT(Ok, d.setPower(true));
+    d.begin();
+    d.setSelfAck(true);          // armed BEFORE the opening: the 0x70 probes now leave
+                                 // during it, and a self-ACK latched after the frame has
+                                 // been offered never arrives
+    link.inject(affatest::panelSyncRequest());
+    d.poll();
+    TEST_ASSERT_TRUE(d.synced());
+    peerChannel();
     pumpUntilIdle(d);
     TEST_ASSERT_TRUE(d.registered());
     drain(link);
@@ -143,34 +167,83 @@ void test_key_ack_id_is_computed_not_tabulated(void) {
 // ---------------------------------------------------------------------------
 
 void test_updatelist_sync_frames_are_byte_exact(void) {
+  // THE BYTES ARE UNCHANGED AND THE TIMING IS NOT, which is the whole of what moving this
+  // family onto the shared rules did. This test used to open with
+  //
+  //     begin(); poll();  ->  79 00 81.. then 7A 01 81..   on the very first pass
+  //
+  // because the profile had no authorization gate and treated FAILED as permission to
+  // transmit. That is the reference driver's every-second probe into an empty bus, which is
+  // precisely the storm `waitForPanel` was added to kill on the other family. A panel-led
+  // opening starts silent.
   SegRig r;
   r.d.begin();
-  r.d.poll();                     // FAILED: heartbeat, then the sync request
-  affatest::expectFrame(r.link, kAlive, "UpdateList 1 Hz alive: 79 00 81 x6");
-  affatest::expectFrame(r.link, kSyncRequest, "UpdateList request: 7A 01 — a REAL argument");
+  r.d.poll();
   Frame f;
-  TEST_ASSERT_FALSE_MESSAGE(r.link.takeSent(f), "nothing else leaves on a FAILED poll");
+  TEST_ASSERT_FALSE_MESSAGE(r.link.takeSent(f),
+                            "a panel-led opening says NOTHING before the panel does");
 
+  // Silence on both sides is a deadlock, so the announce still comes — slowly, and it is a
+  // bare request with no alive in front of it, exactly as on Carminat.
+  r.clk.advance(updatelist::kSync.announceWhenSilentMs);
+  r.d.poll();
+  affatest::expectFrame(r.link, kSyncRequest,
+                        "UpdateList request: 7A 01 — a REAL argument, not filler");
+  TEST_ASSERT_FALSE_MESSAGE(r.link.takeSent(f), "and no 79 rides in front of it");
+
+  // The panel's request draws the hello IMMEDIATELY — the one thing this family still does
+  // differently. Carminat's burst answers the panel's SECOND ask; this one answers the
+  // first, as its reference did from inside recv().
   r.link.inject(affatest::panelSyncRequest());
   r.d.poll();
-  // ONE hello frame, not Carminat's three.
-  expectFrames(r.link, kHello, 1, "UpdateList hello is a single frame");
+  expectFrames(r.link, kHello, 1, "UpdateList hello is a single frame, on the FIRST request");
+
+  // And the 1 Hz alive is still byte-exact when it finally starts — after registration,
+  // like Carminat's, rather than from boot.
+  r.d.setSelfAck(true);
+  r.peerChannel();
+  pumpUntilIdle(r.d);
+  TEST_ASSERT_TRUE_MESSAGE(r.d.registered(), "the opening registers without a render");
+  drain(r.link);
+  r.clk.advance(AFFA_SYNC_INTERVAL_MS);
+  r.d.poll();
+  affatest::expectFrame(r.link, kAlive, "UpdateList 1 Hz alive: 79 00 81 x6");
 }
 
 void test_registration_walks_the_function_table_with_0x81_filler(void) {
+  // SAME TWO FRAMES, SAME ORDER, SAME FILLER — AND NO LONGER TRIGGERED BY A RENDER.
+  //
+  // This used to read `sync(); setPower(true); pumpUntilIdle()` and assert
+  // {0x121, 0x1B1, payload}, because registration was lazy: the first render dragged it
+  // along. It is part of the opening now, so a build that never renders still registers —
+  // and a panel that never opens its own `0A9` channel correctly gets nothing.
   SegRig r;
-  r.sync();
-  drain(r.link);
+  r.d.begin();
   r.d.setSelfAck(true);
+  r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+  drain(r.link);                      // the hello
 
+  Frame f;
+  TEST_ASSERT_FALSE_MESSAGE(r.link.takeSent(f),
+                            "no 0x70 probe may precede the panel's own 0A9 registration");
+  TEST_ASSERT_FALSE(r.d.registered());
+
+  r.peerChannel();
+  pumpUntilIdle(r.d);
+  // OUR REFLEX FIRST, THEN OUR PROBES — the same order Carminat shows, where the `5C1 74`
+  // that answers the panel's `1C1 70` precedes our `151 70` by ~61 ms. The reflex leaves
+  // from the receive pump, so it is always ahead of anything the sync pump schedules.
+  affatest::expectFrame(r.link, kAckToKeyId[0],
+                        "the 4A9 74 reflex answers the panel's own channel");
+  expectFrames(r.link, kRegister, 2, "registration walks {0x121, 0x1B1} with 0x81 filler");
+  TEST_ASSERT_TRUE_MESSAGE(r.d.registered(),
+                           "the opening completes registration with no application help");
+
+  // The payload then follows on its own, behind a registration that is already done.
   ASSERT_RESULT(Ok, r.d.setPower(true));
   pumpUntilIdle(r.d);
-
-  static const Frame kWant[] = {
-      kRegister[0], kRegister[1], kSetStateEnable[0],
-  };
-  expectFrames(r.link, kWant, 3, "registration {0x121, 0x1B1} then the payload");
-  TEST_ASSERT_TRUE(r.d.registered());
+  expectFrames(r.link, kSetStateEnable, 1, "and the render follows the completed table");
 }
 
 // ---------------------------------------------------------------------------
