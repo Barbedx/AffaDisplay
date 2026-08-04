@@ -155,6 +155,34 @@ The library works. Each step must keep it working, and "it compiles" is not evid
 7. **Flash and soak** after 4 and after 6. A green suite has already let a broken handshake
    through this session; only glass counts.
 
+## Open: why the panel drops the session every ~7 minutes
+
+During a 1 h 36 m soak the session was lost and re-opened **fourteen times**. It is invisible
+to a user because the FSM self-heals — re-announce, re-register, re-power the glass, resume —
+which is worth having, but the cause is unexplained.
+
+**The paint rate is NOT the cause.** Tested directly by dropping the row periods from
+220/380/550 ms to 2000 ms, i.e. ~8 fullscreen transfers per second down to ~0.5:
+
+| | drops | over | rate |
+|---|---|---|---|
+| ~8 screens/s | 11 | 4900 s | 1 per 445 s |
+| ~0.5 screens/s | 3 | 1099 s | 1 per 366 s |
+
+Sixteen times fewer screens, and if anything a slightly *higher* drop rate. The theory that we
+were overrunning the panel is dead.
+
+What is known: every driver counter stays at zero across the drops — `txErr`, `rxErr`,
+`busErr`, `arbLost`, `rxMissed`, `ringOverflow` — so it is not electrical and nothing is being
+lost in our receive path. The intervals are wildly irregular (15 s to 1409 s), so it is not a
+timer on either side. Remaining candidates, untested: the panel re-registering as normal
+behaviour for this unit; CPU contention between WiFi and the CAN poll task; or something in our
+heartbeat timing that the OEM radio does differently.
+
+**The next measurement is a capture of the moment itself** — the drop is preceded by whatever
+causes it, and the wire log holds 120 rows with heartbeats filtered, which is enough to see it
+if the trace is downloaded promptly after a drop. `/wire.txt` exists for exactly this.
+
 ## What must not be lost
 
 The comments. This codebase's value is disproportionately in the prose that says *why* a byte
