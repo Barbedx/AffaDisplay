@@ -124,8 +124,11 @@ void finishCarminatRegistration(CarRig& r) {
 // different and much weaker statement. Self-ACK stands in for the display's 551/5F1.
 void openCarminatSession(CarRig& r) {
   r.d.setSelfAck(true);
-  r.link.inject(affatest::panelSyncRequest());
-  r.d.poll();
+  // BOTH REQUESTS ARE AT t = 0, and that is deliberate: the announce costs no clock time
+  // here, so every "500 ms after the request" assertion downstream still counts from t = 0.
+  // The real panel spaces its two asks ~104 ms apart; that spacing is not what these tests
+  // are about. See SyncProfile::helloRequiresAnnounce.
+  affatest::carminatOpeningRequest(r.d, r.link);
   finishCarminatHello(r);
   finishCarminatRegistration(r);
   drain(r.link);
@@ -157,19 +160,47 @@ SyncTally tally(L& link, uint16_t syncId, uint8_t aliveByte, uint8_t requestByte
 // Hello
 // ---------------------------------------------------------------------------
 
-void test_carminat_hello_is_three_paced_b0_frames(void) {
+void test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames(void) {
   CarRig r;
   r.d.begin();
   r.d.poll();
   drain(r.link);
 
+  // RENAMED from test_carminat_hello_is_three_paced_b0_frames, because the opening is no
+  // longer three frames — it is four, and the first of them is ours.
+  //
+  // OUR `BA` COMES FIRST, AND THE BURST ANSWERS THE PANEL'S *NEXT* REQUEST. [CAP] measured
+  // 4/4: the radio's `3AF BA` always precedes the `3CF 61 11 xx` that draws the burst, and
+  // "aknowledge offed display cONNECT OT POWER.csv" spells the whole exchange out —
+  //
+  //   147305418  3CF 61 11 01     the display, already repeating every ~104 ms
+  //   147328538  3AF BA 00        the radio announces into it
+  //   147409570  3CF 61 11 01     the display asks AGAIN, 81 ms later
+  //   147440321  3AF B0 14 11 ..  and THIS request draws the burst, 30.75 ms behind it
+  //
+  // Confirmed on real hardware 2026-08-04: without the announce the panel never opens its
+  // own `1C1` channel and the session dies at "waiting for the 1C1" every time. So the
+  // FIRST good request is answered with the bare BA and nothing else — it schedules no B0
+  // at all, which is asserted below by letting its would-be +31 ms deadline pass in silence.
+  r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+  TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "00 is not usable before its B0 announce");
+  expectFrame(r.link, kCarminatRequest, "the first 61 11 00 draws our BA announce");
+  expectNoFrame(r, "no B0 in the same poll as the first 61 11 00");
+  r.clk.advance(carminat::kHelloFirstDelayMs);
+  r.d.poll();
+  expectNoFrame(r, "and none at +31 ms either: the first request scheduled no burst");
+  TEST_ASSERT_FALSE(r.d.synced());
+
+  // The panel asks again on its own ~104 ms timer. THIS is the request the captures pace
+  // the announce from, so every deadline below is measured from here.
   r.link.inject(affatest::panelSyncRequest());
   r.d.poll();
 
   // The monitor capture is B0 at +31, +62 and +93 ms.  00 must stay gated until the
   // third frame has actually been offered to CAN; no delay()/busy-wait is allowed here.
   TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "00 is not usable before its B0 announce");
-  expectNoFrame(r, "no B0 in the same poll as 61 11 00");
+  expectNoFrame(r, "no B0 in the same poll as the second 61 11 00 either");
   r.clk.advance(carminat::kHelloFirstDelayMs - 1);
   r.d.poll();
   expectNoFrame(r, "first B0 waits the full +31 ms");
@@ -226,6 +257,13 @@ void test_carminat_hello_is_three_paced_b0_frames(void) {
   TEST_ASSERT_EQUAL_UINT8(3, carminat::kSync.helloCount);
   TEST_ASSERT_TRUE_MESSAGE(carminat::kSync.registerAfterHello,
                            "the 0x70 probes belong to the opening, not to rendering");
+  // Pin the flag as well as the wire, on BOTH profiles: this is the same panel family, and
+  // a silent flip back to a one-request opening is exactly the regression that cost a bench
+  // session ("waiting for the 1C1", for ever).
+  TEST_ASSERT_TRUE_MESSAGE(carminat::kSync.helloRequiresAnnounce,
+                           "the BA must be on the wire before the burst means anything");
+  TEST_ASSERT_TRUE_MESSAGE(carminat::kLegacyMeganeCanSync.helloRequiresAnnounce,
+                           "the compatibility profile is the same panel, same BA-first rule");
   TEST_ASSERT_EQUAL_UINT32(carminat::kHelloMinMs, carminat::kSync.helloMinMs);
   TEST_ASSERT_EQUAL_UINT32(31, carminat::kSync.helloFirstDelayMs);
   TEST_ASSERT_EQUAL_UINT32(31, carminat::kSync.helloFrameGapMs);
@@ -346,9 +384,14 @@ void test_carminat_announces_into_a_silent_bus_slowly_and_ba_only(void) {
 
   // A good request starts the measured B0 schedule, not an immediate heartbeat. Once the
   // third B0 completes authorization, B9 is profile-paced at 500 ms and BA stays absent.
-  r.link.inject(affatest::panelSyncRequest());
-  r.d.poll();
-  expectNoFrame(r, "00 schedules B0; it does not transmit immediately");
+  //
+  // AND IT TAKES TWO REQUESTS. The slow silent-bus announce above is the waitForPanel probe,
+  // not the handshake's own BA: it never latches `_unauthControlIssued`, so the panel's first
+  // good `61 11 00` still buys one — and only one — announce of its own. [CAP] the radio's
+  // BA precedes the `61 11 xx` that draws the burst in all four captures; see
+  // SyncProfile::helloRequiresAnnounce and the transcript in affa_test_support.h.
+  affatest::carminatOpeningRequest(r.d, r.link,
+                                   "the first good 00 answers with the announce, not a burst");
   finishCarminatHello(r);
   TEST_ASSERT_TRUE(r.d.synced());
 
@@ -584,6 +627,16 @@ void test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediatel
   expectFrame(r.link, kCarminatRequest, "START BA survives an immediately following 00");
   expectNoFrame(r, "…and gains no B9, and 01 still contributes no B0 announce");
 
+  // THE 00 IN THAT SAME DRAIN ARRIVED BEFORE OUR BA LEFT, so under helloRequiresAnnounce all
+  // it can do is re-arm the announce 01 had already armed — which is precisely the property
+  // this test exists to pin, now visible one layer further down: the arm is idempotent, so
+  // two frames that both want an announce still produce exactly ONE BA. The burst then
+  // answers the panel's next request, as measured 4/4 ([CAP], and the "cONNECT OT POWER"
+  // transcript in affa_test_support.h).
+  r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+  expectNoFrame(r, "the answering 00 schedules B0; it transmits nothing itself");
+
   finishCarminatHello(r);
   TEST_ASSERT_TRUE_MESSAGE(r.d.synced(), "00 becomes usable only after B0#3");
   // The only thing B0#3 is allowed to bring with it is the opening's first registration
@@ -624,8 +677,9 @@ void test_short_dlc_peer_alive_is_honoured(void) {
   // DLC 1 `69`. data[0] is the ENTIRE test on this channel; nothing else may be read.
   CarRig r;
   r.d.begin();
-  r.link.inject(affatest::panelSyncRequest());
-  r.d.poll();
+  // Two requests with our BA between them — the measured opening. See
+  // SyncProfile::helloRequiresAnnounce; the burst answers the panel's SECOND ask.
+  affatest::carminatOpeningRequest(r.d, r.link);
   finishCarminatHello(r);
   drain(r.link);
 
@@ -845,8 +899,9 @@ namespace {
 void armed(CarRig& r) {
   r.clk.t = 0;
   r.d.begin();
-  r.link.inject(affatest::panelSyncRequest());
-  r.d.poll();
+  // The opening is two requests with our BA between them, both at t = 0, so the peer deadline
+  // this helper's callers rely on is still exactly AFFA_PEER_TIMEOUT_MS from zero.
+  affatest::carminatOpeningRequest(r.d, r.link);
   r.d.setSelfAck(true);
   (void)r.d.setPower(true);
   finishCarminatHello(r);
@@ -866,19 +921,22 @@ void test_recovery_reasserts_cached_power_before_held_time(void) {
   CarRig r;
   armed(r); // power on is ACKed/cached and the first session is idle
 
-  // A lost session re-opens with the same bare BA the first one did — bootstrapAliveFrame is
-  // false, so there is no B9 in front of it. [CAP] "aknowledge offed display.csv" @ 84945066.
+  // THE 01 THAT ENDS THIS SESSION IS AN *ANSWERING* START NOW, NOT A DISCOVERY PROBE, and
+  // that is a consequence of helloRequiresAnnounce rather than a weakening of the test. Our
+  // BA went out during the opening `armed()` performed, so `_unauthControlIssued` is latched
+  // for good; a `61 11 01` arriving after it is a full request, exactly as measured ([CAP]
+  // "aknowledge offed display cONNECT OT POWER.csv" completes an entire session on 01 with no
+  // `61 11 00` anywhere in it). It still carries the same meaning to us — "your registration
+  // is void" — so FUNCSREG and usable authorization drop here just as they did before; the
+  // difference is that this one frame ALSO schedules the replacement burst, so no second BA
+  // and no further request is owed, and the recovery below is unchanged in every other way.
   r.link.inject(affatest::panelSyncStart());
   r.d.poll();
-  expectFrame(r.link, kCarminatRequest, "lost session discovery BA");
-  expectNoFrame(r, "lost 01 has no B9, no B0 and no application payload");
+  expectNoFrame(r, "an answering 01 revokes and re-opens silently: no BA, no B9, no payload");
   TEST_ASSERT_FALSE(r.d.synced());
   TEST_ASSERT_FALSE(r.d.registered());
 
   TEST_ASSERT_EQUAL(Result::Ok, r.d.setTime("1000")); // held behind the new session
-  r.link.inject(affatest::panelSyncRequest());
-  r.d.poll();
-  expectNoFrame(r, "new 00 waits for its staged B0 announce");
   finishCarminatHello(r);
 
   // The re-registration burst must precede both the internally restored power and the
@@ -926,9 +984,12 @@ void test_peer_deadline_fires_at_5001ms_and_drops_funcsreg(void) {
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.alive, "recovery is quiet until the panel speaks");
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "FAILED never re-arms periodic BA on Carminat");
 
-  r.link.inject(affatest::panelSyncRequest());
-  r.d.poll();
-  expectNoFrame(r, "recovery 00 waits for the captured B0 schedule");
+  // Peer loss clears the announce latch as well as the session, so recovery re-opens with
+  // the SAME two-request exchange a cold bus does: our BA first, the burst on the panel's
+  // next ask. A recovery that skipped the announce is exactly the bench failure this rule
+  // was measured to fix.
+  affatest::carminatOpeningRequest(r.d, r.link,
+                                   "recovery announces before it answers with a burst");
   finishCarminatHello(r);
   TEST_ASSERT_TRUE_MESSAGE(r.d.synced(), "the next panel request restarts the session");
   drain(r.link); // B0#3 also releases the fresh registration probes
@@ -974,7 +1035,7 @@ void tearDown(void) {}
 
 int main(int, char**) {
   UNITY_BEGIN();
-  RUN_TEST(test_carminat_hello_is_three_paced_b0_frames);
+  RUN_TEST(test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames);
   RUN_TEST(test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00);
   RUN_TEST(test_updatelist_hello_is_exactly_one_frame);
   RUN_TEST(test_carminat_announces_into_a_silent_bus_slowly_and_ba_only);

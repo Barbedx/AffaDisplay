@@ -499,8 +499,11 @@ void test_sync_registered_and_txcomplete_fire_at_the_right_moment(void) {
   // callback from inside setup() would surprise every application.
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_ev.sync, "begin() is a reset, not a transition");
 
-  r.link.inject(affatest::panelSyncRequest());
-  r.d.poll();
+  // The panel has to ask TWICE: the first `61 11 00` only puts our bare `BA` announce on the
+  // wire and is answered with nothing else, and the burst answers its NEXT request. [CAP]
+  // 4/4, and the transcript is in affa_test_support.h — SyncProfile::helloRequiresAnnounce.
+  // Neither request is a state transition, which is what the event count below pins.
+  affatest::carminatOpeningRequest(r.d, r.link);
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_ev.sync, "auth remains closed before B0 #3");
   r.clk.advance(carminat::kHelloFirstDelayMs);
   r.d.poll();                                  // B0 #1

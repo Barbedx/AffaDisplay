@@ -130,6 +130,8 @@ inline constexpr SyncProfile kSync = {
            // on its own: a display that has gone to sleep never speaks, so neither do we
            // (measured rx 0 / tx 0). The OEM radio initiates after a reattach.
     false, // No B9 in the bootstrap either: BA asks, B9 only says "still here".
+    true,  // BA FIRST; the NEXT 61 11 draws the burst. 4/4 in the captures, and proven on
+           // hardware 2026-08-04 — without it the panel never opens its own 1C1 channel.
 };
 
 // Historical MeganeCAN compatibility profile.  It deliberately keeps the user's strict
@@ -156,6 +158,7 @@ inline constexpr SyncProfile kLegacyMeganeCanSync = {
     true,  // same panel, same unconditional registration after the final hello frame
     30000, // same panel, same need to break a two-way silence
     false, // same panel, same BA-only bootstrap
+    true,  // same panel, same BA-before-hello rule
 };
 
 inline constexpr const SyncProfile& syncProfile(CarminatHelloProfile profile) {

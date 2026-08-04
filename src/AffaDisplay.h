@@ -55,6 +55,11 @@
 #if AFFA_ENABLE_ESP32CAN_LINK
 #  include "link/Esp32CanLink.h"
 #endif
+// The same seam over collin80's esp32_can instead of raw TWAI, for applications that
+// already own that stack. Off unless the build asks: it needs an external library.
+#if AFFA_ENABLE_CANCOMMON_LINK
+#  include "link/CanCommonLink.h"
+#endif
 
 // The owned poll task. THE ONLY PART OF THIS LIBRARY THAT IS NOT PORTABLE, and the one
 // directory a non-FreeRTOS port omits: everything above this line compiles on the host

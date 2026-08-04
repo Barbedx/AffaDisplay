@@ -371,6 +371,23 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
         // The good request may arrive while the previous hello burst is still inside its
         // rate floor. Keep application TX closed until the hello that answers THIS phase
         // has actually been emitted.
+        // Our BA has to be on the wire before the burst means anything. The first request
+        // arms it and is answered with nothing else; the panel asks again on its own ~104 ms
+        // timer and THAT one opens the session. See SyncProfile::helloRequiresAnnounce.
+        // FAIL OPEN, NEVER WEDGE. If the announce is still pending or can still be armed,
+        // hold the burst back for it. But once the one-shot is SPENT without ever reaching
+        // the wire — a Rejected BA, or a busy budget burned through — `_unauthControlIssued`
+        // stays false for ever, and gating on it alone would refuse the hello on every
+        // subsequent request while nothing short of a link reset could clear it. A session
+        // opened without the announce is merely less faithful; a session that can never open
+        // is broken, so the unreachable case falls through to the ordinary path.
+        if (_profile.helloRequiresAnnounce && !_unauthControlIssued) {
+          const bool announceStillPossible =
+              _unauthControlPending || !_unauthControlSpent;
+          armUnauthControl(now);
+          if (announceStillPossible) return true;
+          AFFA_LOGW(kTag, "announce unreachable; opening without it rather than stalling");
+        }
         const bool needsHelloBeforeAuth =
             !_authRequestObserved || _authHelloPending || hasFlag(_sync, SyncState::Failed);
         _authRequestObserved = true;

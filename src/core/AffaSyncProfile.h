@@ -158,6 +158,18 @@ struct SyncProfile {
   // the quieter reading: BA asks the question, B9 answers "still here" only once there is
   // a session to be still here in.
   bool bootstrapAliveFrame = true;
+
+  // OUR REQUEST COMES FIRST, AND THE HELLO ANSWERS THE *NEXT* PANEL REQUEST. Measured 4/4:
+  // in every OEM capture the radio's `BA` precedes the `61 11 xx` that draws the B0 burst,
+  // and in "cONNECT OT POWER" the gap is explicit — the display is already repeating
+  // `61 11 01`, the radio answers BA, and it is the FOLLOWING request 81 ms later that gets
+  // the burst 30.75 ms after it.
+  //
+  // Answering the first request with the burst skips the exchange the display is waiting on.
+  // Confirmed on hardware 2026-08-04: without this the panel never opens its own `1C1`
+  // channel and the session dies at "waiting for the display's 1C1", every time; with it,
+  // registration, power and the clock all complete unattended.
+  bool helloRequiresAnnounce = false;
 };
 
 } // namespace affa

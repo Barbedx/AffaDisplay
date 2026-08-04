@@ -66,41 +66,6 @@ inline affa::Frame panelPeerAlive() {
   return mk(0x3CF, {0x69, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3});
 }
 
-#if AFFA_PANEL_CARMINAT
-// Drives the captured AFFA3 opening exactly as the real panel sees it: full 61 11 00,
-// then B0 #1 at +31 ms and the remaining B0s at +31 ms each.  Delays are protocol timing,
-// not an implementation detail, so host tests must advance their fake clock rather than
-// relying on a number of poll() calls.
-template <class D, class L>
-inline void completeCarminatAuth(D& d, L& l, FakeClock& clk) {
-  l.inject(panelSyncRequest());
-  d.poll();
-  clk.advance(affa::carminat::kHelloFirstDelayMs);
-  d.poll();                                     // B0 #1
-  // THE DISPLAY REGISTERS ITS OWN CHANNEL FIRST, and the harness has to model that or it is
-  // not modelling this panel. Measured 4/4: `1C1 70` lands 0.81-1.55 ms after B0#1 — between
-  // the first and second announce frames — and our `151 70` follows ~61 ms later. Without it
-  // the library correctly refuses to register, and every rig built on this helper stalls.
-  l.inject(mk(0x1C1, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
-  clk.advance(affa::carminat::kHelloFrameGapMs);
-  d.poll();                                     // 5C1 74 reflex, then B0 #2
-  clk.advance(affa::carminat::kHelloFrameGapMs);
-  d.poll();                                     // B0 #3
-  d.poll();                                     // and the 0x70 probes it now permits
-}
-
-// A self-ACK rig has to let both 0x70 registrations complete before the profile's measured
-// 400 ms post-registration quiet period can end.  Keep this in the shared harness so every
-// Carminat builder test starts on a genuinely usable session, not a zero-time shortcut.
-template <class D>
-inline void settleCarminatRegistration(D& d, FakeClock& clk) {
-  for (uint8_t i = 0; i < 8 && !d.registered(); ++i) d.poll();
-  TEST_ASSERT_TRUE_MESSAGE(d.registered(), "Carminat registrations must complete first");
-  clk.advance(affa::carminat::kPayloadAfterRegistrationMs);
-  d.poll();
-}
-#endif
-
 // ---------------------------------------------------------------------------
 // Link helpers
 // ---------------------------------------------------------------------------
@@ -148,6 +113,87 @@ inline void expectFrames(L& l, const affa::Frame* want, size_t n, const char* wh
   std::snprintf(msg, sizeof(msg), "%s: expected EXACTLY %u frames", what, unsigned(n));
   TEST_ASSERT_FALSE_MESSAGE(l.takeSent(extra), msg);
 }
+
+// ---------------------------------------------------------------------------
+// The Carminat opening
+//
+// Placed AFTER the link helpers on purpose: the opening now asserts a frame of its own, so
+// it needs expectFrame().
+// ---------------------------------------------------------------------------
+
+#if AFFA_PANEL_CARMINAT
+// The bare `3AF BA` announce that now stands between the panel's two opening requests.
+inline affa::Frame radioAnnounce() {
+  return mk(0x3AF, {0xBA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
+}
+
+// OUR `BA` COMES FIRST, AND THE BURST ANSWERS THE PANEL'S *NEXT* REQUEST.
+//
+// [CAP] measured 4/4: the radio's `3AF BA` always precedes the `3CF 61 11 xx` that draws the
+// B0 burst. "aknowledge offed display cONNECT OT POWER.csv" spells it out —
+//
+//   147305418  3CF 61 11 01     the display, already repeating every ~104 ms
+//   147328538  3AF BA 00        the radio announces into it
+//   147409570  3CF 61 11 01     the display asks AGAIN, 81 ms later
+//   147440321  3AF B0 14 11 ..  and THIS request draws the burst, 30.75 ms behind it
+//
+// Confirmed on real hardware 2026-08-04: without the announce the panel never opens its own
+// `1C1` channel and the session dies at "waiting for the 1C1" every time; with it,
+// registration, display-on and the clock all complete unattended. See
+// SyncProfile::helloRequiresAnnounce: the first request only ARMS the announce, is answered
+// with nothing else whatsoever, and the BA leaves from pumpUnauthControl in that same poll.
+//
+// The fake clock deliberately does NOT move between the two requests. Every deadline these
+// suites measure "from the request" is still measured from t(request), and the panel's own
+// ~104 ms spacing is not what any of them are about.
+template <class D, class L>
+inline void carminatOpeningRequest(D& d, L& l,
+                                   const char* what = "our BA precedes the B0 burst") {
+  l.inject(panelSyncRequest());
+  d.poll();                                     // the first request arms the announce...
+  expectFrame(l, radioAnnounce(), what);        // ...and it leaves in this same poll
+  affa::Frame extra;
+  TEST_ASSERT_FALSE_MESSAGE(l.takeSent(extra),
+                            "the first request draws the announce and nothing else");
+
+  l.inject(panelSyncRequest());                 // the panel asks again on its own timer
+  d.poll();                                     // and THIS request schedules the B0 burst
+  TEST_ASSERT_FALSE_MESSAGE(l.takeSent(extra),
+                            "the second request schedules B0; it transmits nothing at once");
+}
+
+// Drives the captured AFFA3 opening exactly as the real panel sees it: the announce, the
+// panel's second 61 11 00, then B0 #1 at +31 ms and the remaining B0s at +31 ms each.
+// Delays are protocol timing, not an implementation detail, so host tests must advance their
+// fake clock rather than relying on a number of poll() calls.
+template <class D, class L>
+inline void completeCarminatAuth(D& d, L& l, FakeClock& clk) {
+  carminatOpeningRequest(d, l);
+  clk.advance(affa::carminat::kHelloFirstDelayMs);
+  d.poll();                                     // B0 #1
+  // THE DISPLAY REGISTERS ITS OWN CHANNEL FIRST, and the harness has to model that or it is
+  // not modelling this panel. Measured 4/4: `1C1 70` lands 0.81-1.55 ms after B0#1 — between
+  // the first and second announce frames — and our `151 70` follows ~61 ms later. Without it
+  // the library correctly refuses to register, and every rig built on this helper stalls.
+  l.inject(mk(0x1C1, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
+  clk.advance(affa::carminat::kHelloFrameGapMs);
+  d.poll();                                     // 5C1 74 reflex, then B0 #2
+  clk.advance(affa::carminat::kHelloFrameGapMs);
+  d.poll();                                     // B0 #3
+  d.poll();                                     // and the 0x70 probes it now permits
+}
+
+// A self-ACK rig has to let both 0x70 registrations complete before the profile's measured
+// 400 ms post-registration quiet period can end.  Keep this in the shared harness so every
+// Carminat builder test starts on a genuinely usable session, not a zero-time shortcut.
+template <class D>
+inline void settleCarminatRegistration(D& d, FakeClock& clk) {
+  for (uint8_t i = 0; i < 8 && !d.registered(); ++i) d.poll();
+  TEST_ASSERT_TRUE_MESSAGE(d.registered(), "Carminat registrations must complete first");
+  clk.advance(affa::carminat::kPayloadAfterRegistrationMs);
+  d.poll();
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Pumping

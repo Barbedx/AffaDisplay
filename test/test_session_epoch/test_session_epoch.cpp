@@ -161,12 +161,16 @@ void runHelloToFirstRegistration(Rig& r, const char* phase) {
                             "one registration ACK cannot latch FUNCSREG");
 }
 
-// Opens one *new* captured Carminat authorization with the good `00` and leaves the first
-// 151 registration waiting for its panel ACK.
+// Opens one *new* captured Carminat authorization from a bus on which we have not yet
+// announced, and leaves the first 151 registration waiting for its panel ACK.
+//
+// OUR `BA` COMES FIRST, AND THE BURST ANSWERS THE PANEL'S *NEXT* REQUEST. [CAP] 4/4, and
+// spelled out in "aknowledge offed display cONNECT OT POWER.csv" — see
+// SyncProfile::helloRequiresAnnounce and the transcript in affa_test_support.h. Both requests
+// land at the same fake-clock instant, so the deadlines these tests measure from "the
+// request" are unmoved.
 void startSessionToFirstRegistration(Rig& r, const char* phase) {
-  r.link.inject(affatest::panelSyncRequest());
-  r.display.poll();
-  expectNoFrame(r, "61 11 00 schedules the paced B0 opening");
+  affatest::carminatOpeningRequest(r.display, r.link);
   runHelloToFirstRegistration(r, phase);
 }
 
@@ -184,21 +188,27 @@ void completeFreshRegistration(Rig& r, const char* first, const char* second) {
                            "only both new registration ACKs may latch FUNCSREG");
 }
 
-// A `61 11 01` that arrives while we have NOT yet put a BA on the wire. The display is
-// calling into what is, as far as it can tell, an empty bus, and it earns exactly one
-// bounded discovery frame — never the announce burst.
+// THE BARE-DISCOVERY `61 11 01` IS GONE FROM THIS FILE, and helloRequiresAnnounce is why.
+// Every opening now puts our `BA` on the wire before the burst, so `_unauthControlIssued` is
+// latched from the first request of the very first session onwards and a later `61 11 01` can
+// never again be the "calling into an empty bus" probe — it is always an ANSWERING start,
+// i.e. a full request. That path is modelled by revokeSessionWithAnsweringStart() below; the
+// bare probe itself is still pinned, at full strength and from a genuinely cold rig, by
+// test_bare_first_69_gets_one_discovery_ba_but_never_unlocks_output.
 //
-// THAT FRAME IS A BARE `BA`, NOT A B9 -> BA PAIR. SyncProfile::bootstrapAliveFrame is false
-// on this family: [CAP] the reattach capture "aknowledge offed display.csv" at 84945066
-// shows the radio re-finding a sleeping display with a single unprompted `3AF BA`. B9 is the
-// heartbeat of an ESTABLISHED session, and there is no session here yet to be alive in.
-void revokeSession(Rig& r, const char* why) {
-  r.link.inject(affatest::panelSyncStart());
+// An unrecognised `61 11 xx` is what remains for revoking a session that has NOT reached
+// FUNCSREG. The library tears such a request down completely — Failed, dropRegistrations(),
+// a bumped in-flight epoch, and the whole announce latch reset — and, because 0xC5 is not the
+// START spelling, it does so without a frame of its own. That is exactly the epoch boundary
+// the late-ACK races below need, and it is the ONLY door left into it: an answering `01`
+// voids a session only while it holds FUNCSREG (a session whose first 151 is still in flight
+// never has), and the peer watchdog does not run before FUNCSREG either.
+void revokeSessionWithUnknownAuth(Rig& r, const char* why) {
+  r.link.inject(mk(0x3CF, {0x61, 0x11, 0xC5, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
   r.display.poll();
-  expectFrame(r.link, kRequest, why);
-  expectNoFrame(r, "START bootstrap is exactly one BA, with no B9 in front of it");
-  TEST_ASSERT_FALSE_MESSAGE(r.display.synced(), "61 11 01 revokes usable authorization");
-  TEST_ASSERT_FALSE_MESSAGE(r.display.registered(), "61 11 01 revokes FUNCSREG");
+  expectNoFrame(r, "an unknown 61 11 xx tears the session down silently: no BA, no hello");
+  TEST_ASSERT_FALSE_MESSAGE(r.display.synced(), why);
+  TEST_ASSERT_FALSE_MESSAGE(r.display.registered(), "and it revokes FUNCSREG with it");
 }
 
 // A `61 11 01` that ANSWERS the BA above is a different frame with the same bytes: it is a
@@ -267,17 +277,27 @@ void assertBootstrapStormIsBounded(StuckLink::Mode mode) {
 
 }  // namespace
 
-// A late 0x551 ACK from the *old* 0x151 registration must be ignored after a fresh 61 11
-// 01.  In particular it may not recreate Failed|FuncsReg, because then a later good 00
-// would open the gate and send the held clock without the new ordered registrations.
-void test_late_registration_ack_cannot_revive_the_old_session(void) {
+// A late 0x551 ACK from the *old* 0x151 registration must be ignored once that session has
+// been torn down.  In particular it may not recreate Failed|FuncsReg, because then a later
+// good 00 would open the gate and send the held clock without the new ordered registrations.
+//
+// RENAMED from ..._cannot_revive_the_old_session, and the trigger changed with it, because
+// the frame that used to do the revoking cannot reach this state any more. Under
+// SyncProfile::helloRequiresAnnounce our `BA` is on the wire before any burst, so from the
+// first session onwards every `61 11 01` is an ANSWERING start — and the library voids an
+// epoch on one only while it holds FUNCSREG, which a session whose very first 151 is still in
+// flight by definition does not. The wall-clock peer watchdog is gated behind FUNCSREG too.
+// So the teardown here is the unrecognised-request path (see revokeSessionWithUnknownAuth).
+// The race under test — a 0x551 addressed to a dead epoch's 0x151 — is bit for bit the one
+// this test has always pinned, and every assertion below is unchanged.
+void test_late_registration_ack_cannot_revive_a_torn_down_session(void) {
   Rig r;
   r.display.begin();
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Result::Ok),
                     static_cast<uint8_t>(r.display.setTime("1000")));
 
   startSessionToFirstRegistration(r, "old-session 151 registration");
-  revokeSession(r, "new 01 tears down the old in-flight registration");
+  revokeSessionWithUnknownAuth(r, "an unknown request tears down the in-flight registration");
 
   // This is the decisive race: 0x551 belongs to the 151 frame which was put on the wire
   // before 01.  It must not complete a registration in the newly reset session.
@@ -314,10 +334,17 @@ void test_late_reassert_ack_cannot_clear_the_next_session_restore(void) {
 
   // Session B: lose the original registered session, retain a clock, then reach its
   // internally generated power replay and deliberately leave that 151 in flight.
-  revokeSession(r, "first 01 starts recovery of cached power");
+  //
+  // THE FIRST 01 IS AN ANSWERING START TOO NOW. armCachedPower() completed a whole opening,
+  // so our BA is long since on the wire and `_unauthControlIssued` is latched — [CAP] and an
+  // answering 01 is a full request, not a probe. Session A holds FUNCSREG, so this one voids
+  // the epoch exactly as the old bare-probe revocation did AND schedules B's burst itself,
+  // which is why runHelloToFirstRegistration() takes it from here rather than a fresh
+  // request. Nothing about the reassert race below moves.
+  revokeSessionWithAnsweringStart(r, "first 01 starts recovery of cached power");
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Result::Ok),
                     static_cast<uint8_t>(r.display.setTime("1000")));
-  startSessionToFirstRegistration(r, "recovery B starts at 151");
+  runHelloToFirstRegistration(r, "recovery B starts at 151");
   completeFreshRegistration(r, "recovery B 551 releases 1F1",
                              "recovery B registration has no payload before +400 ms");
   r.clock.advance(carminat::kPayloadAfterRegistrationMs);
@@ -404,9 +431,11 @@ void test_bare_first_69_gets_one_discovery_ba_but_never_unlocks_output(void) {
 void test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9(void) {
   Rig r;
   r.display.begin();
-  r.link.inject(affatest::panelSyncRequest());   // t = 0: the first B9 is due at t = 500
-  r.display.poll();
-  expectNoFrame(r, "good 00 waits for B0 #1");
+  // Two requests, both at t = 0, with our bare `BA` announce between them — the burst answers
+  // the panel's SECOND ask ([CAP] 4/4; SyncProfile::helloRequiresAnnounce). The announce
+  // costs no fake-clock time, so the first B9 is still due at t = 500 counted from here, and
+  // the phase this test is about is untouched.
+  affatest::carminatOpeningRequest(r.display, r.link);
   r.clock.advance(carminat::kHelloFirstDelayMs);
   r.display.poll();
   expectFrame(r.link, kHello, "B0 #1");
@@ -493,7 +522,7 @@ void tearDown(void) {}
 
 int main(int, char**) {
   UNITY_BEGIN();
-  RUN_TEST(test_late_registration_ack_cannot_revive_the_old_session);
+  RUN_TEST(test_late_registration_ack_cannot_revive_a_torn_down_session);
   RUN_TEST(test_late_reassert_ack_cannot_clear_the_next_session_restore);
   RUN_TEST(test_bare_first_69_gets_one_discovery_ba_but_never_unlocks_output);
   RUN_TEST(test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9);

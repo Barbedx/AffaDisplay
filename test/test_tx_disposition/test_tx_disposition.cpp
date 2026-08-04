@@ -120,9 +120,14 @@ void test_busy_offer_never_commits_payload_bytes_or_started_state(void) {
 void test_busy_hello_does_not_authorize_until_the_full_burst_is_accepted(void) {
   Rig r;
   r.display.begin();
+  // THE ANNOUNCE COMES FIRST, AND IT IS NOT THE FRAME UNDER TEST. Our `BA` has to be on the
+  // wire before the burst means anything, and the burst answers the panel's NEXT request
+  // ([CAP] 4/4 — SyncProfile::helloRequiresAnnounce, transcript in affa_test_support.h). The
+  // busy budget is therefore armed AFTER the opening exchange, so what is measured below is a
+  // busy B0 and not a busy BA — the latter has its own test,
+  // test_busy_start_announce_is_retried_and_only_marked_issued_after_ba.
+  affatest::carminatOpeningRequest(r.display, r.link);
   r.link.busyOffers = 1;
-  r.link.inject(panelSyncRequest());
-  r.display.poll();
   TEST_ASSERT_FALSE_MESSAGE(r.display.synced(), "the 31 ms hello deadline keeps auth closed");
   TEST_ASSERT_EQUAL_UINT32(0, r.link.sentCount());
 
@@ -196,8 +201,9 @@ void test_busy_start_announce_is_retried_and_only_marked_issued_after_ba(void) {
 void test_busy_panel_control_ack_retries_before_the_next_b0(void) {
   Rig r;
   r.display.begin();
-  r.link.inject(panelSyncRequest());
-  r.display.poll();
+  // Two requests with our bare `BA` between them: the burst answers the panel's SECOND ask.
+  // [CAP] 4/4 — SyncProfile::helloRequiresAnnounce.
+  affatest::carminatOpeningRequest(r.display, r.link);
   r.clock.advance(carminat::kHelloFirstDelayMs);
   r.display.poll();                            // B0 #1
   drain(r.link);

@@ -141,6 +141,12 @@
 #  endif
 #endif
 
+// CanCommonLink.h, using collin80 esp32_can / can_common instead of raw TWAI. OFF by
+// default: it pulls in an external library, so only a build that asks for it should pay.
+#ifndef AFFA_ENABLE_CANCOMMON_LINK
+#  define AFFA_ENABLE_CANCOMMON_LINK 0
+#endif
+
 // src/rtos/ — the library creates and owns a FreeRTOS task that calls poll(), and the
 // application never calls poll() at all. Render calls then become legal FROM ANY TASK,
 // because they are copied into a command queue that the owned task drains. docs/API.md §4b.
