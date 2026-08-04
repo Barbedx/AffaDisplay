@@ -159,6 +159,13 @@ inline const char* lossReasonName(LossReason r) {
   return "?";
 }
 
+// THE ORDER IS LOAD-BEARING, so comparing is spelled out rather than left to a cast at each
+// call site. "Has the opening got at least as far as X" is the question every transmit gate
+// in the library asks, and it used to be asked as a pair of booleans that could disagree.
+constexpr bool atLeast(Phase a, Phase b) noexcept {
+  return static_cast<uint8_t>(a) >= static_cast<uint8_t>(b);
+}
+
 // For logs and status pages. Never parse it; it is prose, not protocol.
 inline const char* phaseName(Phase p) {
   switch (p) {

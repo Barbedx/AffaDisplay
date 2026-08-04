@@ -385,6 +385,16 @@ class AffaDisplayBase : public IDisplay, public IPanel {
                                          // recovery so their bytes cannot drift either
   void armUnauthControl(uint32_t now);   // one bounded `BA` announce, never a stream
   void pumpUnauthControl(uint32_t now);  // offers it once, with a bounded Busy retry
+
+  // THE ONLY PLACE `_phase` IS ASSIGNED. Nine callers, one per named edge. Having a single
+  // writer is what makes "freeze the ring when the session dies" a hook rather than a hunt,
+  // and it is why the transition can be logged without a line at every site.
+  void enterPhase(Phase p);
+
+  // Has the opening released application traffic — i.e. is the burst that answers the
+  // panel's request on the wire? THE question the transmit gates ask, asked once. A family
+  // with no authorization gate has nothing to wait for and answers true throughout.
+  bool openingReleased() const;
   void queueHello(uint32_t now);         // arms one profile-paced hello sequence
   void pumpHello(uint32_t now);           // submits at most the profile-permitted prefix
   uint32_t syncIntervalMs() const;        // profile override or AFFA_SYNC_INTERVAL_MS
@@ -470,27 +480,35 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // A complete `61 11 xx` was received. This is deliberately not the same as a `69`:
   // a panel may ping after the announce, but a bare ping never opens the bus.
   bool      _syncRequestObserved = false;
-  // Some profiles make an explicit distinction between the panel being alive (`69`) and
-  // authorizing application traffic (a complete `61 11 xx`). For those profiles an early
-  // ping must never unlock registration or rendering.
-  bool      _authRequestObserved = false;
-  // A good authorization was seen but its required hello burst is still rate-limited. It
-  // keeps TX gated until the panel has actually received (or at least been offered) hello.
-  bool      _authHelloPending = false;
+  // WHERE THE OPENING HAS GOT TO. THE SOURCE OF TRUTH, not a reading of anything else.
+  //
+  // It replaced `_authRequestObserved` ("a complete request has been answered"),
+  // `_authHelloPending` ("…but its burst has not landed yet") and `_unauthControlIssued`
+  // ("our BA is physically out"). Those three were read in seven places between them, in
+  // four different combinations, and every one of those combinations was really asking the
+  // same ordered question: has the opening got at least as far as X. See atLeast().
+  //
+  // Transitions are named edges and there are exactly nine of them; grep `enterPhase(`.
+  Phase     _phase = Phase::Silent;
   // A request repeated without CAN ACK is not permission to enqueue another full hello
   // burst. One deferred reply preserves the latest protocol state without a TX storm.
+  //
+  // NOT a phase, and it survives the collapse for that reason: it is a TRANSMIT cursor —
+  // "frames of the burst still to be offered" — and on a family without the authorization
+  // gate a burst is in flight without the opening being blocked on it.
   bool      _helloPending = false;
   // The display's first `61 11 xx` (or its first bare 69) gets exactly one `BA` announce.
   // `Spent` is consumed on arm even if the local controller refuses it, so line-rate
   // duplicate panel frames cannot recreate a BA stream.
+  //
+  // Also not a phase: this is the one-shot BUDGET and the pending offer, i.e. transmit
+  // bookkeeping. `Phase::Announced` is the protocol fact the budget exists to produce.
   bool      _unauthControlPending = false;
-  // BA was physically accepted by the link. This is the evidence helloRequiresAnnounce
-  // needs, so it must mean "the display has been asked", never merely "we tried".
-  bool      _unauthControlIssued = false;
-  // The one-shot BUDGET, consumed on arm. Separate from _unauthControlIssued on purpose: an
+  // The one-shot BUDGET, consumed on arm. Separate from `Phase::Announced` on purpose: an
   // announce that the controller refused outright has spent its turn without ever putting
-  // BA on the wire, and a panel repeating its request at line rate must not buy another.
-  // Only a session teardown clears it.
+  // BA on the wire — budget gone, phase still Silent — and a panel repeating its request at
+  // line rate must not buy another. Only a session teardown clears it, and the fail-open
+  // clause in handleSyncFrame() is what stops "spent but never sent" becoming a wedge.
   bool      _unauthControlSpent = false;
   uint8_t   _unauthControlBusyRetries = 0;
   // Separate from _nextSyncMs: a first request followed by another in the same RX drain

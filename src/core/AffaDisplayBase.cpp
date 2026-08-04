@@ -38,13 +38,13 @@ bool AffaDisplayBase::begin() {
   _nextPongMs     = now;                 // not inherit a stale deadline across a clock wrap
   _helloIndex             = 0;
   _nextPayloadMs          = now;
+  _phase                  = Phase::Silent;   // written directly for the same reason _sync is:
+                                             // begin() is a reset, not a transition, and it
+                                             // must not log an edge that did not happen
   _panelObserved          = false;       // profiles that wait for their panel start silent
   _syncRequestObserved    = false;       // a bare 69 cannot open a Carminat session
-  _authRequestObserved    = false;       // and it cannot authorize application traffic
-  _authHelloPending       = false;
   _helloPending           = false;
   _unauthControlPending   = false;
-  _unauthControlIssued    = false;
   _unauthControlSpent     = false;
   _unauthControlBusyRetries = 0;
   _nextUnauthControlMs    = now;
@@ -98,6 +98,15 @@ void AffaDisplayBase::poll() {
   pumpRx();
   pumpSync();
   pumpTx();
+
+  // THE ONE TIME-DRIVEN PHASE EDGE. Every other transition is a frame; this one is the
+  // measured quiet interval between the last registration ACK and the first payload
+  // expiring, so it has no frame to hang on and is promoted here instead. After pumpTx()
+  // deliberately: the gate that actually holds the payloads back is in there, and a phase
+  // that said Ready before that gate opened would be a lie a console would repeat.
+  if (_phase == Phase::Settling && expired(_clock.millis(), _nextPayloadMs))
+    enterPhase(Phase::Ready);
+
   onPoll();
 
   _inPoll = false;
@@ -276,7 +285,13 @@ void AffaDisplayBase::pumpRx() {
     // linkReady(): our registration, power, text and time stay locked behind the opening.
     if (!_passive && !isOurTxId(static_cast<uint16_t>(f.id)) && shouldAutoAck(f)) {
       // The display opening its own channel is the gate for opening ours. See pumpSync().
-      if (f.len >= 1 && f.data[0] == kRegisterByte) _peerChannelSeen = true;
+      // The latch is separate from the phase because the `1C1` usually arrives DURING the
+      // burst, not after it — measured between B0#1 and B0#2 — so it has to be remembered
+      // rather than acted on in order.
+      if (f.len >= 1 && f.data[0] == kRegisterByte) {
+        _peerChannelSeen = true;
+        if (_phase == Phase::AwaitPeerChannel) enterPhase(Phase::Registering);
+      }
       sendGenericAck(static_cast<uint16_t>(f.id));
     }
 
@@ -360,7 +375,6 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
       if (f.len < 3) return true;
 
       const uint32_t now = _clock.millis();
-      const bool firstSyncRequest = !_syncRequestObserved;
       _panelObserved = true;
       _syncRequestObserved = true;
       _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
@@ -381,8 +395,12 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
         _lossReasonNext = LossReason::PanelVoided;
         setSync(SyncState::Failed, EventKind::SyncChanged);
         invalidateInFlightForSession(now);
-        _authRequestObserved = false;
-        _authHelloPending    = false;
+        // BACK TO Announced, NOT TO Silent. Our `BA` is long since on the wire and the
+        // panel is answering it; this request is the one that draws the replacement burst,
+        // immediately, and that is the self-healing path a 96-minute soak took fourteen
+        // times without a screen being lost. Falling to Silent would make us wait for an
+        // announce the panel has already had.
+        enterPhase(Phase::Announced);
         _helloPending        = false;
         _helloIndex          = 0;
         _nextHelloMs         = now;
@@ -407,28 +425,34 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
       // timer and THAT one opens the session. See SyncProfile::helloRequiresAnnounce.
       // FAIL OPEN, NEVER WEDGE. If the announce is still pending or can still be armed,
       // hold the burst back for it. But once the one-shot is SPENT without ever reaching
-      // the wire — a Rejected BA, or a busy budget burned through — `_unauthControlIssued`
-      // stays false for ever, and gating on it alone would refuse the hello on every
-      // subsequent request while nothing short of a link reset could clear it. A session
-      // opened without the announce is merely less faithful; a session that can never open
-      // is broken, so the unreachable case falls through to the ordinary path.
-      if (_profile.helloRequiresAnnounce && !_unauthControlIssued) {
+      // the wire — a Rejected BA, or a busy budget burned through — the phase stays at
+      // Silent for ever, and gating on it alone would refuse the hello on every subsequent
+      // request while nothing short of a link reset could clear it. A session opened
+      // without the announce is merely less faithful; a session that can never open is
+      // broken, so the unreachable case falls through to the ordinary path.
+      if (_profile.helloRequiresAnnounce && _phase == Phase::Silent) {
         const bool announceStillPossible =
             _unauthControlPending || !_unauthControlSpent;
         armUnauthControl(now);
         if (announceStillPossible) return true;
         AFFA_LOGW(kTag, "announce unreachable; opening without it rather than stalling");
       }
+      // ONE ORDERED QUESTION, where there used to be three booleans in a disjunction.
+      // `!_authRequestObserved || _authHelloPending` was "the opening has not released
+      // traffic yet", which is exactly `_phase` not having reached AwaitPeerChannel. The
+      // third term, `hasFlag(_sync, Failed)`, is kept because it is free and because the
+      // two are only provably equivalent as long as pumpHello() is the sole place that
+      // clears Failed — a coupling worth a belt as well as braces.
       const bool needsHelloBeforeAuth =
-          !_authRequestObserved || _authHelloPending || hasFlag(_sync, SyncState::Failed);
-      _authRequestObserved = true;
-      if (needsHelloBeforeAuth) _authHelloPending = true;
-      // Do not cancel a discovery announce armed by a preceding request or `69` in this
-      // same RX drain. The display may ask again immediately after it; that still owns
-      // exactly one BA, never a new retry stream.
-      if (firstSyncRequest || needsHelloBeforeAuth)
+          !atLeast(_phase, Phase::AwaitPeerChannel) || hasFlag(_sync, SyncState::Failed);
+      if (needsHelloBeforeAuth) {
+        enterPhase(Phase::HelloPending);
+        // Do not cancel a discovery announce armed by a preceding request or `69` in this
+        // same RX drain. The display may ask again immediately after it; that still owns
+        // exactly one BA, never a new retry stream.
         _nextSyncMs = now + syncIntervalMs();
-      if (needsHelloBeforeAuth) queueHello(now);
+        queueHello(now);
+      }
       return true;
     }
 
@@ -436,7 +460,12 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
     const bool firstSyncRequest = !_syncRequestObserved;
     _panelObserved = true;
     _syncRequestObserved = true;
-    _authRequestObserved = true;          // retained for generic profiles; they have no gate
+    // NO AUTHORIZATION GATE ON THIS FAMILY, so the opening is released the moment the panel
+    // asks and the phase goes straight to the registration wait. It is an approximation:
+    // registration here is LAZY, triggered by the first render, so this can sit at
+    // Registering with no probe queued. Step 8 of docs/REFACTOR-PLAN.md brings UpdateList
+    // onto the measured opening and the mapping stops being a shrug.
+    if (!atLeast(_phase, Phase::Registering)) enterPhase(Phase::Registering);
     // Do not append a B9 to the three-frame hello response.  The first paced heartbeat is
     // a full interval later; this keeps the opening exchange exactly hello -> registration.
     if (firstSyncRequest) _nextSyncMs = now + syncIntervalMs();
@@ -823,13 +852,14 @@ void AffaDisplayBase::pumpLink() {
   // The panel owns the opening message; wait for its next 61 11 and keep this node silent
   // until then.  Other profiles retain their existing proactive behavior.
   if (_profile.waitForPanel) { _panelObserved = false; _nextAnnounceMs = _clock.millis() + _profile.announceWhenSilentMs; }
+  // ALL THE WAY BACK. A new controller has never announced, so the opening restarts at the
+  // top — unlike the panel-voided teardown, which keeps Announced because our BA is still
+  // out there as far as the panel is concerned.
+  enterPhase(Phase::Silent);
   _syncRequestObserved  = false;
-  _authRequestObserved  = false;
-  _authHelloPending     = false;
   _helloPending         = false;
   _helloIndex           = 0;
   _unauthControlPending = false;
-  _unauthControlIssued  = false;
   _unauthControlSpent   = false;
   _nextUnauthControlMs  = now;
   _peerChannelSeen      = false;   // a new session means the display re-opens its channel
@@ -877,13 +907,28 @@ uint32_t AffaDisplayBase::syncIntervalMs() const {
   return _profile.syncIntervalMs ? _profile.syncIntervalMs : AFFA_SYNC_INTERVAL_MS;
 }
 
+// THE ONE WRITER. Every phase change in the library comes through here, which is what makes
+// the opening readable in a log: nine lines, in order, and the one that does not appear is
+// the frame that never arrived.
+void AffaDisplayBase::enterPhase(Phase p) {
+  if (p == _phase) return;
+  AFFA_LOGI(kTag, "phase %s -> %s", phaseName(_phase), phaseName(p));
+  _phase = p;
+}
+
+// The transmit gate, asked once instead of as `!_authRequestObserved || _authHelloPending`
+// in four places. A family without the authorization gate has nothing to wait for.
+bool AffaDisplayBase::openingReleased() const {
+  return !_profile.requireAuthRequest || atLeast(_phase, Phase::AwaitPeerChannel);
+}
+
 // The display's first `61 11 xx` (or its first bare `69`) earns exactly ONE announce.
 // Arming is idempotent: a panel repeating its request at 104 ms — or at line rate — must not
-// turn the one-shot into a BA stream. The latch that makes it one-shot is
-// `_unauthControlIssued`, set in pumpUnauthControl() only once the frame has actually been
-// accepted by the link.
+// turn the one-shot into a BA stream. What makes it one-shot is `_unauthControlSpent`,
+// consumed here; `Phase::Announced` is the separate fact that the frame actually left.
 void AffaDisplayBase::armUnauthControl(uint32_t now) {
-  if (_unauthControlPending || _unauthControlIssued || _unauthControlSpent) return;
+  if (_unauthControlPending || atLeast(_phase, Phase::Announced) || _unauthControlSpent)
+    return;
   _unauthControlSpent       = true;   // consumed on arm, not on success
   _unauthControlPending     = true;
   _unauthControlBusyRetries = 0;
@@ -926,8 +971,9 @@ void AffaDisplayBase::pumpUnauthControl(uint32_t now) {
 
   // BA is what the display answers with `61 11 xx`, so this is the moment the announce is
   // issued and the moment the NEXT request becomes the one that draws the burst. See
-  // SyncProfile::helloRequiresAnnounce.
-  _unauthControlIssued  = true;
+  // SyncProfile::helloRequiresAnnounce. It must mean "the display has been asked", never
+  // merely "we tried" — which is why it is set on ACCEPTANCE and nowhere else.
+  if (_phase == Phase::Silent) enterPhase(Phase::Announced);
   _nextSyncMs           = now + syncIntervalMs();
   _peerDeadlineMs       = now + AFFA_PEER_TIMEOUT_MS;
 }
@@ -982,10 +1028,17 @@ void AffaDisplayBase::pumpHello(uint32_t now) {
     _helloIndex = 0;
     _helloPending = false;
 
-    // The good 00 authorizes registration and rendering only after the final announce
-    // frame has been accepted by the nonblocking CAN link.
-    if (_authHelloPending) {
-      _authHelloPending = false;
+    // THE BURST IS OUT. This is the edge that releases registration and rendering, and it
+    // fires only once the FINAL frame has been accepted by the nonblocking CAN link — not
+    // when the burst was scheduled.
+    //
+    // Where it goes depends on whether the display has already opened its own channel. It
+    // usually has: [CAP] 4/4, the `1C1 70` lands between B0#1 and B0#2, so by the time B0#3
+    // is accepted `_peerChannelSeen` is set and AwaitPeerChannel is skipped entirely. The
+    // phase exists for the case that made a bench sit dark for a session — a panel that
+    // never answered, because it never got our announce.
+    if (_phase == Phase::HelloPending) {
+      enterPhase(_peerChannelSeen ? Phase::Registering : Phase::AwaitPeerChannel);
       setSync((_sync & ~SyncState::Failed & ~SyncState::Start), EventKind::SyncChanged);
     }
 
@@ -1021,8 +1074,10 @@ void AffaDisplayBase::pumpSync() {
   // B0#3. The display registers its channel first; we answer `5C1 74`; only then do we
   // register ours. Firing `151 70` off hello completion alone gets the order right only by
   // luck, and on a panel that is slow to open its channel it is simply wrong.
+  // `openingReleased()` is the whole of what `_authRequestObserved && !_authHelloPending`
+  // used to say here, and saying it once is the point of the phase.
   if (_profile.registerAfterHello && _peerChannelSeen && !_helloPending &&
-      _authRequestObserved && !_authHelloPending &&
+      openingReleased() &&
       !hasFlag(_sync, SyncState::FuncsReg) && !registrationQueued()) {
     (void)queueRegistrations();
   }
@@ -1045,7 +1100,7 @@ void AffaDisplayBase::pumpSync() {
   }
   // On AFFA3 NAV a `69` only says the panel is alive. Only the completed good `61 11 00`
   // authorization (and its hello) allows normal heartbeat, registration and rendering.
-  if (_profile.requireAuthRequest && (!_authRequestObserved || _authHelloPending)) return;
+  if (!openingReleased()) return;
   // KEEP-ALIVE STARTS AFTER REGISTRATION, not after the hello. In the reattach capture the
   // radio's first B9 is at 85055726 — 15.3 ms after the display's `5F1 74` completed the
   // registration, and nothing on 0x3AF between B0#3 and it. B9 is the heartbeat of an
@@ -1104,16 +1159,18 @@ void AffaDisplayBase::pumpSync() {
       _panelObserved  = false;
       _nextAnnounceMs = now + _profile.announceWhenSilentMs;
     }
+    // ALL THE WAY BACK TO Silent. A panel that stopped pinging has, as far as we can tell,
+    // stopped listening too — so the next opening owes it the whole exchange including a
+    // fresh announce, exactly as a cold bus does. This is deliberately NOT the panel-voided
+    // teardown, which keeps Announced: there the panel is demonstrably talking to us.
+    enterPhase(Phase::Silent);
     _syncRequestObserved  = false;
-    _authRequestObserved  = false;
     _peerChannelSeen      = false;   // the display re-opens its 1C1 in the new session
-    _authHelloPending     = false;
     _helloPending         = false;
     _helloIndex           = 0;
     _nextHelloMs          = now;
     _nextPayloadMs        = now;
     _unauthControlPending = false;
-    _unauthControlIssued  = false;
     _unauthControlSpent   = false;
     _nextUnauthControlMs  = now;
     _genericAckPending    = false;
@@ -1466,7 +1523,7 @@ void AffaDisplayBase::armRetry(TxJob& job, uint32_t now, bool torn, bool extendH
 bool AffaDisplayBase::linkReady() const {
   if (!_link.isLive()) return false;
   if (_passive) return true;
-  if (_profile.requireAuthRequest && (!_authRequestObserved || _authHelloPending)) return false;
+  if (!openingReleased()) return false;
   return !hasFlag(_sync, SyncState::Failed);
 }
 
@@ -1708,6 +1765,10 @@ void AffaDisplayBase::finishJob(Result r, bool allowRetry) {
       if (!registrationQueued()) {
         _nextPayloadMs = _clock.millis() + _profile.payloadAfterRegistrationMs;
         setSync(_sync | SyncState::FuncsReg, EventKind::Registered);
+        // THE WHOLE TABLE IS ACKED. Not Ready yet: the captured radio waits ~400 ms before
+        // its first payload, and a render inside that window is a screen the panel takes
+        // and does not draw. poll() promotes Settling -> Ready when the interval expires.
+        enterPhase(Phase::Settling);
       }
     } else {
       // IT NO LONGER TAKES THE PAYLOADS WITH IT. The legacy affa3_send propagated a failed
@@ -1916,9 +1977,7 @@ Result AffaDisplayBase::transmitKey(Key k, KeyEdge e) {
     return Result::NotSupported;
   }
   if (!_link.isLive()) return Result::LinkDown;
-  if (!_passive && _profile.requireAuthRequest &&
-      (!_authRequestObserved || _authHelloPending))
-    return Result::NoSync;
+  if (!_passive && !openingReleased()) return Result::NoSync;
 
   Frame f;
   f.id      = id;
@@ -2039,43 +2098,11 @@ void AffaDisplayBase::setPassive(bool on) {
 bool AffaDisplayBase::passive() const { return _passive; }
 void AffaDisplayBase::setSelfAck(bool on) { _selfAck = on; }
 
-// DERIVED, NOT STORED — step 3 of docs/REFACTOR-PLAN.md. A stored copy introduced beside
-// the booleans would be a tenth thing that can disagree with the other nine, which is the
-// disease rather than the cure. Step 4 removes the booleans and makes this the truth; until
-// then it is a reading of them, and the phase tests pin that reading against the wire so
-// the inversion has something to be checked against.
-Phase AffaDisplayBase::phase() const {
-  // Registration is the one bit both families agree on, and it is what separates an opening
-  // from a session, so it is read first.
-  if (hasFlag(_sync, SyncState::FuncsReg))
-    return expired(_clock.millis(), _nextPayloadMs) ? Phase::Ready : Phase::Settling;
-
-  // The burst is mid-flight while either latch is up: `_helloPending` means frames are still
-  // to be offered, `_authHelloPending` means the last one has not been accepted by the link.
-  // Application TX is closed for exactly as long as this is true.
-  if (_helloPending || _authHelloPending) return Phase::HelloPending;
-
-  if (_profile.requireAuthRequest) {
-    // A complete request has been answered and its burst is out. What the opening waits on
-    // next is the DISPLAY's own channel — measured 4/4, `1C1 70` precedes our `151 70` by
-    // ~61 ms — and only then our probes. A family that registers lazily has no such gate.
-    if (_authRequestObserved)
-      return (_peerChannelSeen || !_profile.registerAfterHello) ? Phase::Registering
-                                                                : Phase::AwaitPeerChannel;
-    // The conversation has started — we have heard the panel, or our own `BA` is out or on
-    // its way — but no request has drawn the burst yet. On the measured opening this is
-    // exactly the ~104 ms between the panel's first request and its second.
-    if (_unauthControlIssued || _unauthControlPending || _panelObserved)
-      return Phase::Announced;
-    return Phase::Silent;
-  }
-
-  // Families without the auth gate: a request opens the session directly and registration is
-  // lazy, so there is no AwaitPeerChannel and no Announced to report. Anything after the
-  // first panel frame is an opening waiting on registrations that may not be queued yet.
-  // Step 8 brings this family onto the same rules and the mapping stops being approximate.
-  return _panelObserved ? Phase::Registering : Phase::Silent;
-}
+// STORED, AND THE SOURCE OF TRUTH — step 4 of docs/REFACTOR-PLAN.md is done. It was derived
+// from the booleans for exactly one commit, long enough for
+// test_phase_walks_the_measured_opening_in_order to pin the reading against the wire; that
+// test is unchanged across the inversion, which is what makes the inversion checkable at all.
+Phase AffaDisplayBase::phase() const { return _phase; }
 
 uint32_t AffaDisplayBase::sessionsLost() const { return _sessionsLost; }
 uint32_t AffaDisplayBase::lastSessionLossMs() const { return _lastSessionLossMs; }
@@ -2084,7 +2111,7 @@ LossReason AffaDisplayBase::lastLossReason() const { return _lastLossReason; }
 SyncState AffaDisplayBase::syncState() const { return _sync; }
 bool AffaDisplayBase::synced() const {
   if (hasFlag(_sync, SyncState::Failed)) return false;
-  return !_profile.requireAuthRequest || (_authRequestObserved && !_authHelloPending);
+  return openingReleased();
 }
 bool      AffaDisplayBase::registered() const { return hasFlag(_sync, SyncState::FuncsReg); }
 bool      AffaDisplayBase::busy() const { return _qCount > 0; }
