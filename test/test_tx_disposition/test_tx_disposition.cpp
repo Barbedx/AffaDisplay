@@ -166,7 +166,7 @@ void test_busy_hello_does_not_authorize_until_the_full_burst_is_accepted(void) {
 // successful issue.
 //
 // RENAMED from ..._start_pair_..._after_b9_and_ba: the bootstrap is a bare BA now.
-// SyncProfile::bootstrapAliveFrame is false on this family — [CAP] the reattach capture
+// The announce is BA-only on every family now — [CAP] the reattach capture
 // "aknowledge offed display.csv" at 84945066 opens with one unprompted `3AF BA` and no B9.
 // The property being pinned is unchanged and is now sharper, because "issued" can no longer
 // be half-true: there is exactly one frame, and it is either out or it is not.

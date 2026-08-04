@@ -91,10 +91,12 @@ inline constexpr uint8_t kSyncRequestByte1 = 0x11;  // ... our panel's token. On
 //     3CF  61 11 00 A3 A3 A3 A3 A3    2026-07-26, after a completed handshake
 //     3CF  61 11 01 A3 A3 A3 A3 A3    2026-07-29, from power-on, never acknowledged
 //
-// Carminat profile handling is deliberately NOT based on this compatibility flag: hardware
-// evidence establishes `61 11 01` as bad auth and `61 11 00` as the good, display-originated
-// authorization request. See SyncProfile::authRequestByte2. This constant remains for
-// profiles that use the legacy Start meaning.
+// CARMINAT DOES NOT READ THIS BYTE AT ALL, and the sentence that used to stand here — "`61
+// 11 01` is bad auth and `61 11 00` is the good request" — was measured to be wrong.
+// [CAP] "aknowledge offed display cONNECT OT POWER.csv" completes an entire session on
+// sixteen `01`s and not one `00`. Any complete `61 11 xx` is the same request; the low bit
+// reports the display's own state. The constant remains only for the older UpdateList
+// compatibility path in handleSyncFrame(), which still uses the legacy Start meaning.
 inline constexpr uint8_t kSyncStartFlag    = 0x01;
 inline constexpr uint8_t kSyncPeerAlive    = 0x69;  // ~1 Hz ping. data[0] is the ENTIRE
                                                     // test; nothing else may be read.

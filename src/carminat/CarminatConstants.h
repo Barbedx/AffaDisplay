@@ -102,34 +102,33 @@ enum class CarminatHelloProfile : uint8_t {
 // near-collision. It is categorically not a reply. With replyToPing on we emitted the paced
 // B9 AND a pong ~4 ms later, twice the OEM rate. docs/PROTOCOL.md §3.
 //
+// SIX FIELDS SHORTER THAN IT WAS, and not one wire byte different. `authRequestByte2`,
+// `helloAfterBootstrapRequest`, `helloOnNonAuthRequest`, `oneShotResyncOnStart`,
+// `oneShotResyncOnPeerAlive` and `bootstrapAliveFrame` all held settled measurements and are
+// now rules in AffaDisplayBase — see the header of AffaSyncProfile.h for which fact went
+// where. What this profile still carries is identity, timing, and the four questions the two
+// families genuinely answer differently.
+//
 //   syncId, syncReplyId, replyFlag, alive, request, requestArg, filler, hello, helloCount,
-//   replyToPing, waitForPanel, sendSyncRequest, requireAuthRequest, authRequestByte2,
-//   oneShotResyncOnStart, helloMinMs, helloOnNonAuthRequest, helloFirstDelayMs,
-//   helloFrameGapMs, payloadAfterRegistrationMs, syncIntervalMs, oneShotResyncOnPeerAlive,
-//   helloAfterBootstrapRequest, registerAfterHello, announceWhenSilentMs
+//   replyToPing, waitForPanel, sendSyncRequest, requireAuthRequest, helloMinMs,
+//   helloFirstDelayMs, helloFrameGapMs, payloadAfterRegistrationMs, syncIntervalMs,
+//   registerAfterHello, announceWhenSilentMs, helloRequiresAnnounce
 inline constexpr SyncProfile kSync = {
     kIdSync, kIdSyncReply, 0x0400, 0xB9, 0xBA, 0x00, kFiller, kHello, 3,
     false, // B9 free-runs at 500 ms. The panel's 69 is an independent timer, not a request.
     true,  // Do not speak until the AFFA3 NAV panel speaks first.
     false, // Never spray BA probes as periodic recovery.
     true,  // A bare 69 is only a ping; only a full 61 11 xx starts auth/registration.
-    0x00,  // Good authorization byte.
-    true,  // 61 11 01 gets one nonblocking B9 + BA bootstrap, never a repeating stream.
     kHelloMinMs,
-    false, // Handled by helloAfterBootstrapRequest below, which also opens the auth gate.
     kHelloFirstDelayMs,
     kHelloFrameGapMs,
     kPayloadAfterRegistrationMs,
     kSyncIntervalMs,
-    true,  // A bare 69 can be the measured first display message: one B9 + BA discovery.
-    true,  // A 61 11 01 that ANSWERS our BA is a full request. Measured, not assumed:
-           // "cONNECT OT POWER" completes a whole session on 01 with zero 00 frames.
     true,  // 151 70 / 1F1 70 follow the third B0 by 0.10-0.59 ms, with no application
            // involvement. Registration belongs to the opening on this family.
     30000, // Announce BA every 30 s into a SILENT bus. waitForPanel above is a deadlock
            // on its own: a display that has gone to sleep never speaks, so neither do we
            // (measured rx 0 / tx 0). The OEM radio initiates after a reattach.
-    false, // No B9 in the bootstrap either: BA asks, B9 only says "still here".
     true,  // BA FIRST; the NEXT 61 11 draws the burst. 4/4 in the captures, and proven on
            // hardware 2026-08-04 — without it the panel never opens its own 1C1 channel.
 };
@@ -141,23 +140,17 @@ inline constexpr SyncProfile kSync = {
 // that has demonstrated the legacy opening; `kSync` above is the capture-backed default.
 inline constexpr SyncProfile kLegacyMeganeCanSync = {
     kIdSync, kIdSyncReply, 0x0400, 0xB9, 0xBA, 0x00, kFiller, kLegacyHello, 3,
-    true,  // replyToPing
+    true,  // replyToPing — the ONE wire difference this profile still keeps
     true,  // waitForPanel
     false, // no periodic BA recovery
-    true,  // still require good 61 11 00
-    0x00,
-    true,  // one bounded 01 discovery pair
+    true,  // same panel-led opening as kSync
     kHelloMinMs,
-    false, // 01 never releases application output
     0,     // old source emitted its first 70 in the receive pass
     0,     // old source emitted the two B0 frames immediately after it
     kPayloadAfterRegistrationMs,
     kSyncIntervalMs,
-    true,  // preserve the 69-first discovery path for this same panel family
-    true,  // same panel, same 61 11 01 rule — only the hello spelling differs here
     true,  // same panel, same unconditional registration after the final hello frame
     30000, // same panel, same need to break a two-way silence
-    false, // same panel, same BA-only bootstrap
     true,  // same panel, same BA-before-hello rule
 };
 

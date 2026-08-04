@@ -236,11 +236,16 @@ capture-backed rules are in §3.0: one bounded announce into silence, no periodi
 > **bare `BA` with no `B9` in front of it**. Both readings fit a radio whose free-running
 > 500 ms heartbeat simply happened to tick during the opening.
 >
-> **This library transmits `BA` alone** — `carminat::kSync.bootstrapAliveFrame = false`. `BA`
-> is the question ("is anyone there?"); `B9` says "still here", which is meaningless before
-> there is a session to be still in, and it is noise in the phase that can least afford it.
-> Proven on glass 2026-08-04: handshake, registration, display-on and clock all complete with
-> the announce as a bare `BA`. Set `bootstrapAliveFrame = true` to reproduce the other form.
+> **This library transmits `BA` alone**, unconditionally and for every family. `BA` is the
+> question ("is anyone there?"); `B9` says "still here", which is meaningless before there is
+> a session to be still in, and it is noise in the phase that can least afford it. Proven on
+> glass 2026-08-04: handshake, registration, display-on and clock all complete with the
+> announce as a bare `BA`.
+>
+> This was `SyncProfile::bootstrapAliveFrame` until the flag collapse of 2026-08-04. It is
+> code now, in `AffaDisplayBase::pumpUnauthControl()`, and the two-stage sender that existed
+> to resume a half-delivered pair went with it. Reproducing the other form means changing
+> that function, deliberately, with the reason written down.
 
 > **Retracted here 2026-08-04:** this paragraph used to end *"…one discovery `B9` + `BA` pair
 > for `01` … and no application output before the later good `00`."* There is no "later good

@@ -40,13 +40,12 @@ bool AffaDisplayBase::begin() {
   _nextPayloadMs          = now;
   _panelObserved          = false;       // profiles that wait for their panel start silent
   _syncRequestObserved    = false;       // a bare 69 cannot open a Carminat session
-  _authRequestObserved    = false;       // `01` bootstrap cannot authorize app traffic
+  _authRequestObserved    = false;       // and it cannot authorize application traffic
   _authHelloPending       = false;
   _helloPending           = false;
   _unauthControlPending   = false;
   _unauthControlIssued    = false;
   _unauthControlSpent     = false;
-  _unauthControlStage     = BootstrapStage::None;
   _unauthControlBusyRetries = 0;
   _nextUnauthControlMs    = now;
   // One full interval of politeness before we announce: give a panel that is merely slow
@@ -334,11 +333,26 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
   if (f.len < 1) return true;
 
   if (f.data[0] == kSyncRequestByte0 && f.len >= 2 && f.data[1] == kSyncRequestByte1) {
-    // Carminat keeps two stages separate. Every full `61 11 xx` gets the proven hello
-    // response, but only `00` releases registration and payload traffic. `01` asks for
-    // one control bootstrap; it never becomes an authorization shortcut.
+    // ANY COMPLETE `61 11 xx` IS THE SAME REQUEST. BYTE 2 IS NOT AN AUTHORIZATION GRADE.
+    //
+    // MEASURED, NOT ASSUMED. docs/captures/"aknowledge offed display cONNECT OT POWER.csv"
+    // is a real OEM radio meeting a display that had been powered with no radio present.
+    // That display repeats `3CF 61 11 01` every ~104 ms and NEVER sends `61 11 00` — not
+    // once in sixteen requests — yet the radio answers it with the ordinary B0 announce
+    // burst 30.75 ms later and the session completes: registration, `03 52`, ISO-TP text,
+    // and the `01` never reappears. The low bit reports the panel's own state.
+    //
+    // THIS BRANCH USED TO BE TWO. A "good byte" arm gated on `authRequestByte2`, plus a
+    // dimmer copy for every other spelling gated on `helloOnNonAuthRequest` and
+    // `oneShotResyncOnStart`, with `helloAfterBootstrapRequest` as the trapdoor between
+    // them. Two of this session's four protocol bugs lived in that seam and both were the
+    // same shape — a special case standing in for a general rule (see HANDOFF.md, "How this
+    // project gets things wrong"). The real gate is our own `BA`, never the byte, and it is
+    // `helloRequiresAnnounce` below.
     if (_profile.requireAuthRequest) {
-      // A short 61 11 has no byte 2 on the wire. Do not read stale storage or answer it.
+      // A short `61 11` has no byte 2 on the wire, and an incomplete request is not one.
+      // Do not read stale storage: the OEM corpus really does carry 0x3CF at DLC 1 and
+      // DLC 2, and the legacy shim read uninitialised stack here.
       if (f.len < 3) return true;
 
       const uint32_t now = _clock.millis();
@@ -347,103 +361,69 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
       _syncRequestObserved = true;
       _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
 
-      // Two doors into the same room. The profile's good byte is one; the other is a START
-      // request that arrives after our own BA, which the OEM captures show being answered
-      // with the identical B0 burst. `_unauthControlIssued` is precisely "BA has gone out",
-      // so a `01` on an empty bus still gets only discovery. See SyncProfile.
-      const bool bootstrapAnswered = _profile.helloAfterBootstrapRequest &&
-                                     _unauthControlIssued &&
-                                     f.data[2] == kSyncStartFlag;
-      if (f.data[2] == _profile.authRequestByte2 || bootstrapAnswered) {
-        // ANY complete `61 11 xx` that arrives once we already hold registrations says the
-        // panel forgot us: "your registration is void". In every OEM capture a registered
-        // display stops sending `61 11` ENTIRELY — so one arriving here is real loss, never
-        // chatter, and the value of xx is irrelevant to that.
-        //
-        // THIS USED TO READ `bootstrapAnswered && ...`, which restricted the teardown to
-        // `61 11 01` and let `61 11 00` fall straight through: needsHelloBeforeAuth then
-        // computed false and NOTHING happened. Measured on the bench — the panel sent
-        // `61 11 00` twenty-six times, then fifteen more, while we cheerfully kept pushing
-        // fullscreen rows at it. A deauthorized panel asking to re-open must stop the
-        // application traffic, not be talked over.
-        if (hasFlag(_sync, SyncState::FuncsReg)) {
-          AFFA_LOGW(kTag, "61 11 %02X while registered - the panel voided us; reopening",
-                    static_cast<unsigned>(f.data[2]));
-          setSync(SyncState::Failed, EventKind::SyncChanged);
-          invalidateInFlightForSession(now);
-          _authRequestObserved = false;
-          _authHelloPending    = false;
-          _helloPending        = false;
-          _helloIndex          = 0;
-          _nextHelloMs         = now;
-        }
-        // The good request may arrive while the previous hello burst is still inside its
-        // rate floor. Keep application TX closed until the hello that answers THIS phase
-        // has actually been emitted.
-        // Our BA has to be on the wire before the burst means anything. The first request
-        // arms it and is answered with nothing else; the panel asks again on its own ~104 ms
-        // timer and THAT one opens the session. See SyncProfile::helloRequiresAnnounce.
-        // FAIL OPEN, NEVER WEDGE. If the announce is still pending or can still be armed,
-        // hold the burst back for it. But once the one-shot is SPENT without ever reaching
-        // the wire — a Rejected BA, or a busy budget burned through — `_unauthControlIssued`
-        // stays false for ever, and gating on it alone would refuse the hello on every
-        // subsequent request while nothing short of a link reset could clear it. A session
-        // opened without the announce is merely less faithful; a session that can never open
-        // is broken, so the unreachable case falls through to the ordinary path.
-        if (_profile.helloRequiresAnnounce && !_unauthControlIssued) {
-          const bool announceStillPossible =
-              _unauthControlPending || !_unauthControlSpent;
-          armUnauthControl(now);
-          if (announceStillPossible) return true;
-          AFFA_LOGW(kTag, "announce unreachable; opening without it rather than stalling");
-        }
-        const bool needsHelloBeforeAuth =
-            !_authRequestObserved || _authHelloPending || hasFlag(_sync, SyncState::Failed);
-        _authRequestObserved = true;
-        if (needsHelloBeforeAuth) _authHelloPending = true;
-        // Do not cancel a discovery pair armed by a preceding 01/69 in this same RX
-        // drain. The display may send 00 immediately after it; that still owns exactly
-        // one B9 -> BA transaction, never a new retry stream.
-        if (firstSyncRequest || needsHelloBeforeAuth)
-          _nextSyncMs = now + syncIntervalMs();
-        if (needsHelloBeforeAuth) queueHello(now);
-        return true;
-      }
-
-      // A non-good request tears down any old registration. We still reply with hello:
-      // that is the legacy Carminat wire sequence, and it lets the panel progress to 00.
-      const bool wasAuthorized = _authRequestObserved || _authHelloPending ||
-                                 !hasFlag(_sync, SyncState::Failed);
-      if (wasAuthorized) {
-        _authRequestObserved = false;
-        _authHelloPending = false;
-        _helloPending = false;
-        _helloIndex = 0;
-        _nextHelloMs = now;
-        _genericAckPending = false;
-        _genericAckBusyRetries = 0;
+      // A complete `61 11 xx` arriving once we already hold registrations says the panel
+      // forgot us: "your registration is void". In every OEM capture a registered display
+      // stops sending `61 11` ENTIRELY — so one arriving here is real loss, never chatter,
+      // and the value of xx is irrelevant to that.
+      //
+      // THIS USED TO BE RESTRICTED TO `61 11 01`, and `61 11 00` fell straight through:
+      // needsHelloBeforeAuth then computed false and NOTHING happened. Measured on the
+      // bench — the panel sent `61 11 00` twenty-six times, then fifteen more, while we
+      // cheerfully kept pushing fullscreen rows at it. A deauthorized panel asking to
+      // re-open must stop the application traffic, not be talked over.
+      if (hasFlag(_sync, SyncState::FuncsReg)) {
+        AFFA_LOGW(kTag, "61 11 %02X while registered - the panel voided us; reopening",
+                  static_cast<unsigned>(f.data[2]));
         setSync(SyncState::Failed, EventKind::SyncChanged);
         invalidateInFlightForSession(now);
-        dropRegistrations();
+        _authRequestObserved = false;
+        _authHelloPending    = false;
+        _helloPending        = false;
+        _helloIndex          = 0;
+        _nextHelloMs         = now;
+        // THE THREE PLACES A REGISTRATION IS VOIDED MUST AGE THE QUEUE IDENTICALLY. The
+        // re-registration this provokes takes time the held renders were never budgeted
+        // for; without a fresh window a payload that aged politely while REGISTERED is
+        // given up as NoSync by pumpTx()'s hold check before the re-registration it now
+        // depends on has even been spliced. Same re-arm as the peer-timeout and the
+        // generic-profile Start path. It used to live only in the deleted second branch,
+        // which is to say it was missing from the one path the bench actually exercises.
         for (uint8_t i = 0; i < _qCount; ++i) {
           if ((_queue[i].kind == JobKind::Payload || _queue[i].kind == JobKind::Reassert) &&
               !_queue[i].started)
             _queue[i].holdUntilMs = now + AFFA_TX_HOLD_MS;
         }
-        // A new display START after an authorized session earns one fresh discovery
-        // transaction. A duplicate START while already failed does not.
-        _unauthControlPending = false;
-        _unauthControlIssued = false;
-        _unauthControlSpent = false;
-        _unauthControlStage = BootstrapStage::None;
-        _unauthControlBusyRetries = 0;
       }
-      if (_profile.helloOnNonAuthRequest) queueHello(now);
-
-      // Only the observed START spelling gets the single control pair. Unknown xx values
-      // are hello-only; retransmitted 01 frames cannot rebuild a BA-per-second stream.
-      if (f.data[2] == kSyncStartFlag && _profile.oneShotResyncOnStart)
+      // The request may arrive while the previous hello burst is still inside its rate
+      // floor. Keep application TX closed until the hello that answers THIS phase has
+      // actually been emitted.
+      // Our BA has to be on the wire before the burst means anything. The first request
+      // arms it and is answered with nothing else; the panel asks again on its own ~104 ms
+      // timer and THAT one opens the session. See SyncProfile::helloRequiresAnnounce.
+      // FAIL OPEN, NEVER WEDGE. If the announce is still pending or can still be armed,
+      // hold the burst back for it. But once the one-shot is SPENT without ever reaching
+      // the wire — a Rejected BA, or a busy budget burned through — `_unauthControlIssued`
+      // stays false for ever, and gating on it alone would refuse the hello on every
+      // subsequent request while nothing short of a link reset could clear it. A session
+      // opened without the announce is merely less faithful; a session that can never open
+      // is broken, so the unreachable case falls through to the ordinary path.
+      if (_profile.helloRequiresAnnounce && !_unauthControlIssued) {
+        const bool announceStillPossible =
+            _unauthControlPending || !_unauthControlSpent;
         armUnauthControl(now);
+        if (announceStillPossible) return true;
+        AFFA_LOGW(kTag, "announce unreachable; opening without it rather than stalling");
+      }
+      const bool needsHelloBeforeAuth =
+          !_authRequestObserved || _authHelloPending || hasFlag(_sync, SyncState::Failed);
+      _authRequestObserved = true;
+      if (needsHelloBeforeAuth) _authHelloPending = true;
+      // Do not cancel a discovery announce armed by a preceding request or `69` in this
+      // same RX drain. The display may ask again immediately after it; that still owns
+      // exactly one BA, never a new retry stream.
+      if (firstSyncRequest || needsHelloBeforeAuth)
+        _nextSyncMs = now + syncIntervalMs();
+      if (needsHelloBeforeAuth) queueHello(now);
       return true;
     }
 
@@ -525,12 +505,17 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
     const bool firstPanelFrame = !_panelObserved;
     _panelObserved = true;
 
-    // The Carminat panel's `69` is not authorization. It may nevertheless be the very
-    // first display message in the real capture, so profiles that opt in get one bounded
-    // B9 -> BA discovery transaction here. A bare ping still cannot schedule B0, register
-    // functions, or release a render; only the later good 61 11 request can do that.
+    // The panel's `69` is not authorization. It may nevertheless be the very first display
+    // message in the real capture, so a panel-led family answers it with the one bounded
+    // `BA` announce here. A bare ping still cannot schedule B0, register functions, or
+    // release a render; only a complete `61 11 xx` can do that.
+    //
+    // ONLY BEFORE THE FIRST REQUEST. `_syncRequestObserved` is the guard, not a flag: once
+    // the conversation has started the announce belongs to the request path, and a ping
+    // arriving mid-session must not re-open it. This used to be gated additionally on
+    // `oneShotResyncOnPeerAlive`, which no profile that can reach this line sets false.
     if (_profile.requireAuthRequest && !_syncRequestObserved) {
-      if (_profile.oneShotResyncOnPeerAlive) armUnauthControl(now);
+      armUnauthControl(now);
       return true;
     }
 
@@ -885,80 +870,59 @@ uint32_t AffaDisplayBase::syncIntervalMs() const {
   return _profile.syncIntervalMs ? _profile.syncIntervalMs : AFFA_SYNC_INTERVAL_MS;
 }
 
-// The display's `61 11 01` (and, where profiled, its first bare `69`) earns exactly ONE
-// B9 -> BA discovery transaction. Arming is idempotent: a panel repeating its request at
-// 104 ms — or at line rate — must not turn the one-shot into a BA stream. The latch that
-// makes it one-shot is `_unauthControlIssued`, set in pumpSync() only once the pair has
-// actually been accepted by the link.
+// The display's first `61 11 xx` (or its first bare `69`) earns exactly ONE announce.
+// Arming is idempotent: a panel repeating its request at 104 ms — or at line rate — must not
+// turn the one-shot into a BA stream. The latch that makes it one-shot is
+// `_unauthControlIssued`, set in pumpUnauthControl() only once the frame has actually been
+// accepted by the link.
 void AffaDisplayBase::armUnauthControl(uint32_t now) {
   if (_unauthControlPending || _unauthControlIssued || _unauthControlSpent) return;
   _unauthControlSpent       = true;   // consumed on arm, not on success
   _unauthControlPending     = true;
-  _unauthControlStage       = BootstrapStage::None;
   _unauthControlBusyRetries = 0;
   _nextUnauthControlMs      = now;
 }
 
-// The Carminat START / 01 bootstrap: exactly B9 then BA, once, after RX has drained. It is
-// neither a periodic failure retry nor authorization.
+// THE ANNOUNCE IS A BARE `BA`, ONCE, AFTER RX HAS DRAINED. It is neither a periodic failure
+// retry nor authorization.
 //
-// STAGED, AND THE STAGE IS THE POINT. B9 and BA are two frames, not one transaction: once
-// B9 has physically left, retrying the "pair" would put a second B9 on a bus that already
-// has one. `_unauthControlStage` records how far the pair actually got, so a locally busy
-// controller resumes at the frame it failed on.
+// NO B9 IN FRONT OF IT. `BA` asks the question — "is anyone there?" — and `B9` answers
+// "still here", which is only meaningful once there is a session to be still in. [CAP] the
+// reattach capture "aknowledge offed display.csv" at 84945066 is the cleanest look at a
+// radio opening a conversation and it is a bare `3AF BA`. Two other captures do show a B9
+// before registration ("cONNECT OT POWER" at 147328246, "offed display 2" at 9850470), both
+// consistent with a radio whose free-running 500 ms heartbeat simply ticked during the
+// opening rather than with a two-frame bootstrap. We take the quieter reading, and it is
+// what ran 1 h 36 m on glass. This used to be `SyncProfile::bootstrapAliveFrame`, and with
+// it goes the two-stage sender: one frame is one frame, so there is no stage to resume at.
 //
-// EVERY STAGE IS BOUNDED. A permanently undeliverable bootstrap must cost at most one offer
-// plus kBootstrapBusyRetries per frame — a panel repeating `01`/`69` at its own cadence
-// cannot re-arm the budget, because armUnauthControl() refuses while this is still pending.
-// Without that bound a stuck controller turns the CAN task into an infinite B9/BA producer.
+// IT IS BOUNDED. A permanently undeliverable announce must cost at most one offer plus
+// kBootstrapBusyRetries — a panel repeating its request at its own cadence cannot re-arm the
+// budget, because armUnauthControl() refuses while this is still pending. Without that bound
+// a stuck controller turns the CAN task into an infinite BA producer.
 void AffaDisplayBase::pumpUnauthControl(uint32_t now) {
   if (!expired(now, _nextUnauthControlMs)) return;
 
-  // Straight to the request on profiles that keep B9 for an established session.
-  if (_unauthControlStage == BootstrapStage::None && !_profile.bootstrapAliveFrame)
-    _unauthControlStage = BootstrapStage::Alive;
-
-  if (_unauthControlStage == BootstrapStage::None) {
-    const TxDisposition sent = sendAlive();
-    if (sent == TxDisposition::Accepted) {
-      _unauthControlStage       = BootstrapStage::Alive;
-      _unauthControlBusyRetries = 0;
-    } else if (sent == TxDisposition::Busy &&
-               _unauthControlBusyRetries < kBootstrapBusyRetries) {
-      ++_unauthControlBusyRetries;
-      _nextUnauthControlMs = now + AFFA_TX_RETRY_MS;
-      return;
-    } else {
-      // Rejected, or the retry budget is gone. The panel repeats its request on its own
-      // timer; the recovery path owns a controller this broken.
-      _unauthControlPending     = false;
-      _unauthControlStage       = BootstrapStage::None;
-      _unauthControlBusyRetries = 0;
-      return;
-    }
+  const TxDisposition sent = sendSyncRequest();
+  if (sent == TxDisposition::Busy && _unauthControlBusyRetries < kBootstrapBusyRetries) {
+    ++_unauthControlBusyRetries;
+    _nextUnauthControlMs = now + AFFA_TX_RETRY_MS;
+    return;
   }
 
-  if (_unauthControlStage == BootstrapStage::Alive) {
-    const TxDisposition sent = sendSyncRequest();
-    if (sent == TxDisposition::Busy &&
-        _unauthControlBusyRetries < kBootstrapBusyRetries) {
-      ++_unauthControlBusyRetries;
-      _nextUnauthControlMs = now + AFFA_TX_RETRY_MS;
-      return;                        // ONLY the BA retries — the B9 is already on the wire
-    }
-    _unauthControlPending     = false;
-    _unauthControlBusyRetries = 0;
-    if (sent != TxDisposition::Accepted) {
-      _unauthControlStage = BootstrapStage::None;
-      return;
-    }
-    // BA is what the display answers with `61 11 xx`, so this is the moment the one-shot is
-    // spent and the moment a later `01` becomes a full request. See helloAfterBootstrapRequest.
-    _unauthControlStage   = BootstrapStage::Request;
-    _unauthControlIssued  = true;
-    _nextSyncMs           = now + syncIntervalMs();
-    _peerDeadlineMs       = now + AFFA_PEER_TIMEOUT_MS;
-  }
+  // Rejected, or the retry budget is gone: the panel repeats its request on its own timer,
+  // and the recovery path owns a controller this broken. `_unauthControlSpent` stays set, so
+  // handleSyncFrame()'s fail-open arm is what stops that becoming a permanent wedge.
+  _unauthControlPending     = false;
+  _unauthControlBusyRetries = 0;
+  if (sent != TxDisposition::Accepted) return;
+
+  // BA is what the display answers with `61 11 xx`, so this is the moment the announce is
+  // issued and the moment the NEXT request becomes the one that draws the burst. See
+  // SyncProfile::helloRequiresAnnounce.
+  _unauthControlIssued  = true;
+  _nextSyncMs           = now + syncIntervalMs();
+  _peerDeadlineMs       = now + AFFA_PEER_TIMEOUT_MS;
 }
 
 void AffaDisplayBase::queueHello(uint32_t now) {

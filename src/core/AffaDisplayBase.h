@@ -287,7 +287,6 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   enum class TxState  : uint8_t { Idle, SendingFrame, WaitAck };
   enum class JobKind  : uint8_t { Payload, Registration, Reassert };
   enum class SelfAck  : uint8_t { None, Partial, Done };
-  enum class BootstrapStage : uint8_t { None, Alive, Request };
 
   struct TxJob {
     uint16_t   funcId     = 0;
@@ -358,8 +357,8 @@ class AffaDisplayBase : public IDisplay, public IPanel {
                                          // drift apart byte-wise
   TxDisposition sendSyncRequest();       // the BA/7A frame, shared by normal and one-shot
                                          // recovery so their bytes cannot drift either
-  void armUnauthControl(uint32_t now);   // one bounded B9 -> BA discovery transaction
-  void pumpUnauthControl(uint32_t now);  // advances the current stage, never an open retry
+  void armUnauthControl(uint32_t now);   // one bounded `BA` announce, never a stream
+  void pumpUnauthControl(uint32_t now);  // offers it once, with a bounded Busy retry
   void queueHello(uint32_t now);         // arms one profile-paced hello sequence
   void pumpHello(uint32_t now);           // submits at most the profile-permitted prefix
   uint32_t syncIntervalMs() const;        // profile override or AFFA_SYNC_INTERVAL_MS
@@ -443,11 +442,11 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // reaches us, preventing the legacy FAILED -> BA-per-second startup storm.
   bool      _panelObserved = false;
   // A complete `61 11 xx` was received. This is deliberately not the same as a `69`:
-  // Carminat may answer a ping after the bootstrap, but a bare ping never opens the bus.
+  // a panel may ping after the announce, but a bare ping never opens the bus.
   bool      _syncRequestObserved = false;
   // Some profiles make an explicit distinction between the panel being alive (`69`) and
-  // authorizing application traffic (`61 11 00`). For those profiles an early ping or
-  // `61 11 01` bootstrap must never unlock registration or rendering.
+  // authorizing application traffic (a complete `61 11 xx`). For those profiles an early
+  // ping must never unlock registration or rendering.
   bool      _authRequestObserved = false;
   // A good authorization was seen but its required hello burst is still rate-limited. It
   // keeps TX gated until the panel has actually received (or at least been offered) hello.
@@ -455,22 +454,21 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // A request repeated without CAN ACK is not permission to enqueue another full hello
   // burst. One deferred reply preserves the latest protocol state without a TX storm.
   bool      _helloPending = false;
-  // `61 11 01` (and, where profiled, the first bare 69) gets exactly one B9 -> BA
-  // discovery transaction. `Issued` is consumed on arm even if the local controller refuses
-  // it, so line-rate duplicate panel frames cannot recreate a BA stream.
+  // The display's first `61 11 xx` (or its first bare 69) gets exactly one `BA` announce.
+  // `Spent` is consumed on arm even if the local controller refuses it, so line-rate
+  // duplicate panel frames cannot recreate a BA stream.
   bool      _unauthControlPending = false;
-  // BA was physically accepted by the link. This is the evidence helloAfterBootstrapRequest
+  // BA was physically accepted by the link. This is the evidence helloRequiresAnnounce
   // needs, so it must mean "the display has been asked", never merely "we tried".
   bool      _unauthControlIssued = false;
-  // The one-shot BUDGET, consumed on arm. Separate from _unauthControlIssued on purpose: a
-  // bootstrap that the controller refused outright has spent its turn without ever putting
-  // BA on the wire, and a panel repeating `01`/`69` at line rate must not buy another.
+  // The one-shot BUDGET, consumed on arm. Separate from _unauthControlIssued on purpose: an
+  // announce that the controller refused outright has spent its turn without ever putting
+  // BA on the wire, and a panel repeating its request at line rate must not buy another.
   // Only a session teardown clears it.
   bool      _unauthControlSpent = false;
-  BootstrapStage _unauthControlStage = BootstrapStage::None;
   uint8_t   _unauthControlBusyRetries = 0;
-  // Separate from _nextSyncMs: a START/first-69 followed by 00 in the same RX drain still
-  // emits its B9 + BA immediately, but never as a periodic local retry.
+  // Separate from _nextSyncMs: a first request followed by another in the same RX drain
+  // still emits its BA immediately, but never as a periodic local retry.
   uint32_t  _nextUnauthControlMs = 0;
   // Next slow announce while no panel has ever been heard. See announceWhenSilentMs.
   uint32_t  _nextAnnounceMs = 0;

@@ -7,6 +7,31 @@ namespace affa {
 // in AffaDisplayBase::pumpSync(). Duplicating the FSM is what let the same two defects
 // live twice — a watchdog counting tick() CALLS instead of milliseconds, and a delay(100)
 // in the sync-request branch.
+//
+// WHAT A FIELD IN HERE IS FOR, since six of them have just been deleted. A profile field is
+// a place the two families GENUINELY differ, or a measured timing. It is NOT a place to
+// record a question nobody had answered yet. Everything below the line
+//
+//     "did the OEM radio do X?"  ->  yes/no, measured 4/4 in docs/captures/*.csv
+//
+// belongs in the code as a rule, because a flag holding a settled fact is a seam where the
+// two halves of this codebase can disagree — and four separate protocol bugs lived in
+// exactly those seams. Removed 2026-08-04 with the facts they were hedging, and where each
+// fact now lives:
+//
+//   authRequestByte2, helloAfterBootstrapRequest, helloOnNonAuthRequest, oneShotResyncOnStart
+//                          "does only `61 11 00` authorize, or does `01` count too?"
+//                          -> ANY complete `61 11 xx` is the same request; byte 2 is the
+//                             panel's own state, not an authorization grade.
+//                             AffaDisplayBase::handleSyncFrame().
+//   oneShotResyncOnPeerAlive  "may a bare `69` arm the announce?"
+//                          -> yes, on a panel-led family, and only before any `61 11`.
+//                             AffaDisplayBase::handleSyncFrame(), the kSyncPeerAlive branch.
+//   bootstrapAliveFrame    "does the announce lead with B9?"
+//                          -> no. `BA` alone asks the question; `B9` only says "still here".
+//                             AffaDisplayBase::pumpUnauthControl().
+//
+// See docs/REFACTOR-PLAN.md for the remaining ones and the order they go in.
 struct SyncProfile {
   uint16_t syncId;        // Carminat 0x3AF   UpdateList 0x3DF   (we transmit here)
   uint16_t syncReplyId;   // both 0x3CF                          (panel transmits here)
@@ -38,7 +63,16 @@ struct SyncProfile {
                           // and the watchdog re-armed from the peer; both stay gone).
                           // Paced by AFFA_PING_REPLY_MIN_MS: a storming panel repeats 69
                           // at line rate, and one pong per ping is the 4400-frames/s trap
-                          // all over again. Carminat true, UpdateList/Cluster false.
+                          // all over again.
+                          //
+                          // FALSE on the captured Carminat profile — its B9 is a
+                          // free-running 500.08 ms timer (sigma 0.33) that never flinches
+                          // as the panel's 69 drifts past it. It is retained because it is
+                          // genuinely unsettled for UpdateList, whose reference driver
+                          // pongs every `0x69` and for whom that pong was the ONLY
+                          // heartbeat until March 2026. If an UpdateList panel ever stalls
+                          // in the handshake, this is the first knob to turn.
+                          // docs/REFACTOR-PLAN.md, "The one finding to act on first".
   // A Carminat panel is the session initiator.  While this is true the library is a
   // completely silent CAN participant after begin(): no heartbeat and, importantly, no
   // `BA` probe leave until a valid message from the panel arrives on syncReplyId.  The
@@ -55,24 +89,15 @@ struct SyncProfile {
 
   // `69` is only a liveness ping on profiles with this set. It is evidence that a panel
   // is present, but it is NOT permission to register functions or render. A complete
-  // `61 11 <authRequestByte2>` must arrive before application traffic is released. A
-  // profile may still answer a ping after a different complete `61 11 xx` bootstrap; that
-  // is separate from authorization. AFFA3 NAV sets this true. Keeping it separate from
-  // waitForPanel matters: the latter suppresses boot traffic, whereas this keeps an early
-  // or stray ping from impersonating authorization.
+  // `61 11 xx` must arrive before application traffic is released. AFFA3 NAV sets this
+  // true. Keeping it separate from waitForPanel matters: the latter suppresses boot
+  // traffic, whereas this keeps an early or stray ping from impersonating authorization.
+  //
+  // It is also what makes a bare `69` arm the one-shot announce, and what selects the
+  // measured opening in handleSyncFrame() over the older UpdateList startup contract.
+  // Step 8 of docs/REFACTOR-PLAN.md brings UpdateList onto the same rules and this
+  // becomes universal; until then it is the family switch.
   bool requireAuthRequest = false;
-
-  // data[2] required by the above authorization gate. It is ignored unless
-  // requireAuthRequest is true. Carminat releases registration and rendering only after
-  // `61 11 00`. Its legacy driver still answers every complete `61 11 xx` with hello.
-  uint8_t authRequestByte2 = 0x00;
-
-  // Some panel-initiated profiles use `61 11 01` as a bootstrap / START indication. If
-  // set, the base sends ONE bounded alive + request pair after that indication. This is
-  // deliberately independent of sendSyncRequest: it preserves Carminat's proven bootstrap
-  // without restoring the old BA-every-second recovery storm. It never authorizes payload
-  // traffic; only authRequestByte2 above does that.
-  bool oneShotResyncOnStart = false;
 
   // Minimum spacing between complete hello bursts. Zero uses the conservative generic
   // AFFA_HELLO_MIN_MS. A panel with a proven faster startup cadence carries that measured
@@ -82,12 +107,6 @@ struct SyncProfile {
   // are appended below so a downstream positional SyncProfile initializer that supplied a
   // hello floor continues to mean the same thing.
   uint32_t helloMinMs = 0;
-
-  // Legacy Carminat replied to every complete `61 11 xx` with its hello burst. The AFFA3
-  // monitor captures instead show `01 -> B9/BA -> 00 -> hello`, so a modern profile can
-  // keep 01 as discovery-only. Leave this true by default for existing profiles/source
-  // compatibility; the captured Carminat profile deliberately sets it false.
-  bool helloOnNonAuthRequest = true;
 
   // Timing belongs to the panel profile, not the application poll rate. A zero keeps the
   // historical immediate burst behaviour. AFFA3 NAV uses a 30/31 ms first-frame and
@@ -104,32 +123,12 @@ struct SyncProfile {
   // default for existing profiles. AFFA3 NAV's observed B9/69 cadence is about 500 ms.
   uint32_t syncIntervalMs = 0;
 
-  // Some panel-initiated sessions begin with a bare `69` liveness frame, before any full
-  // `61 11`. When enabled, the first such frame gets the same bounded B9 -> BA discovery
-  // transaction as a START request. It is still NOT authorization: only the profile's good
-  // full request can release hello, registration, or application traffic.
-  bool oneShotResyncOnPeerAlive = false;
-
-  // MEASURED, NOT ASSUMED. docs/captures/"aknowledge offed display cONNECT OT POWER.csv" is
-  // a real OEM radio meeting a display that had been powered with no radio present. That
-  // display repeats `3CF 61 11 01` every ~104 ms and NEVER sends `61 11 00` — not once in
-  // sixteen requests — yet the radio answers it with the ordinary B0 announce burst 30.75 ms
-  // later and the session completes: registration, `03 52`, ISO-TP text, and the `01` never
-  // reappears. `61 11 01` is therefore the SAME request as `61 11 00`; the low bit reports
-  // the panel's own state, it is not an authorization grade.
-  //
-  // The gate is our own BA, not the byte: a `01` seen before we have sent BA is the panel
-  // calling into an empty bus and earns only the bounded B9 -> BA discovery pair. The first
-  // `01` that arrives AFTER that BA is the answer to it, and authorizes exactly as `00`
-  // does. See docs/PROTOCOL.md §3.6 for the four-capture timing table.
-  bool helloAfterBootstrapRequest = false;
-
   // Whether the function-registration probes are part of the OPENING or part of RENDERING.
   // The captured AFFA3 radio puts `151 70` and `1F1 70` on the wire 0.10-0.59 ms after the
   // third B0, with no application involvement at all — so a Carminat build that never
   // renders must still register, or the panel sits in a half-open session for ever.
-  // UpdateList has a separately validated startup contract in which registration is lazy
-  // and follows the first payload, so this stays false for that family. Do not unify.
+  // UpdateList's reference driver registers lazily, on its first render, so this stays
+  // false for that family until step 8 of docs/REFACTOR-PLAN.md moves it over.
   bool registerAfterHello = false;
 
   // THE RADIO ANNOUNCES ITSELF. In "aknowledge on on display.csv" the first frame on the bus
@@ -144,21 +143,6 @@ struct SyncProfile {
   // sleeping panel. Zero keeps the strictly-silent behaviour for other families.
   uint32_t announceWhenSilentMs = 0;
 
-  // Does the one-shot discovery bootstrap lead with an alive frame, or go straight to the
-  // request? B9 is the heartbeat of an ESTABLISHED session; on a profile that starts its
-  // keep-alive only after registration, emitting one during the opening is noise in the
-  // phase that can least afford it, and it muddles the wire log at the exact moment you
-  // most want to read it.
-  //
-  // NOTE THE EVIDENCE IS MIXED, deliberately recorded here rather than smoothed over: two
-  // OEM captures DO show B9 before registration ("cONNECT OT POWER" at 147328246,
-  // "offed display 2" at 9850470), both consistent with a radio whose free-running 500 ms
-  // heartbeat simply ticked during the opening. The reattach capture
-  // ("offed display.csv" at 84945066) shows the announce as a bare BA with no B9. We take
-  // the quieter reading: BA asks the question, B9 answers "still here" only once there is
-  // a session to be still here in.
-  bool bootstrapAliveFrame = true;
-
   // OUR REQUEST COMES FIRST, AND THE HELLO ANSWERS THE *NEXT* PANEL REQUEST. Measured 4/4:
   // in every OEM capture the radio's `BA` precedes the `61 11 xx` that draws the B0 burst,
   // and in "cONNECT OT POWER" the gap is explicit — the display is already repeating
@@ -169,6 +153,10 @@ struct SyncProfile {
   // Confirmed on hardware 2026-08-04: without this the panel never opens its own `1C1`
   // channel and the session dies at "waiting for the display's 1C1", every time; with it,
   // registration, power and the clock all complete unattended.
+  //
+  // THE ONE KNOB STEP 8 LEAVES STANDING. UpdateList's reference answers the FIRST `61 11`
+  // straight out of its receive path with no announce precondition, so it stays false
+  // there: our `BA` should provoke a request, but that panel volunteers them anyway.
   bool helloRequiresAnnounce = false;
 };
 

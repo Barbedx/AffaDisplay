@@ -44,6 +44,7 @@ class StuckLink final : public ICanLink {
     ++offers;
     if (f.id == 0x3AF && f.data[0] == 0xB9) ++aliveOffers;
     if (f.id == 0x3AF && f.data[0] == 0xBA) ++requestOffers;
+    if (f.id == 0x3AF && f.data[0] == 0xB0) ++helloOffers;
     return mode == Mode::Busy ? TxDisposition::Busy : TxDisposition::Rejected;
   }
   bool recv(Frame& out) override { return rx.pop(out); }
@@ -56,6 +57,7 @@ class StuckLink final : public ICanLink {
   uint32_t offers = 0;
   uint32_t aliveOffers = 0;
   uint32_t requestOffers = 0;
+  uint32_t helloOffers = 0;
 
  private:
   AffaRing<Frame, 128> rx;
@@ -196,29 +198,27 @@ void completeFreshRegistration(Rig& r, const char* first, const char* second) {
 // bare probe itself is still pinned, at full strength and from a genuinely cold rig, by
 // test_bare_first_69_gets_one_discovery_ba_but_never_unlocks_output.
 //
-// An unrecognised `61 11 xx` is what remains for revoking a session that has NOT reached
-// FUNCSREG. The library tears such a request down completely — Failed, dropRegistrations(),
-// a bumped in-flight epoch, and the whole announce latch reset — and, because 0xC5 is not the
-// START spelling, it does so without a frame of its own. That is exactly the epoch boundary
-// the late-ACK races below need, and it is the ONLY door left into it: an answering `01`
-// voids a session only while it holds FUNCSREG (a session whose first 151 is still in flight
-// never has), and the peer watchdog does not run before FUNCSREG either.
-void revokeSessionWithUnknownAuth(Rig& r, const char* why) {
-  r.link.inject(mk(0x3CF, {0x61, 0x11, 0xC5, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
-  r.display.poll();
-  expectNoFrame(r, "an unknown 61 11 xx tears the session down silently: no BA, no hello");
-  TEST_ASSERT_FALSE_MESSAGE(r.display.synced(), why);
-  TEST_ASSERT_FALSE_MESSAGE(r.display.registered(), "and it revokes FUNCSREG with it");
-}
-
-// A `61 11 01` that ANSWERS the BA above is a different frame with the same bytes: it is a
-// full request. MEASURED, NOT ASSUMED — "aknowledge offed display cONNECT OT POWER.csv" is a
+// AND THE UNRECOGNISED-BYTE DOOR IS CLOSED TOO, deliberately. `revokeSessionWithUnknownAuth()`
+// used to stand here and void a session that had NOT reached FUNCSREG, by sending `61 11 C5`
+// — a byte no capture contains — into the second, dimmer copy of the request branch. That
+// branch is deleted: any complete `61 11 xx` is the same request, so 0xC5 now takes the one
+// path all of them take and, with FUNCSREG unset, is absorbed without a teardown.
+//
+// WHICH LEAVES A REAL GAP, RECORDED RATHER THAN GLOSSED: nothing inbound can void a
+// half-open session — one that drew its burst but never latched FUNCSREG. The peer watchdog
+// cannot either, because pumpSync() returns early on `registerAfterHello && !FuncsReg`. It is
+// not a REGRESSION — a panel sends `00` or `01`, and both were already absorbed in that state
+// — but it is a hole, and closing it means deciding what a post-burst `61 11` means, which no
+// capture answers. See docs/REFACTOR-PLAN.md.
+//
+// A `61 11 01` that ANSWERS our BA is a different frame with the same bytes: it is a full
+// request. MEASURED, NOT ASSUMED — "aknowledge offed display cONNECT OT POWER.csv" is a
 // display that was powered with no radio present; it repeats `3CF 61 11 01` sixteen times at
 // ~104 ms and NEVER sends `61 11 00`, and the OEM radio answers it with the ordinary B0
 // announce burst 30.75 ms later and then completes the whole session — registration, `03 52`,
 // ISO-TP text. The low bit reports the display's own state; it is not an authorization grade.
 //
-// It still voids the previous session first: a START arriving while we hold registrations
+// It still voids the previous session first: a request arriving while we hold registrations
 // says "your registration is void", so FUNCSREG and usable authorization drop before the new
 // announce burst is scheduled.
 void revokeSessionWithAnsweringStart(Rig& r, const char* why) {
@@ -261,18 +261,42 @@ void assertBootstrapStormIsBounded(StuckLink::Mode mode) {
     clock.advance(AFFA_TX_RETRY_MS);
   }
 
-  // The B9 bound is now ZERO rather than "at most two". bootstrapAliveFrame is false, so a
-  // B9 offered here at all would be a bug regardless of how few there were — pin it exactly,
-  // or this assertion becomes a bound on a frame that is never sent and stops meaning
-  // anything. The total then falls with it, from four offers to two.
+  // The B9 bound is ZERO rather than "at most two". The announce is BA-only, so a B9 offered
+  // here at all would be a bug regardless of how few there were — pin it exactly, or this
+  // assertion becomes a bound on a frame that is never sent and stops meaning anything.
   TEST_ASSERT_EQUAL_UINT32_MESSAGE(
-      0, link.aliveOffers, "the bootstrap is BA-only: no B9 is ever offered to the driver");
+      0, link.aliveOffers, "the announce is BA-only: no B9 is ever offered to the driver");
   TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(
       2, link.requestOffers,
-      "one-shot bootstrap gets at most its initial BA offer and one bounded retry");
-  TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(
-      2, link.offers,
-      "01/69 reminders cannot keep re-arming a permanently undeliverable bootstrap");
+      "one-shot announce gets at most its initial BA offer and one bounded retry");
+
+  // THE TOTAL BOUND USED TO BE `<= 2` AND IT WAS MEASURING THE WRONG THING, which only
+  // became visible when byte 2 stopped being special. It held because `61 11 01` fell into
+  // the deleted second request branch, where a reminder could never queue a hello at all;
+  // `61 11 00` on this same dead link has ALWAYS produced a paced B0 retry stream, and that
+  // is deliberate — the hello is what opens the session, so it keeps trying at its own
+  // AFFA_TX_RETRY_MS floor until the controller accepts it. Now that every complete request
+  // is the same request, the `01`s reach that path too, and the honest bound is not on the
+  // COUNT but on what drives it: nothing here may be paced by the PANEL.
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+      link.offers, link.requestOffers + link.helloOffers,
+      "only the announce and the hello are ever offered — nothing else escapes the opening");
+
+  // Consume whatever retry is due at this instant, so the storm below starts from a settled
+  // floor rather than racing one.
+  display.poll();
+  const uint32_t settled = link.offers;
+
+  // AND HERE IS THE PROPERTY THE OLD BOUND WAS REACHING FOR. A no-ACK panel repeats its
+  // reminders at line rate; 64 of them in a single RX drain, with the clock standing still,
+  // must not buy a single extra transmit attempt. That is what "bounded" has to mean on a
+  // wire whose peer controls the frame rate and we control only our own floors.
+  for (uint8_t i = 0; i < 64; ++i)
+    link.inject((i & 1u) ? affatest::panelSyncStart() : affatest::panelPeerAlive());
+  display.poll();
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+      settled, link.offers,
+      "64 reminders in one drain, at one instant, add not one offer to the driver");
 }
 
 }  // namespace
@@ -281,15 +305,21 @@ void assertBootstrapStormIsBounded(StuckLink::Mode mode) {
 // been torn down.  In particular it may not recreate Failed|FuncsReg, because then a later
 // good 00 would open the gate and send the held clock without the new ordered registrations.
 //
-// RENAMED from ..._cannot_revive_the_old_session, and the trigger changed with it, because
-// the frame that used to do the revoking cannot reach this state any more. Under
-// SyncProfile::helloRequiresAnnounce our `BA` is on the wire before any burst, so from the
-// first session onwards every `61 11 01` is an ANSWERING start — and the library voids an
-// epoch on one only while it holds FUNCSREG, which a session whose very first 151 is still in
-// flight by definition does not. The wall-clock peer watchdog is gated behind FUNCSREG too.
-// So the teardown here is the unrecognised-request path (see revokeSessionWithUnknownAuth).
-// The race under test — a 0x551 addressed to a dead epoch's 0x151 — is bit for bit the one
-// this test has always pinned, and every assertion below is unchanged.
+// RENAMED from ..._cannot_revive_the_old_session, and the TRIGGER HAS NOW CHANGED TWICE,
+// because each time the protocol was measured the door this test used got narrower.
+//
+// First helloRequiresAnnounce landed: our `BA` precedes every burst, so from the first
+// session onwards every `61 11 01` is an ANSWERING start rather than a bare probe, and the
+// test moved to an unrecognised `61 11 C5`. Then byte 2 turned out to mean nothing at all
+// (`61 11 xx` is one request, [CAP] sixteen `01`s and no `00` complete a whole session), the
+// second request branch was deleted with the flags that selected it, and 0xC5 stopped being
+// special: it is absorbed, exactly as `00` and `01` already were, unless FUNCSREG is held.
+//
+// So the teardown is now the one the library actually implements — a complete request
+// arriving at a REGISTERED session — and session A is driven all the way to FUNCSREG to
+// reach it. The race under test is unchanged and is still the point: a `0x551` addressed to
+// the dead epoch's `0x151` must not restore FUNCSREG or authorization, and the held clock
+// must wait for a genuinely new, fully acknowledged registration table.
 void test_late_registration_ack_cannot_revive_a_torn_down_session(void) {
   Rig r;
   r.display.begin();
@@ -297,10 +327,14 @@ void test_late_registration_ack_cannot_revive_a_torn_down_session(void) {
                     static_cast<uint8_t>(r.display.setTime("1000")));
 
   startSessionToFirstRegistration(r, "old-session 151 registration");
-  revokeSessionWithUnknownAuth(r, "an unknown request tears down the in-flight registration");
+  completeFreshRegistration(r, "old-session 551 releases the 1F1 registration",
+                            "old-session registration starts only the 400-ms gate");
+  // The clock is deliberately NOT advanced past that gate: the held time must still be held
+  // when the session dies under it.
+  revokeSessionWithAnsweringStart(r, "an answering request voids the registered session");
 
-  // This is the decisive race: 0x551 belongs to the 151 frame which was put on the wire
-  // before 01.  It must not complete a registration in the newly reset session.
+  // This is the decisive race: 0x551 belongs to session A's 151 registration and arrives
+  // after that session was voided. It must not complete a registration in the new one.
   r.link.inject(ack(0x151));
   r.display.poll();
   TEST_ASSERT_FALSE_MESSAGE(r.display.registered(),
@@ -309,9 +343,10 @@ void test_late_registration_ack_cannot_revive_a_torn_down_session(void) {
                             "late old-session 551 may not restore authorization");
   expectNoFrame(r, "late registration ACK does not transmit application traffic");
 
-  // The next 00 is a genuinely new session.  The retained time is allowed out only after
-  // another full, ordered registration table has been acknowledged.
-  startSessionToFirstRegistration(r, "fresh session starts again at 151");
+  // The revocation scheduled the next opening itself, so the fresh session resumes at its
+  // burst. The retained time is allowed out only after another full, ordered registration
+  // table has been acknowledged.
+  runHelloToFirstRegistration(r, "fresh session starts again at 151");
   completeFreshRegistration(r, "fresh 551 releases the 1F1 registration",
                              "final registration ACK starts only the 400-ms gate");
 
@@ -389,7 +424,7 @@ void test_late_reassert_ack_cannot_clear_the_next_session_restore(void) {
 //
 // RENAMED from ..._one_discovery_pair_...: there is no pair any more. [CAP] the reattach
 // capture "aknowledge offed display.csv" at 84945066 opens with a bare `3AF BA`, so
-// bootstrapAliveFrame is false and the leading B9 is gone. The bound this test exists to
+// the announce is BA-only and the leading B9 is gone. The bound this test exists to
 // keep — ONE frame, ever, no matter how many pings arrive — is asserted at full strength on
 // the BA, and the absence of the B9 is now asserted too rather than assumed.
 void test_bare_first_69_gets_one_discovery_ba_but_never_unlocks_output(void) {
@@ -414,8 +449,16 @@ void test_bare_first_69_gets_one_discovery_ba_but_never_unlocks_output(void) {
   r.clock.advance(carminat::kSyncIntervalMs * 3);
   r.display.poll();
   expectNoFrame(r, "a bare 69 discovery never grows into an idle heartbeat stream");
-  TEST_ASSERT_FALSE_MESSAGE(carminat::kSync.bootstrapAliveFrame,
-                            "and the discovery frame itself carries no B9");
+
+  // AND THE DISCOVERY FRAME ITSELF CARRIES NO B9. This used to read the profile flag
+  // `SyncProfile::bootstrapAliveFrame`; the flag is gone and the rule is unconditional, so
+  // the absence is asserted where it is observable. Every frame this test has produced was
+  // consumed by an expectFrame/expectNoFrame above, and exactly one of them existed: the
+  // bare `BA` at the top. A late ping cannot conjure the B9 the pair used to lead with
+  // either.
+  r.link.inject(affatest::panelPeerAlive());
+  r.display.poll();
+  expectNoFrame(r, "no ping, early or late, ever puts a B9 in front of the announce");
 }
 
 // A `69` that lands exactly on the paced-heartbeat deadline must still yield exactly ONE
@@ -486,7 +529,7 @@ void test_rejected_one_shot_bootstrap_is_bounded_under_repeated_01_and_69(void) 
 }
 
 // RENAMED from ..._without_a_second_b9. There is no FIRST B9 to have a second of any more:
-// bootstrapAliveFrame is false, so the discovery bootstrap is a bare BA ([CAP] "aknowledge
+// the announce is a bare BA, unconditionally ([CAP] "aknowledge
 // offed display.csv" at 84945066). The phase machine this test exists to pin is intact and
 // is if anything easier to get wrong now — a Busy BA must be retried as a BA, exactly once,
 // and the retry must not decide that a heartbeat belongs in front of it.

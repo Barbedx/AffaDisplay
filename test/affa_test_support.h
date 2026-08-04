@@ -51,14 +51,19 @@ inline affa::Frame mk(uint32_t id, std::initializer_list<uint8_t> bytes, uint8_t
   return f;
 }
 
-// The AFFA3 NAV panel's GOOD `61 11 00 A3 A3 …` authorization request. The panel begins
-// a session; the ESP never probes it into existence. `61 11 01` is the bootstrap / START
-// request and is covered by a separate test.
+// THESE TWO FRAMES ARE THE SAME REQUEST, and the two names are history rather than
+// protocol. [CAP] "aknowledge offed display cONNECT OT POWER.csv" completes an entire
+// session — announce, registration, `03 52`, ISO-TP text — on sixteen `61 11 01` frames and
+// not one `61 11 00`. Byte 2 reports the display's own state; the library does not read it.
+//
+// What decides the outcome is POSITION, not spelling: the first complete request a session
+// sees arms our `BA` announce and is answered with nothing else, and the panel's NEXT one
+// draws the B0 burst. See SyncProfile::helloRequiresAnnounce and carminatOpeningRequest()
+// below. The names are kept only because a test that says `panelSyncStart()` is easier to
+// read against the older captures; either function will do wherever a request is needed.
 inline affa::Frame panelSyncRequest() {
   return mk(0x3CF, {0x61, 0x11, 0x00, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3});
 }
-// The legacy bootstrap / START request. It receives hello and a one-shot control pair,
-// but never authorizes registration or rendering; only panelSyncRequest() does that.
 inline affa::Frame panelSyncStart() {
   return mk(0x3CF, {0x61, 0x11, 0x01, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3});
 }

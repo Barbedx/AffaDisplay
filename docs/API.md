@@ -649,17 +649,21 @@ struct SyncProfile {
   uint8_t  helloCount;    // Carminat 3, UpdateList 1
   bool replyToPing = false;   // MUST stay false for Carminat: `B9` is a free-running 500 ms
                               // heartbeat, not a pong. Setting it true doubles our `B9` rate.
-  bool waitForPanel = false;
-  bool sendSyncRequest = true;
-  bool requireAuthRequest = false;
-  uint8_t authRequestByte2 = 0x00;
-  bool oneShotResyncOnStart = false;
-  bool helloOnNonAuthRequest = true;
+                              // Genuinely unsettled for UpdateList, whose reference driver
+                              // pongs every `0x69` — the first knob to turn if that family
+                              // ever stalls in the handshake.
+  bool waitForPanel = false;      // stay silent until the panel speaks
+  bool sendSyncRequest = true;    // may we probe with `BA` as periodic recovery
+  bool requireAuthRequest = false;// a bare `69` is not permission; a complete `61 11 xx` is
+  uint32_t helloMinMs = 0;
   uint32_t helloFirstDelayMs = 0;
   uint32_t helloFrameGapMs = 0;
   uint32_t payloadAfterRegistrationMs = 0;
   uint32_t syncIntervalMs = 0;
-  uint32_t helloMinMs = 0;
+  bool registerAfterHello = false;    // registration is part of the OPENING, not of rendering
+  uint32_t announceWhenSilentMs = 0;  // break a two-way silence; 0 = never
+  bool helloRequiresAnnounce = false; // our `BA` first; the panel's NEXT request draws the
+                                      // burst
 };
 
 } // namespace affa
@@ -678,11 +682,11 @@ affa::CarminatDisplay display(
     affa::carminat::CarminatHelloProfile::CapturedB0x3);
 ```
 
-`CapturedB0x3` announces one bounded `B9` + `BA` pair into silence, then sends three
-identical `B0 14 11 00 1F 00 00 00` frames at +31 ms intervals in answer to a `3CF 61 11 xx`
-that arrives after that `BA`. It waits for link acceptance of the third frame before
-inserting the `151` / `1F1` registration work, waits 400 ms after the final registration ACK
-before a zero-padded power command, and free-runs `B9` at 500 ms.
+`CapturedB0x3` announces one bounded bare `BA` into silence, then sends three identical
+`B0 14 11 00 1F 00 00 00` frames at +31 ms intervals in answer to a `3CF 61 11 xx` that
+arrives after that `BA`. It waits for link acceptance of the third frame before inserting the
+`151` / `1F1` registration work, waits 400 ms after the final registration ACK before a
+zero-padded power command, and free-runs `B9` at 500 ms.
 
 > **Corrected 2026-08-04 against four OEM captures** (`docs/captures/*.csv`, derivation in
 > `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`). This paragraph used to read *"holds the strict
@@ -697,6 +701,13 @@ before a zero-padded power command, and free-runs `B9` at 500 ms.
 > * **Registration is part of the opening and is pipelined** — both probes 0.1–0.3 ms after
 >   B0#3, `1F1 70` on the wire 0.29 ms after `151 70`, before either ACK returns.
 > * **`B9` is not paced against `69`; it free-runs.** See §2.7.
+> * **The announce is a bare `BA`, with no `B9` in front of it.** §3.0.
+>
+> The six profile flags those corrections settled — `authRequestByte2`,
+> `helloAfterBootstrapRequest`, `helloOnNonAuthRequest`, `oneShotResyncOnStart`,
+> `oneShotResyncOnPeerAlive`, `bootstrapAliveFrame` — were deleted on 2026-08-04 and are
+> library rules now. A profile carries identity, timing, and the four questions the families
+> genuinely answer differently. See `docs/REFACTOR-PLAN.md`.
 
 `MeganeCanLegacy70B0B0` keeps the same bounded recovery policy but substitutes the historical
 immediate MeganeCAN `70 1A 11 ...`, `B0 ...`, `B0 ...` opening — a frame that appears in

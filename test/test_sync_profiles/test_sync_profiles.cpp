@@ -279,8 +279,8 @@ void test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00(vo
   r.d.poll();
   drain(r.link);
 
-  // THE 01 BOOTSTRAP IS A BARE `BA` NOW, NOT A B9 + BA PAIR — SyncProfile::bootstrapAliveFrame
-  // is false on both Carminat profiles. [CAP] the reattach capture, "aknowledge offed
+  // THE ANNOUNCE IS A BARE `BA`, NOT A B9 + BA PAIR, and that is a library rule now rather
+  // than a per-profile flag. [CAP] the reattach capture, "aknowledge offed
   // display.csv" at 84945066, shows the radio re-finding a sleeping display with a single
   // unprompted `3AF BA`. The two captures that DO show a B9 before registration are both
   // consistent with a free-running 500 ms heartbeat that happened to tick during the opening,
@@ -430,13 +430,16 @@ void test_carminat_ping_alone_never_starts_authentication(void) {
   // answer and not a session — see test_carminat_never_pongs_between_heartbeats for the
   // separate proof that a `69` on an OPEN session produces nothing at all.
   //
-  // AND THE PROBE IS A BARE `BA`. SyncProfile::bootstrapAliveFrame is false on this family:
+  // AND THE PROBE IS A BARE `BA`, now as a library rule rather than a profile flag:
   // [CAP] the reattach capture "aknowledge offed display.csv" at 84945066 shows the radio
   // re-finding a sleeping display with one unprompted `3AF BA` and no B9 in front of it. The
   // B9s visible before registration in the other two captures are consistent with a
   // free-running 500 ms heartbeat ticking through the opening, so they are not evidence of a
   // pair. BA asks "is anyone there"; B9 only ever says "still here", and there is no session
-  // to still be here in yet.
+  // to still be here in yet. `first.alive == 0` below is the whole of that assertion —
+  // SyncProfile::bootstrapAliveFrame used to be read here beside it, which pinned the
+  // CONFIGURATION rather than the wire and would have gone on passing if pumpUnauthControl()
+  // had emitted a B9 anyway.
   CarRig r;
   r.d.begin();
   TEST_ASSERT_EQUAL(Result::Ok, r.d.setPower(true)); // held until real 61 11 00
@@ -450,8 +453,6 @@ void test_carminat_ping_alone_never_starts_authentication(void) {
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, first.other, "queued output stays held before auth");
   TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "a bare 69 must not clear FAILED");
   TEST_ASSERT_FALSE_MESSAGE(r.d.registered(), "and it registers no function");
-  TEST_ASSERT_FALSE_MESSAGE(carminat::kSync.bootstrapAliveFrame,
-                            "the discovery bootstrap is BA-only on the captured profile");
 
   // ONE-SHOT MEANS ONE. An un-ACKed display repeats `69` on its own timer — 504 ms in the
   // captures, line rate on a bench with no CAN ACK — and none of those repeats may re-arm
@@ -479,24 +480,22 @@ void test_carminat_ping_alone_never_starts_authentication(void) {
 }
 
 void test_carminat_bootstrap_is_held_until_good_auth(void) {
-  // 01 is discovery only for the capture-backed profile: exactly one BA, no B0
-  // announce, registration, or screen traffic. Only a later complete 61 11 00 begins
-  // the staged announce that releases output.
+  // THE FIRST REQUEST IS AN ANNOUNCE TRIGGER, WHATEVER ITS BYTE 2. It earns exactly one BA,
+  // no B0 announce, no registration and no screen traffic; the panel's NEXT request is the
+  // one that draws the burst and releases output. See SyncProfile::helloRequiresAnnounce.
   //
-  // THE PAIR LOST ITS B9. [CAP] "aknowledge offed display.csv" at 84945066 — the reattach,
-  // which is the cleanest look at a radio opening a conversation — is a bare `3AF BA`.
-  // bootstrapAliveFrame is false here for that reason, and the flag is pinned below so a
-  // silent flip cannot pass.
+  // THE ANNOUNCE LOST ITS B9. [CAP] "aknowledge offed display.csv" at 84945066 — the
+  // reattach, which is the cleanest look at a radio opening a conversation — is a bare
+  // `3AF BA`.
+  //
+  // FIVE FLAG READS USED TO STAND HERE — requireAuthRequest, authRequestByte2,
+  // oneShotResyncOnStart, helloOnNonAuthRequest and bootstrapAliveFrame — and four of the
+  // five are gone with the fields. They pinned CONFIGURATION, which is the weaker thing to
+  // pin: every one of them would have gone on passing while the FSM did something else
+  // entirely. What replaces them is already below, on the wire, and always was: one BA and
+  // nothing beside it, then silence under a request storm, then a burst.
   TEST_ASSERT_TRUE_MESSAGE(carminat::kSync.requireAuthRequest,
                            "Carminat requires a display-originated auth request");
-  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00, carminat::kSync.authRequestByte2,
-                                 "only 61 11 00 is good auth");
-  TEST_ASSERT_TRUE_MESSAGE(carminat::kSync.oneShotResyncOnStart,
-                           "Carminat preserves the one-shot legacy START bootstrap");
-  TEST_ASSERT_FALSE_MESSAGE(carminat::kSync.helloOnNonAuthRequest,
-                            "01 must not receive the captured B0 x3 announce");
-  TEST_ASSERT_FALSE_MESSAGE(carminat::kSync.bootstrapAliveFrame,
-                            "and the bootstrap it DOES receive is a bare BA");
   CarRig r;
   r.d.begin();
   r.d.setSelfAck(true);
@@ -590,21 +589,49 @@ void test_carminat_acks_panel_registration_as_a_reflex_without_unlocking_output(
   TEST_ASSERT_FALSE_MESSAGE(r.link.takeSent(f), "no 151/1F1 payload may follow the 5C1");
 }
 
-void test_carminat_ignores_unknown_full_auth_until_00(void) {
-  // The capture-backed profile accepts only 61 11 00 for its B0 announce. An unknown
-  // third byte is neither a B9/BA bootstrap (reserved for 01) nor authorization.
+void test_any_complete_61_11_xx_is_the_same_request(void) {
+  // BYTE 2 IS NOT AN AUTHORIZATION GRADE, AND THIS TEST USED TO SAY THE OPPOSITE.
+  //
+  // It was `test_carminat_ignores_unknown_full_auth_until_00`, and it asserted that
+  // `61 11 5A` produced NOTHING AT ALL: no BA, no burst, no session, until a `61 11 00`
+  // arrived. That was the shape of defect this project keeps repeating — a special case
+  // standing in for a general rule (HANDOFF.md, "How this project gets things wrong") — and
+  // it was pinned as if it were a measurement.
+  //
+  // The measurement says otherwise. [CAP] "aknowledge offed display cONNECT OT POWER.csv":
+  // the display repeats `3CF 61 11 01` sixteen times, never once sends `61 11 00`, and the
+  // OEM radio answers with the ordinary B0 burst and completes the entire session. The low
+  // bit reports the display's own state. Nothing in any capture reads byte 2 as permission,
+  // and nothing in the corpus distinguishes 0x5A from 0x00 — so neither do we.
+  //
+  // 0x5A is deliberately a byte no capture contains: the rule under test is that the
+  // library does not care.
   CarRig r;
   r.d.begin();
   r.d.poll();
   drain(r.link);
 
-  r.link.inject(mk(0x3CF, {0x61, 0x11, 0x5A, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
+  const Frame unknownRequest = mk(0x3CF, {0x61, 0x11, 0x5A, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3});
+
+  r.link.inject(unknownRequest);
   r.d.poll();
-  SyncTally t = tally(r.link, 0x3AF, 0xB9, 0xBA);
-  TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "unknown auth never unlocks the session");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.hello, "unknown 61 11 xx gets no B0 announce");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.alive, "unknown auth gets no bootstrap B9");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, t.request, "unknown auth gets no BA");
+  SyncTally first = tally(r.link, 0x3AF, 0xB9, 0xBA);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, first.request,
+                                "an unknown byte 2 is a request: it earns the one BA announce");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, first.alive, "…with no B9 in front of it");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, first.hello,
+                                "…and no burst, because our BA had not been sent yet");
+  TEST_ASSERT_FALSE_MESSAGE(r.d.synced(), "the first request opens nothing on its own");
+
+  // And the panel's NEXT request draws the burst — the same rule, on the same byte, that
+  // affatest::carminatOpeningRequest() drives with `61 11 00`.
+  r.link.inject(unknownRequest);
+  r.d.poll();
+  expectNoFrame(r, "the second request schedules B0; it transmits nothing at once");
+  finishCarminatHello(r);
+  TEST_ASSERT_TRUE_MESSAGE(r.d.synced(),
+                           "a session opens on 61 11 5A exactly as it does on 61 11 00");
+  drain(r.link);
 }
 
 void test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediately(void) {
@@ -614,7 +641,7 @@ void test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediatel
   //
   // RENAMED from ..._start_pair_...: the bootstrap is no longer a pair. [CAP] the reattach
   // capture "aknowledge offed display.csv" at 84945066 opens with a bare `3AF BA`, so
-  // bootstrapAliveFrame is false and the B9 that used to lead is gone. What the test pins is
+  // the announce is BA-only and the B9 that used to lead is gone. What the test pins is
   // unchanged in strength — a 00 arriving in the same RX drain must neither cancel the START
   // announce nor duplicate it.
   CarRig r;
@@ -1042,7 +1069,7 @@ int main(int, char**) {
   RUN_TEST(test_carminat_ping_alone_never_starts_authentication);
   RUN_TEST(test_carminat_bootstrap_is_held_until_good_auth);
   RUN_TEST(test_carminat_acks_panel_registration_as_a_reflex_without_unlocking_output);
-  RUN_TEST(test_carminat_ignores_unknown_full_auth_until_00);
+  RUN_TEST(test_any_complete_61_11_xx_is_the_same_request);
   RUN_TEST(test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediately);
   RUN_TEST(test_short_dlc_carminat_auth_request_stays_silent);
   RUN_TEST(test_short_dlc_peer_alive_is_honoured);
