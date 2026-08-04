@@ -109,6 +109,47 @@ constexpr bool hasFlag(SyncState v, SyncState f) noexcept {
   return (static_cast<uint8_t>(v) & static_cast<uint8_t>(f)) == static_cast<uint8_t>(f);
 }
 
+// WHERE THE OPENING HAS GOT TO, as one ordered value instead of nine booleans.
+//
+// SyncState above is a set of FLAGS, which is the right shape for what an application asks
+// ("are we registered?") and the wrong shape for what a person debugging asks ("why is
+// nothing rendering?"). The answer to the second question used to be spread across
+// `_panelObserved`, `_syncRequestObserved`, `_authRequestObserved`, `_authHelloPending`,
+// `_helloPending`, `_unauthControlPending/Issued/Spent` and `_peerChannelSeen`, and it took
+// four bugs and most of a week to learn to read them in the right order. This is that order.
+//
+// IT IS MONOTONIC WITHIN A SESSION and only ever falls back to Silent or Announced — a
+// session is lost, never partly lost. Print it on any diagnostic surface: the last four
+// protocol bugs were all found by watching a phase that would not advance.
+//
+// AwaitPeerChannel is the one nobody expects and it is measured 4/4: the DISPLAY registers
+// its own channel (`1C1 70`, answered `5C1 74`) before the radio registers its functions.
+// A bench that stalls here — "waiting for the display's 1C1" — is a panel that never got
+// our announce. See docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md.
+enum class Phase : uint8_t {
+  Silent,            // nothing heard from the panel yet; announcing on a slow timer
+  Announced,         // our `BA` is on the wire; awaiting the panel's NEXT request
+  HelloPending,      // that request arrived and the announce burst is mid-flight
+  AwaitPeerChannel,  // burst done; waiting for the panel to open ITS channel
+  Registering,       // our function probes are out, awaiting their ACKs
+  Settling,          // the measured quiet interval between registration and any payload
+  Ready,             // registered and past the quiet interval: rendering permitted
+};
+
+// For logs and status pages. Never parse it; it is prose, not protocol.
+inline const char* phaseName(Phase p) {
+  switch (p) {
+    case Phase::Silent:           return "Silent";
+    case Phase::Announced:        return "Announced";
+    case Phase::HelloPending:     return "HelloPending";
+    case Phase::AwaitPeerChannel: return "AwaitPeerChannel";
+    case Phase::Registering:      return "Registering";
+    case Phase::Settling:         return "Settling";
+    case Phase::Ready:            return "Ready";
+  }
+  return "?";
+}
+
 // Optional capabilities. supports() answers before you call; an unsupported call returns
 // Result::NotSupported. The legacy IDisplay gave these silently no-op bodies returning
 // NoError, so calling one on a panel that could not do it looked exactly like success.

@@ -65,6 +65,13 @@ struct TaskOptions {
 // moments. status() is the answer for every reader that is not the owned task.
 struct Status {
   SyncState sync       = SyncState::Failed;
+  // WHERE THE OPENING HAS GOT TO — print this one. `sync` answers the application's
+  // question; this answers the person's. See the Phase comment in AffaTypes.h.
+  Phase     phase      = Phase::Silent;
+  // Times the panel has taken the session away since start(), and when it last did. A soak
+  // that reports neither is a soak that cannot see fourteen deauthorizations.
+  uint32_t  sessionsLost      = 0;
+  uint32_t  lastSessionLossMs = 0;
   bool      running    = false;
   bool      registered = false;
   bool      busy       = false;

@@ -61,6 +61,8 @@ bool AffaDisplayBase::begin() {
   _lastCompleted  = kNoTicket;
   _lastEnqueued   = kNoTicket;
   _lastResult     = Result::Ok;
+  _sessionsLost      = 0;                // counted since THIS begin(), so a re-begin() does
+  _lastSessionLossMs = 0;                // not carry a previous run's drops into a soak
   _lastOverflow   = _link.stats().ringOverflow;
   _lastRxMs       = now;                 // the deaf watchdog measures from here, and stays
   _rxHeard        = false;               // disarmed until a frame actually arrives
@@ -1143,9 +1145,18 @@ void AffaDisplayBase::setSync(SyncState s, EventKind extra) {
   // power/control cache is deliberately re-armed only on this falling edge, never on a
   // heartbeat or a transient TX retry, so one recovered session produces at most one
   // internal restore before held application work resumes.
-  if (hasFlag(prev, SyncState::FuncsReg) && !hasFlag(s, SyncState::FuncsReg) &&
-      _cachedControl.valid) {
-    _cachedControl.pending = true;
+  //
+  // THIS FALLING EDGE IS ALSO THE MOMENT THE SESSION IS LOST, i.e. exactly where Phase
+  // leaves Ready — Ready requires FuncsReg, and the only other way out of it is the
+  // time-based Settling boundary, which is not a loss. Counting it here is what turns "the
+  // panel drops us about every seven minutes" from something the owner discovers by reading
+  // a 96-minute log into a number on the status page. Fourteen of them went unnoticed
+  // through a soak that looked perfect. Step 6 of docs/REFACTOR-PLAN.md hangs the wire-ring
+  // snapshot on this same edge.
+  if (hasFlag(prev, SyncState::FuncsReg) && !hasFlag(s, SyncState::FuncsReg)) {
+    ++_sessionsLost;
+    _lastSessionLossMs = _clock.millis();
+    if (_cachedControl.valid) _cachedControl.pending = true;
   }
 
   if (_syncCb) _syncCb(s, _syncCtx);
@@ -2017,6 +2028,47 @@ void AffaDisplayBase::setPassive(bool on) {
 }
 bool AffaDisplayBase::passive() const { return _passive; }
 void AffaDisplayBase::setSelfAck(bool on) { _selfAck = on; }
+
+// DERIVED, NOT STORED — step 3 of docs/REFACTOR-PLAN.md. A stored copy introduced beside
+// the booleans would be a tenth thing that can disagree with the other nine, which is the
+// disease rather than the cure. Step 4 removes the booleans and makes this the truth; until
+// then it is a reading of them, and the phase tests pin that reading against the wire so
+// the inversion has something to be checked against.
+Phase AffaDisplayBase::phase() const {
+  // Registration is the one bit both families agree on, and it is what separates an opening
+  // from a session, so it is read first.
+  if (hasFlag(_sync, SyncState::FuncsReg))
+    return expired(_clock.millis(), _nextPayloadMs) ? Phase::Ready : Phase::Settling;
+
+  // The burst is mid-flight while either latch is up: `_helloPending` means frames are still
+  // to be offered, `_authHelloPending` means the last one has not been accepted by the link.
+  // Application TX is closed for exactly as long as this is true.
+  if (_helloPending || _authHelloPending) return Phase::HelloPending;
+
+  if (_profile.requireAuthRequest) {
+    // A complete request has been answered and its burst is out. What the opening waits on
+    // next is the DISPLAY's own channel — measured 4/4, `1C1 70` precedes our `151 70` by
+    // ~61 ms — and only then our probes. A family that registers lazily has no such gate.
+    if (_authRequestObserved)
+      return (_peerChannelSeen || !_profile.registerAfterHello) ? Phase::Registering
+                                                                : Phase::AwaitPeerChannel;
+    // The conversation has started — we have heard the panel, or our own `BA` is out or on
+    // its way — but no request has drawn the burst yet. On the measured opening this is
+    // exactly the ~104 ms between the panel's first request and its second.
+    if (_unauthControlIssued || _unauthControlPending || _panelObserved)
+      return Phase::Announced;
+    return Phase::Silent;
+  }
+
+  // Families without the auth gate: a request opens the session directly and registration is
+  // lazy, so there is no AwaitPeerChannel and no Announced to report. Anything after the
+  // first panel frame is an opening waiting on registrations that may not be queued yet.
+  // Step 8 brings this family onto the same rules and the mapping stops being approximate.
+  return _panelObserved ? Phase::Registering : Phase::Silent;
+}
+
+uint32_t AffaDisplayBase::sessionsLost() const { return _sessionsLost; }
+uint32_t AffaDisplayBase::lastSessionLossMs() const { return _lastSessionLossMs; }
 
 SyncState AffaDisplayBase::syncState() const { return _sync; }
 bool AffaDisplayBase::synced() const {

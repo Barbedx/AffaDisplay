@@ -634,6 +634,127 @@ void test_any_complete_61_11_xx_is_the_same_request(void) {
   drain(r.link);
 }
 
+// ---------------------------------------------------------------------------
+// PHASE — the opening as one ordered value
+// ---------------------------------------------------------------------------
+
+void assertPhase(CarRig& r, Phase want, const char* what) {
+  char msg[160];
+  std::snprintf(msg, sizeof(msg), "%s: expected %s, got %s", what, phaseName(want),
+                phaseName(r.d.phase()));
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(static_cast<uint8_t>(want),
+                                  static_cast<uint8_t>(r.d.phase()), msg);
+}
+
+void test_phase_walks_the_measured_opening_in_order(void) {
+  // THIS IS THE SAFETY NET FOR STEP 4 of docs/REFACTOR-PLAN.md. `phase()` is derived from
+  // the nine booleans today, so it cannot currently disagree with them; what this test pins
+  // is the derivation against THE WIRE — which frame moves the opening on, and in what
+  // order. When the booleans are deleted and Phase becomes the stored truth, this is the
+  // thing that says the new machine still describes the same panel.
+  //
+  // It walks the measured opening one frame at a time and deliberately does NOT use
+  // openCarminatSession(): the helper injects the display's `1C1` inside the burst, which
+  // is faithful to the capture and hides AwaitPeerChannel completely. That phase is the one
+  // a stalled bench actually sits in ("waiting for the display's 1C1"), so it is worth the
+  // hand-driven version.
+  CarRig r;
+  r.d.begin();
+  // Self-ACK stands in for the display's `551`/`5F1`, and it has to be armed BEFORE the
+  // 151 is offered — it is latched when the frame is handed to the link, not when the ACK
+  // is due. Turning it on later leaves the probe waiting for an ACK that will never come.
+  r.d.setSelfAck(true);
+  assertPhase(r, Phase::Silent, "begin() has heard nothing and said nothing");
+
+  // The panel's FIRST request arms our announce and is answered with nothing else. [CAP] 4/4.
+  r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+  expectFrame(r.link, kCarminatRequest, "the first request draws the BA announce");
+  expectNoFrame(r, "…and nothing else");
+  assertPhase(r, Phase::Announced, "our BA is out; the panel's next request draws the burst");
+
+  // …and the panel's NEXT one schedules the burst.
+  r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+  expectNoFrame(r, "the second request schedules B0; it transmits nothing at once");
+  assertPhase(r, Phase::HelloPending, "the burst is scheduled but not yet on the wire");
+
+  r.clk.advance(carminat::kHelloFirstDelayMs);
+  r.d.poll();
+  expectFrame(r.link, kCarminatHello, "B0 1/3 at +31 ms");
+  assertPhase(r, Phase::HelloPending, "one frame of three is not a burst");
+
+  r.clk.advance(carminat::kHelloFrameGapMs);
+  r.d.poll();
+  expectFrame(r.link, kCarminatHello, "B0 2/3");
+  assertPhase(r, Phase::HelloPending, "nor two of three");
+
+  // THE BURST IS COMPLETE AND NOTHING FOLLOWS IT. No 1C1 has arrived, so our own
+  // registration is correctly refused — this is the phase a bench stalls in when the panel
+  // never received our announce, and before it had a name it cost a session to recognise.
+  r.clk.advance(carminat::kHelloFrameGapMs);
+  r.d.poll();
+  expectFrame(r.link, kCarminatHello, "B0 3/3");
+  expectNoFrame(r, "no 151 may leave before the display has opened its own channel");
+  assertPhase(r, Phase::AwaitPeerChannel, "the burst is out; the display has not answered");
+
+  // The display opens its channel. We reflex the `5C1 74` and only then register ours.
+  r.link.inject(kPanelChannelReg);
+  r.d.poll();
+  expectFrame(r.link, kPanelChannelAck, "5C1 74 answers the display's 1C1 70");
+  expectFrame(r.link, kCarminatRegText, "and unlocks our own 151 registration");
+  assertPhase(r, Phase::Registering, "our probes are out, awaiting their ACKs");
+
+  finishCarminatRegistration(r);
+  drain(r.link);
+  assertPhase(r, Phase::Settling, "registered, but inside the measured 400 ms quiet interval");
+
+  r.clk.advance(carminat::kPayloadAfterRegistrationMs - 1);
+  r.d.poll();
+  assertPhase(r, Phase::Settling, "399 ms is not 400");
+  r.clk.advance(1);
+  r.d.poll();
+  assertPhase(r, Phase::Ready, "and only now may an application render");
+}
+
+void test_phase_falls_back_when_the_panel_voids_the_session(void) {
+  // LEAVING Ready IS THE HOOK STEP 6 NEEDS. The panel drops the session about every seven
+  // minutes on the bench — fourteen times in a 96-minute soak — and it is invisible because
+  // recovery works. There is exactly one edge here, and this test pins it so that the drop
+  // snapshot can be hung on it without hunting through nine booleans for the moment.
+  CarRig r;
+  r.d.begin();
+  openCarminatSession(r);
+  r.clk.advance(carminat::kPayloadAfterRegistrationMs);
+  r.d.poll();
+  drain(r.link);
+  assertPhase(r, Phase::Ready, "the soak's steady state");
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.d.sessionsLost(),
+                                   "opening a session is not losing one");
+
+  // Any complete `61 11 xx` while registered says the panel forgot us.
+  r.link.inject(affatest::panelSyncStart());
+  r.d.poll();
+  assertPhase(r, Phase::HelloPending, "a voided session falls straight back to the burst");
+  TEST_ASSERT_FALSE_MESSAGE(r.d.registered(), "and FUNCSREG goes with it");
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, r.d.sessionsLost(),
+                                   "…and the drop is COUNTED, which is the whole point");
+
+  // It re-opens on its own: our BA is long since on the wire, so this request draws the
+  // burst directly rather than arming another announce.
+  finishCarminatHello(r);
+  r.link.inject(kPanelChannelReg);
+  r.d.poll();
+  drain(r.link);
+  finishCarminatRegistration(r);
+  drain(r.link);
+  r.clk.advance(carminat::kPayloadAfterRegistrationMs);
+  r.d.poll();
+  assertPhase(r, Phase::Ready, "self-healed, which is why nobody noticed fourteen of these");
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, r.d.sessionsLost(),
+                                   "recovering does not un-count the loss");
+}
+
 void test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediately(void) {
   // Legacy leaves START set until its tick emits the bootstrap, even when 00 follows 01
   // before that tick. Keep the one announce, but defer usable authorization until 00's
@@ -1070,6 +1191,8 @@ int main(int, char**) {
   RUN_TEST(test_carminat_bootstrap_is_held_until_good_auth);
   RUN_TEST(test_carminat_acks_panel_registration_as_a_reflex_without_unlocking_output);
   RUN_TEST(test_any_complete_61_11_xx_is_the_same_request);
+  RUN_TEST(test_phase_walks_the_measured_opening_in_order);
+  RUN_TEST(test_phase_falls_back_when_the_panel_voids_the_session);
   RUN_TEST(test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediately);
   RUN_TEST(test_short_dlc_carminat_auth_request_stays_silent);
   RUN_TEST(test_short_dlc_peer_alive_is_honoured);

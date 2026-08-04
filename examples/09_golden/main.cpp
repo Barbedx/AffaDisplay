@@ -303,6 +303,7 @@ String statusText() {
   char b[720];
   snprintf(b, sizeof(b),
            "%s   %s %s   img %.8s\nup %lus\n\n"
+           "phase   %s   drops %lu  last %lus ago\n"
            "sync    0x%02X  %s%s%s\n"
            "screens ok %lu  failed %lu  lastResult %u  inFlight %s\n"
            "rows    %s\n"
@@ -311,6 +312,15 @@ String statusText() {
            "pins    rx=GPIO%d tx=GPIO%d @ %lu bit/s   (esp32_can via CanCommonLink)\n",
            kVersion, __DATE__, __TIME__, ESP.getSketchMD5().c_str(),
            static_cast<unsigned long>(millis() / 1000),
+           // THE FIRST LINE TO READ WHEN NOTHING IS ON THE GLASS. A phase that will not
+           // advance names the frame that is missing: AwaitPeerChannel is a panel that never
+           // got our announce, HelloPending is a burst the controller will not accept.
+           // `drops` is the ~7-minute deauthorization that a whole 96-minute soak failed to
+           // notice because nothing counted it.
+           affa::phaseName(st.phase),
+           static_cast<unsigned long>(st.sessionsLost),
+           static_cast<unsigned long>(
+               st.lastSessionLossMs ? (millis() - st.lastSessionLossMs) / 1000 : 0),
            static_cast<unsigned>(st.sync),
            affa::hasFlag(st.sync, affa::SyncState::Failed) ? "FAILED " : "",
            affa::hasFlag(st.sync, affa::SyncState::PeerAlive) ? "PEER_ALIVE " : "",

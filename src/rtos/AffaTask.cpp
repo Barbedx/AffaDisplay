@@ -352,7 +352,10 @@ void AffaTask::publish(uint32_t iterUs) {
   }
 
   Status s;
-  s.sync           = _d->syncState();
+  s.sync              = _d->syncState();
+  s.phase             = _d->phase();
+  s.sessionsLost      = _d->sessionsLost();
+  s.lastSessionLossMs = _d->lastSessionLossMs();
   s.running        = !_stop;
   s.registered     = _d->registered();
   s.busy           = _d->busy();

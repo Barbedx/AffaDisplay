@@ -112,6 +112,29 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   void setSelfAck(bool on);
 
   // ---- observation --------------------------------------------------------
+  // WHERE THE OPENING HAS GOT TO. One ordered value, derived from the sync state; see the
+  // Phase comment in AffaTypes.h for why it exists and what each value means.
+  //
+  // PUT IT ON EVERY DIAGNOSTIC SURFACE. `synced()` and `registered()` answer an
+  // application's question; this answers a person's — "why is nothing rendering?" — and
+  // every protocol bug of 2026-07/08 was found, eventually, by learning to read the nine
+  // booleans it replaces in the right order.
+  //
+  // Step 3 of docs/REFACTOR-PLAN.md: it is DERIVED here, so it cannot disagree with the
+  // machine it describes. Step 4 inverts that and deletes the booleans; the phase tests are
+  // what make that safe.
+  Phase     phase()      const;
+
+  // HOW OFTEN THE PANEL HAS DROPPED US, and when it last did. Counted on the FuncsReg
+  // falling edge, which is exactly where Phase leaves Ready.
+  //
+  // COUNTED, NEVER SAMPLED, for the same reason LinkHealth is: a session that is lost and
+  // re-opened in 300 ms looks, in any single sample, exactly like one that was never lost.
+  // A 1 h 36 m soak on 2026-08-04 reported `failed 0` and every driver counter at zero while
+  // the panel deauthorized us FOURTEEN times, because nothing counted it.
+  uint32_t sessionsLost() const;
+  uint32_t lastSessionLossMs() const;   // 0 if none since begin()
+
   SyncState syncState() const override;
   bool      synced()     const;   // !hasFlag(state, Failed)
   bool      registered() const;   //  hasFlag(state, FuncsReg)
@@ -514,6 +537,9 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   void*     _pollOwner   = nullptr;   // null = unchecked (caller-owned mode)
   TaskIdFn  _pollOwnerFn = nullptr;
   uint32_t  _foreignPolls = 0;  // poll() calls from a task that is not the owner
+  // Sessions the panel has taken away since begin(). See sessionsLost().
+  uint32_t  _sessionsLost      = 0;
+  uint32_t  _lastSessionLossMs = 0;
   uint32_t  _lastOverflow = 0;  // last ICanLink ringOverflow we reported
   uint32_t  _txDropCount  = 0;  // frames ICanLink::trySend() hard-refused, counted here so the
                                 // LinkError event does not need a driver status read
