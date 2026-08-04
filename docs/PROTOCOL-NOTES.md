@@ -8,6 +8,40 @@ are still guesses, and what the raw captures show. It exists so the library can 
 
 Read this before changing any constant. Read `WIRE-SPEC.md` before emitting one.
 
+> ## ⚠️ SUPERSEDED ON THE CARMINAT OPENING — 2026-08-04
+>
+> This is a **research scratchpad**, and it is deliberately allowed to keep superseded
+> thinking so that the reasoning stays auditable. Treat everything below concerning the
+> Carminat session opening, the heartbeat, and function registration as **historical**. The
+> authority is now `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`, derived from 579 frames across
+> four passive sniffs of a real OEM Renault radio driving a real Carminat panel
+> (`docs/captures/*.csv`) with no ESP32 on the bus — a strictly stronger witness than any of
+> W1–W10 below, because both endpoints are factory hardware and the whole opening is present.
+>
+> What it overturned, so you do not re-derive it from these notes:
+>
+> * **We speak first.** One bounded `3AF B9` + `3AF BA` pair into silence; the panel answers
+>   `61 11 xx` 7.24 ms later in the co-boot capture.
+> * **`61 11 00` and `61 11 01` are the same request.** One capture completes an entire
+>   session on sixteen `01` frames and zero `00`. The low bit is panel state, not
+>   authorization.
+> * **The B0 burst answers the panel's *second* request**, +30.75 ms, anchored on that
+>   request and not on our `BA` (spread 0.79 ms vs 80 ms across four captures). Exactly three
+>   byte-identical `B0 14 11 00 1F 00 00 00`, never two, never four — which settles open
+>   question 4 in §"the duplicated B0" below.
+> * **`B9` is a free-running 500.08 ms heartbeat (σ 0.33), not a reply to `69`** (507.83 ms,
+>   σ 4.60). Their phase slides monotonically and wraps past zero. `replyToPing` is `false`.
+> * **`151 70` / `1F1 70` are part of the opening**, 0.1–0.3 ms after B0#3 and pipelined
+>   0.29 ms apart — not lazy, not serialised.
+> * **`5C1 74` answers every `1C1` within ~0.5 ms, unconditionally**, before any
+>   authorization has completed. 12/12.
+> * **`30 01 00` is real ISO-TP flow control** (CTS, BS = 1, STmin = 0), not a bespoke
+>   per-frame ACK; and the first consecutive frame is `0x21`, not `0x20`.
+> * **The filler byte is a *sender identity*, 0/579 exceptions** — `0xA3` display, `0x00`
+>   radio. Still never a validation rule (`0x00` only means "not the display"), but the
+>   "don't-care" framing in §"the filler byte is a don't-care" understates its evidential
+>   value.
+
 ---
 
 ## 0. Witnesses
@@ -61,7 +95,9 @@ same rule. W1/W3 confirm on the wire.)*
 
 Two consequences that the legacy code obscured and the library must not:
 
-* `02 54 03`, `03 52 09 FF FF`, `05 56 31 32 33 34`, `07 29 01 7E 80 00 00 00` are **not**
+* `02 54 03`, `03 52 09 FF FF` *(the OEM bus spells this `03 52 09 **00 00** 00 00 00` —
+  zero-padded, 4/4; the `FF FF` here is the historical MeganeCAN form)*, `05 56 31 32 33 34`,
+  `07 29 01 7E 80 00 00 00` are **not**
   four unrelated magic frames. They are single frames of length 2, 3, 5 and 7 carrying the
   commands `0x54`, `0x52`, `0x56`, `0x29`. Once you see that, `setState`'s leading `0x03`
   and `setTime`'s leading `0x05` stop looking like part of the command and start looking

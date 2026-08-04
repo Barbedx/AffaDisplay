@@ -72,12 +72,22 @@ a cold power cycle: **there is no polite window.**
 The **exact** image that worked at 11:50, rebuilt from commit `0ba355a` into a clean worktree
 and flashed, is deaf too — `rx 0, rxErr 129`. Bisecting our own commits is pointless.
 
-### 1.7 `61 11 01` means "your registration is void"
+### 1.7 A `61 11 xx` while we hold registrations means "your registration is void"
 
 Not "hello again". Every implementation — the mhroczny reference, MeganeCAN, and this library
-until today — latches `START`, re-arms `BA`, and **leaves `FUNCSREG` set**, so the master goes
+until then — latches `START`, re-arms `BA`, and **leaves `FUNCSREG` set**, so the master goes
 on believing it is registered and never re-probes. Both ends then wait for each other for
 ever. Fixed in `eefcfb2`; see `docs/PROTOCOL.md` §3.3.
+
+> **Amended 2026-08-04: the third byte is not part of this signal.** This heading read
+> "`61 11 01` means…". Against the four OEM captures a **registered panel sends no `61 11` at
+> all**, `00` or `01`; it is the *arrival* of a complete request while `FUNCSREG` is latched
+> that declares the session void. Keying on `01` alone re-created the exact deadlock this
+> section describes: on the bench the panel sent `61 11 **00**` forty-one times while the
+> firmware, seeing no `01`, kept pushing fullscreens at a panel that had already dropped it.
+> Test `len >= 3` for well-formedness, then ignore `data[2]`. And note that `61 11 01`
+> arriving *before* registration is an ordinary request that authorizes exactly as much as
+> `00` does — see `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md` §2.0.
 
 ### 1.8 The filler byte identifies the sender
 

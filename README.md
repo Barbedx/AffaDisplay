@@ -30,8 +30,8 @@ MIT · ESP32 / ESP32-C3 · Arduino + PlatformIO · no heap after `begin()` · no
 ### What it is and what it is not
 
 **It is** a complete, self-contained implementation of the *panel side* of the Renault
-AFFA display protocol: the sync handshake, lazy function registration, ISO-TP framing,
-the per-frame ACK state machine, key decoding and encoding, and every screen the panel
+AFFA display protocol: the sync handshake, `0x70` function registration, ISO-TP framing,
+the flow-controlled ACK state machine, key decoding and encoding, and every screen the panel
 knows how to draw — text, clock, menu, popup, fullscreen, confirm box, info list.
 
 It talks to two panel families:
@@ -97,10 +97,10 @@ later through `onComplete(cb, ctx)`, carrying the same `TxTicket` the call issue
 
 > ### ⚠️ Vehicle-bus session ownership
 >
-> Carminat/AFFA3 NAV is silent after `begin()` until the display starts its `0x3CF: 61 11 xx`
-> session request. Other panel profiles have their own session cadence. Once a session is
-> active the library can answer registration with `0x74` on `id | 0x400`; on a live vehicle
-> bus, make sure no factory node owns the same role. Prefer a bench harness — see
+> Carminat/AFFA3 NAV opens with a bounded `3AF B9` + `3AF BA` announce from us; the display
+> then answers on `0x3CF: 61 11 xx` and the session proceeds. Other panel profiles have their
+> own session cadence. The library answers registration with `0x74` on `id | 0x400`; on a live
+> vehicle bus, make sure no factory node owns the same role. Prefer a bench harness — see
 > [Developing without a car](#developing-without-a-car).
 
 Installation, `platformio.ini`:
@@ -128,18 +128,48 @@ is needed because the package has no external CAN dependency.
 
 > ### Carminat/AFFA3 NAV session rule
 >
-> The display, not the ESP32, starts the session. The Carminat profile transmits **nothing**
-> after `begin()` until the display sends a complete `0x3CF: 61 11 xx` request (DLC at
-> least 3). Every such request receives the proven three-frame Carminat hello burst:
-> `70 1A 11`, then `B0 14 11`, then the identical `B0 14 11` again.
+> **Settled 2026-08-04 against four passive captures of a real OEM Renault radio driving a
+> real Carminat panel.** Derivation: [`docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`](docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md).
 >
-> `61 11 01` is the **bootstrap** request: it receives that hello burst and exactly one,
-> bounded `B9` + `BA` control sequence. It does **not** authorize function registration,
-> rendering, display power, text, or the clock. Only a later `61 11 00` authorizes those
-> operations; the library then registers functions sequentially and releases queued output.
-> A bare `69` is liveness only and cannot start a session. In particular, Carminat never
-> polls `BA` periodically: repeated/retransmitted `01` frames are coalesced and cannot
-> create a `BA` stream.
+> **We speak first.** Into a silent bus the library announces one bounded `3AF B9` + `3AF BA`
+> pair. The panel then requests on `0x3CF: 61 11 xx` (DLC ≥ 3) on its own ~104 ms timer. The
+> first request only *arms* the announce; the panel's **next** request draws the three-frame
+> burst `B0 14 11 00 1F 00 00 00` ×3, **30.75 ms** after it, 31 ms apart.
+>
+> **`61 11 00` and `61 11 01` are the same request.** The low bit reports the panel's own
+> state, not an authorization grade. The panel's `1C1 70` lands between the first and second
+> `B0`, and **we must answer `5C1 74` within ~0.5 ms, unconditionally, before any
+> authorization has completed.** Registration (`151 70`, `1F1 70`) follows 0.1–0.3 ms after
+> the third `B0` — it is part of the opening, not of the first render. Then 400 ms, then
+> `151 03 52 09 …` (display ON) — always the first application payload, never a screen and
+> never a clock. `3AF B9` is a **free-running 500 ms heartbeat, not a reply to the panel's
+> `69`**, and it does not start until registration completes. `BA` is never periodic.
+>
+> **A registered panel never sends `61 11` at all**, so any complete `61 11 xx` arriving while
+> the library holds registrations means the panel has voided the session: tear down and
+> re-open, whatever the third byte says.
+>
+> <details><summary>What this box used to say, and what disproved it</summary>
+>
+> It read: *"The display, not the ESP32, starts the session … transmits **nothing** after
+> `begin()` … Every such request receives the proven three-frame Carminat hello burst:
+> `70 1A 11`, then `B0 14 11`, then the identical `B0 14 11` again. `61 11 01` is the
+> **bootstrap** request … It does **not** authorize function registration, rendering, display
+> power, text, or the clock. Only a later `61 11 00` authorizes those operations; the library
+> then registers functions **sequentially**."*
+>
+> * **We are not silent** — in the co-boot capture the panel's first `61 11 00` arrives
+>   **7.24 ms after our `BA`**, answering it.
+> * **`70 1A 11` appears in zero of the 579 OEM frames.** The default burst is three
+>   *identical* `B0 14 11 00 1F 00 00 00` frames; `70/B0/B0` is the opt-in legacy profile.
+> * **`01` authorizes exactly as much as `00` does.**
+>   `docs/captures/aknowledge offed display cONNECT OT POWER.csv` holds sixteen `61 11 01`
+>   frames and zero `61 11 00`, and completes a full session on them. Waiting for a `00`
+>   cost a bench session: the panel repeated `01` for fifteen seconds while the library
+>   refused to answer.
+> * **Registration is pipelined, not sequential** — `1F1 70` goes out 0.29 ms after
+>   `151 70`, before either ACK returns.
+> </details>
 
 ### Wiring
 
@@ -168,9 +198,13 @@ The bench board is an **ESP32-C3 SuperMini** plus a 3.3 V CAN transceiver
 > not a wiring recipe. `examples/01_bringup` carries an explicit legacy override only for
 > an older, differently soldered rig.
 
-**Carminat/AFFA3 NAV is opened by the panel.** Nothing appears until it sends a complete
-`0x3CF: 61 11 xx` request; the library then answers with the hello burst. A powered bench
-with no panel stays silent — that is correct behaviour, not a fault.
+**Carminat/AFFA3 NAV opening is a two-sided exchange, and we move first.** The library
+announces one bounded `3AF B9` + `3AF BA` pair, the panel replies on `0x3CF: 61 11 xx`, and
+its *next* request draws the `B0` announce burst 31 ms later. A powered bench with no panel
+therefore shows the `B9`/`BA` pair and then nothing further — that is correct behaviour, not
+a fault. (This paragraph used to say the library transmits nothing at all until the panel
+speaks; the OEM captures show our `BA` first, with the panel's request arriving 7.24 ms
+after it.)
 
 ### Supported panels
 
@@ -655,8 +689,8 @@ Licence: **MIT**, see [`LICENSE`](LICENSE).
 ### Що це таке і чим воно не є
 
 **Це** повна самодостатня реалізація *панельного боку* протоколу Renault AFFA: sync
-handshake, лінива реєстрація функцій, ISO-TP фрагментація, автомат станів для покадрового
-ACK, декодування і кодування кнопок, і всі екрани, які панель уміє малювати — текст,
+handshake, реєстрація функцій через `0x70`, ISO-TP фрагментація, автомат станів для ACK із
+керуванням потоком, декодування і кодування кнопок, і всі екрани, які панель уміє малювати — текст,
 годинник, меню, popup, повноекранний текст, вікно підтвердження, список інформації.
 
 Підтримуються дві родини панелей:
@@ -722,9 +756,10 @@ void loop() {
 
 > ### ⚠️ Хто починає сесію на шині автомобіля
 >
-> Carminat/AFFA3 NAV після `begin()` мовчить, доки дисплей не почне сесію запитом
-> `0x3CF: 61 11 xx`. Інші профілі панелей мають власний ритм сесії. Коли сесія активна,
-> бібліотека може відповісти на реєстрацію `0x74` на `id | 0x400`; на живій шині автомобіля
+> Carminat/AFFA3 NAV відкриває сесію з нашого боку: після `begin()` бібліотека оголошує одну
+> обмежену пару `3AF B9` + `3AF BA`, і вже на неї дисплей відповідає запитом
+> `0x3CF: 61 11 xx`. Інші профілі панелей мають власний ритм сесії.
+> Бібліотека відповідає на реєстрацію `0x74` на `id | 0x400`; на живій шині автомобіля
 > переконайтеся, що цю саму роль не виконує штатний вузол. Краще починати зі стенда — див.
 > [Розробка без автомобіля](#розробка-без-автомобіля).
 
@@ -778,14 +813,33 @@ TJA1051T-3, *не* 5 В TJA1050 без узгодження рівнів).
 > а не схема підключення. `examples/01_bringup` має явний legacy-перемикач лише для старого
 > стенду з іншим паянням.
 
-**Carminat/AFFA3 NAV починає розмову сам.** Після `begin()` бібліотека не передає, доки
-дисплей не надішле повний `0x3CF: 61 11 xx`. На кожен такий запит приходить перевірений
-три-кадровий Carminat hello: `70 1A 11`, `B0 14 11`, `B0 14 11`.
+**Carminat/AFFA3 NAV: першими говоримо ми.** Після `begin()` бібліотека оголошує одну
+обмежену пару `3AF B9` + `3AF BA` у тишу. Далі дисплей надсилає `0x3CF: 61 11 xx` за власним
+таймером ~104 мс; **перший** запит лише зводить курок, а сплеск із трьох однакових кадрів
+`B0 14 11 00 1F 00 00 00` (31 мс один від одного) виходить через **30.75 мс після
+наступного** запиту. Між `B0`#1 і `B0`#2 панель надсилає `1C1 70`, і ми **зобов'язані**
+відповісти `5C1 74` протягом ~0.5 мс — безумовно, на будь-якій фазі. Реєстрація
+(`151 70`, `1F1 70`, конвеєрно, за 0.29 мс одна від одної) іде через 0.1–0.3 мс після
+`B0`#3 і є частиною відкриття, а не першого рендера. Потім 400 мс — і `151 03 52 09 …`
+(вмикання екрана), завжди першим прикладним кадром. `3AF B9` — вільний 500-мс heartbeat,
+**не відповідь** на `69` панелі, і він не стартує до завершення реєстрації. `BA` ніколи не
+періодичний.
 
-`61 11 01` — лише bootstrap: він запускає hello і один обмежений `B9` + `BA`, але не
-дозволяє реєстрацію, рендер, живлення дисплея чи годинник. Лише пізній `61 11 00` дозволяє
-послідовну реєстрацію функцій та виведення з черги. Окремий `69` — це liveness, не старт
-сесії; Carminat не опитує `BA` періодично.
+**`61 11 00` і `61 11 01` — це один і той самий запит.** Молодший біт повідомляє власний
+стан панелі, а не рівень авторизації.
+
+> **Виправлено 2026-08-04 за чотирма OEM-захопленнями** (`docs/captures/*.csv`, розбір у
+> `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`). Тут раніше стояло: *"бібліотека не передає,
+> доки дисплей не надішле повний `0x3CF: 61 11 xx`"*, *"три-кадровий Carminat hello:
+> `70 1A 11`, `B0 14 11`, `B0 14 11`"*, *"`61 11 01` — лише bootstrap … Лише пізній
+> `61 11 00` дозволяє послідовну реєстрацію"*. Спростовано: наш `BA` іде першим (панель
+> відповідає на нього через 7.24 мс); `70 1A 11` не трапляється **жодного разу** серед 579
+> OEM-кадрів; а `docs/captures/aknowledge offed display cONNECT OT POWER.csv` містить
+> шістнадцять `61 11 01` і жодного `61 11 00` — і повністю проходить сесію на них.
+
+Окремий `69` — це liveness, не старт сесії. **Зареєстрована панель узагалі не надсилає
+`61 11`**, тож будь-який повний `61 11 xx` під час утримуваної реєстрації означає, що панель
+скасувала сесію — незалежно від третього байта.
 
 ### Підтримувані панелі
 

@@ -230,16 +230,34 @@ panel; carrying it for `AffaRing` (a 40-line power-of-two ring) is not a trade w
 If you keep none of this, `docs/WIRE-SPEC.md` is the file you want; it is written to be
 sufficient on its own. The pieces you cannot skip, in the order they bite:
 
-1. **The handshake.** The panel opens the conversation with `61 11` on `0x3CF`; you answer
-   with the hello burst on `0x3AF`/`0x3DF` (Carminat sends **three** frames, of which the
-   second and third are byte-identical — that is not a typo in the spec), then heartbeat at
-   1 Hz and answer the panel's `0x69` ping. Get this wrong and nothing else ever runs.
-2. **Lazy function registration.** Before the first payload on a function id, a `70` probe
-   walks the **whole** function table in order (`0x151` then `0x1F1`; `0x121` then `0x1B1`).
-   Registering only the id you are about to use stalls.
-3. **ISO-TP framing with a per-frame ACK.** 8 bytes in frame 0, 7 per continuation, PCI
-   `0x20 | (n & 0x0F)` — **wrapping**, so frame 16 is `0x20`, not `0x30`. Ceiling: 113 bytes.
-   The peer answers each frame on `id | 0x400` with `30 01 00` (keep going) or `0x74` (done).
+1. **The handshake — and on Carminat *you* open it.** Announce one bounded `B9` + `BA` pair
+   on `0x3AF` into silence; the panel then requests `61 11 xx` on `0x3CF` (`00` and `01` are
+   **the same request**), and its **next** request +30.75 ms draws your hello burst on
+   `0x3AF`/`0x3DF` — Carminat sends **three byte-identical** frames 31 ms apart, and that is
+   not a typo in the spec. **Answer the panel's `1C1` with `5C1 74` within ~0.5 ms,
+   unconditionally**, including during the burst and before any registration. Then heartbeat
+   `B9` **free-running at 500 ms** and answer the panel's `0x69` ping with **nothing** — the
+   two are independent timers, not a request/response pair. Get any of this wrong and nothing
+   else ever runs.
+   *(Corrected 2026-08-04: this item used to say the panel opens the conversation, that only
+   the second and third hello frames are identical, and that you "heartbeat at 1 Hz and answer
+   the panel's `0x69` ping". All three are disproven by `docs/captures/*.csv`; see
+   `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`.)*
+2. **Function registration is part of the opening, not of the first render.** The `70` probe
+   walks the **whole** function table in order (`0x151` then `0x1F1`; `0x121` then `0x1B1`),
+   0.1–0.3 ms after the last hello frame, pipelined 0.29 ms apart, with no payload involved.
+   Registering only the id you are about to use stalls; registering lazily means an idle
+   build never finishes a session. Then wait **400 ms** from the final ACK and send
+   `151 03 52 09 00 00 00 00 00` — display ON is **always** the first application payload,
+   never a screen and never a clock.
+3. **ISO-TP framing with BS = 1 flow control.** 8 bytes in frame 0, 7 per continuation, PCI
+   `0x20 | (n & 0x0F)` with `n` starting at **1** — so the first continuation is `0x21`, and
+   the counter **wraps**, `0x2F → 0x20 → 0x21`. Ceiling: 113 bytes. The peer answers each
+   frame on `id | 0x400` with `30 01 00` (ISO-TP flow control: CTS, BlockSize 1, STmin 0 —
+   send exactly one more) or `0x74` (the declared length is satisfied). BS = 1 makes it
+   *behave* like a per-frame ACK, which is why it was long mislabelled as one; parse the FS
+   nibble rather than constant-matching all three bytes, but keep the one-frame-per-reply
+   pacing — bursting desynchronises the panel.
 4. **Treat "DONE while bytes remain" as SUCCESS.** A real panel stops at the declared FF_DL,
    not at the length you built. This is why `showMenu` is 13 frames on hardware and 14
    through a self-ACK emulator. A sender that calls that a short write breaks the menu on

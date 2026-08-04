@@ -642,9 +642,13 @@ struct SyncProfile {
   uint8_t  requestByte;   // 0xBA / 0x7A   sync request, data[0]
   uint8_t  requestArg;    // Carminat 0x00, UpdateList 0x01 — data[1] of the request
   uint8_t  filler;        // 0x00 / 0x81   pads every frame we build
-  const uint8_t (*hello)[8];  // frames sent in reply to `61 11`, in order
+  const uint8_t (*hello)[8];  // the announce burst, in order. On Carminat it is drawn by a
+                              // `61 11 xx` that arrives AFTER our `BA` — specifically the
+                              // panel's NEXT one — and timed +31 ms from that request, not
+                              // from `BA`. The `xx` byte is not read. See §2.7.
   uint8_t  helloCount;    // Carminat 3, UpdateList 1
-  bool replyToPing = false;
+  bool replyToPing = false;   // MUST stay false for Carminat: `B9` is a free-running 500 ms
+                              // heartbeat, not a pong. Setting it true doubles our `B9` rate.
   bool waitForPanel = false;
   bool sendSyncRequest = true;
   bool requireAuthRequest = false;
@@ -674,16 +678,30 @@ affa::CarminatDisplay display(
     affa::carminat::CarminatHelloProfile::CapturedB0x3);
 ```
 
-`CapturedB0x3` holds the strict `61 11 00` gate and sends three identical
-`B0 14 11 00 1F 00 00 00` frames at +31 ms intervals. It waits for link acceptance of
-the third frame before inserting the sequential `151` / `1F1` registration work, waits
-400 ms after the final registration ACK before a zero-padded power command, and paces B9/69
-liveness at about 500 ms. Its `01` path is one `B9` + `BA` discovery pair only.
+`CapturedB0x3` announces one bounded `B9` + `BA` pair into silence, then sends three
+identical `B0 14 11 00 1F 00 00 00` frames at +31 ms intervals in answer to a `3CF 61 11 xx`
+that arrives after that `BA`. It waits for link acceptance of the third frame before
+inserting the `151` / `1F1` registration work, waits 400 ms after the final registration ACK
+before a zero-padded power command, and free-runs `B9` at 500 ms.
 
-`MeganeCanLegacy70B0B0` keeps all of that safety policy but substitutes the historical
-immediate MeganeCAN `70 1A 11 ...`, `B0 ...`, `B0 ...` opening. It is for a panel that
-has demonstrated that legacy requirement; it is never selected automatically or mixed into
-the default sequence.
+> **Corrected 2026-08-04 against four OEM captures** (`docs/captures/*.csv`, derivation in
+> `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`). This paragraph used to read *"holds the strict
+> `61 11 00` gate … the **sequential** `151` / `1F1` registration work … **paces** B9/69
+> liveness at about 500 ms. **Its `01` path is one `B9` + `BA` discovery pair only.**"* Four
+> corrections:
+> * **There is no `00` gate.** `61 11 00` and `61 11 01` are the same request; one capture
+>   completes a whole session on sixteen `01` frames and zero `00`.
+> * **The trigger is our `BA`, positionally, not the byte value** — and the burst answers the
+>   panel's *second* request, ~104 ms after the one that armed it. Anchored on the request the
+>   31 ms holds to 0.79 ms across four captures; anchored on `BA` it scatters over 80 ms.
+> * **Registration is part of the opening and is pipelined** — both probes 0.1–0.3 ms after
+>   B0#3, `1F1 70` on the wire 0.29 ms after `151 70`, before either ACK returns.
+> * **`B9` is not paced against `69`; it free-runs.** See §2.7.
+
+`MeganeCanLegacy70B0B0` keeps the same bounded recovery policy but substitutes the historical
+immediate MeganeCAN `70 1A 11 ...`, `B0 ...`, `B0 ...` opening — a frame that appears in
+**zero** of the 579 OEM frames. It is for a panel that has demonstrated that legacy
+requirement; it is never selected automatically or mixed into the default sequence.
 
 The UpdateList profile remains separate: `3DF` / `79` / `7A 01`, filler `81`, and
 function IDs `121` / `1B1`. Its old `affa3.c` reference is not a Carminat authority.
@@ -1088,13 +1106,19 @@ class AffaDisplayBase : public IDisplay, public IPanel {
 `pumpSync()` runs once per `poll()`. Nothing here is conditional on how often `poll()`
 is called.
 
-> **Carminat override.** Read the following as generic FSM structure, not as the default
-> Carminat wire sequence. Carminat waits for complete `3CF 61 11 xx`; `01` schedules one
-> `B9` + `BA` discovery pair and remains locked, while `00` stages default B0/B0/B0 at
-> +31 ms gaps. Each B0 only needs `ICanLink::send()` acceptance at the library boundary.
-> Registration starts after the third acceptance, in strict `151` then `1F1` ACK order;
-> normal B9/69 is about 500 ms and no timer emits BA. See section 2.7 and
-> `WIRE-SPEC.md` section 5.3.
+> **Carminat override — rewritten 2026-08-04.** Read the following as generic FSM structure,
+> not as the Carminat wire sequence. Carminat announces one bounded `B9` + `BA` pair into
+> silence; a complete `3CF 61 11 xx` (DLC ≥ 3, **`xx` unread — `00` and `01` are the same
+> request**) that arrives after that `BA` arms the announce, and the panel's **next** request
+> ~104 ms later stages B0/B0/B0 at +31 ms gaps from *that request*. Each B0 only needs
+> `ICanLink::send()` acceptance at the library boundary. Registration starts after the third
+> acceptance, as part of the opening, with `151 70` and `1F1 70` **pipelined** 0.29 ms apart.
+> `B9` free-runs at 500 ms and does not start until registration completes; no timer emits
+> `BA`. See section 2.7, `WIRE-SPEC.md` §5.3, and `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`.
+>
+> *This note previously read "`01` schedules one `B9` + `BA` discovery pair and remains
+> locked, while `00` stages default B0/B0/B0" and "in strict `151` then `1F1` ACK order".
+> Both are disproven — see §2.7.*
 
 ```
 if (_passive) return;                      // the radio owns the handshake
@@ -1124,28 +1148,43 @@ RX side, on `syncReplyId`:
 * `61 11 xx …` — the panel asks us to announce. Emit `helloCount` frames from
   `profile.hello`, in order, on `syncId` — paced to at most one burst per
   `AFFA_HELLO_MIN_MS`, because an unacknowledged panel repeats the request at line rate
-  and answering each one is a 4400 f/s flood no TX queue can drain. Clear `Failed`. If
-  `len >= 3 && data[2] == 0x01`, the panel is declaring the REGISTRATION VOID: set
-  `Start` AND, if `FuncsReg` is currently set, drop every registration so the next render
-  re-registers from function zero. The drop is guarded on `FuncsReg`, not on the edge of
-  `Start` — `pumpSync()` clears `Start` once a second, and an edge trigger would re-drop
-  mid-registration and livelock the pass it provoked. (Leaving `FuncsReg` set here was
-  the historic bug: every implementation believed it was still registered, the panel
-  believed the opposite, and only a power cycle ever ended the argument. Observed live
-  2026-07-29 as `3CF 61 11 01` repeated at ~1500 f/s.)
-* `69 …` — peer alive. Set `PeerAlive` and **return**. The legacy code called `tick()`
-  from here, which emitted an extra heartbeat per ping. It does not any more: exactly
-  one `B9` leaves per `AFFA_SYNC_INTERVAL_MS`, which is what the capture shows.
+  and answering each one is a 4400 f/s flood no TX queue can drain. Clear `Failed`.
+  **If `FuncsReg` is currently set, the panel is declaring the REGISTRATION VOID** — set
+  `Start` and drop every registration so the next render re-registers from function zero,
+  and stop application traffic until the session is re-opened. The drop is guarded on
+  `FuncsReg`, not on the edge of `Start` — `pumpSync()` clears `Start` once a second, and an
+  edge trigger would re-drop mid-registration and livelock the pass it provoked. (Leaving
+  `FuncsReg` set here was the historic bug: every implementation believed it was still
+  registered, the panel believed the opposite, and only a power cycle ever ended the
+  argument. Observed live 2026-07-29 as `3CF 61 11 01` repeated at ~1500 f/s.)
+
+  > **Corrected 2026-08-04:** the void test used to be `len >= 3 && data[2] == 0x01`. **The
+  > third byte plays no part.** A registered panel sends **no** `61 11` at all — `00` or `01`
+  > — in any of the four OEM captures; the arrival of a complete request while we hold
+  > registrations *is* the void indication. On the bench the panel sent `61 11 **00**` forty-one
+  > times while firmware keyed on `01` kept pushing fullscreens at a panel that had already
+  > dropped us. Test `len >= 3` for well-formedness only, then ignore `data[2]`.
+
+* `69 …` — peer alive. Set `PeerAlive` and **return**. Transmit **nothing**. The legacy code
+  called `tick()` from here, which emitted an extra heartbeat per ping. `B9` is a free-running
+  500.08 ms timer (σ 0.33 ms) and the panel's `69` runs at 507.83 ms (σ 4.60) on a completely
+  independent clock — their phase slides monotonically and wraps past zero, so `B9` cannot be
+  a reply to it. Exactly one `B9` leaves per `AFFA_SYNC_INTERVAL_MS`.
 * anything else — ignored, logged at trace.
 
-After a complete `61 11 xx` opening request, any other received frame, when `!_passive`
-and the id does not carry `replyFlag`, is
-answered with the generic ACK `id|replyFlag : { 0x74, filler x7 }`. That is the
-`RX 1C1 70 …` → `TX 5C1 74 00 …` pair in the capture.
+Any received frame, when `!_passive` and the id does not carry `replyFlag`, is answered with
+the generic ACK `id|replyFlag : { 0x74, filler x7 }`. That is the `RX 1C1 70 …` →
+`TX 5C1 74 00 …` pair in the capture.
 
-> For Carminat, this generic reply is control-plane traffic: it is allowed during `01`
-> bootstrap and the good-`00` hello burst, but it does not make `linkReady()` true or
-> authorize our registration, power, text, or clock writes.
+> **For Carminat that ACK is UNCONDITIONAL — corrected 2026-08-04.** This note used to gate
+> it ("*after a complete `61 11 xx` opening request*… *allowed during `01` bootstrap and the
+> good-`00` hello burst*"). **Every frame received on `0x1C1` must be answered within ~0.5 ms,
+> at any phase, regardless of payload and regardless of session state** — 12/12 in the OEM
+> captures, latencies 0.249–0.483 ms. The panel's `1C1 70` arrives *during* the announce
+> burst, between B0#1 and B0#2, ~61 ms before our own `151`/`1F1` probes and before anything
+> resembling authorization has completed. Build it as a raw reflex on the receive path,
+> deliberately separate from the gate that releases application traffic. It still does not
+> make `linkReady()` true or authorize registration, power, text or clock writes.
 
 #### 2.9.2 The transmit FSM, specified
 
@@ -1189,6 +1228,16 @@ record `_lastCompleted = ticket`, `_lastResult = r`, and fire `CompleteCb`.
 **Lazy function registration, byte-identical to the legacy wire order.** Inside
 `enqueue()`, before pushing the payload job:
 
+> **This is a fallback on Carminat, not the wire contract — corrected 2026-08-04.** The OEM
+> radio emits `151 70` **0.10 ms after B0#3** and `1F1 70` 0.29 ms after that, as part of the
+> opening, unconditionally, with **no application involvement whatsoever**: the first
+> application payload does not exist until 400 ms later. `[OEM 4/4]` Registering lazily means
+> a build that never renders never finishes a session — it will sit looking registered and be
+> silently unregistered on the panel side. The enqueue-time push below must remain as a
+> safety net for a lost registration, but the opening path is what should normally emit these
+> probes, and it should emit them **pipelined** (both on the wire before either ACK returns),
+> not serialised. See `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md` §2.1 steps A11–A12.
+
 ```
 if (!_passive && !hasFlag(_sync, FuncsReg) && no Registration job is already queued) {
     for (i = 0; i < _funcCount; ++i)
@@ -1210,6 +1259,13 @@ Carminat therefore emits, on the first send after a resync:
 `0x151 : 70 00 00 00 00 00 00 00`, wait ACK, `0x1F1 : 70 00 …`, wait ACK, latch
 `FuncsReg`, then the payload. That is the legacy loop in `affa3_send`, turned inside
 out into a queue without changing a byte or an order.
+
+> **The bytes are right; the *shape* differs from the OEM radio.** It pipelines — `1F1 70`
+> goes out 0.29 ms after `151 70`, before `551 74` returns, and the panel answers
+> `551 74` then `5F1 74` 0.47 ms apart. Serialising is functionally equivalent and safe, but
+> it costs one extra round trip inside a latency-sensitive window and it makes a bench
+> capture harder to diff against an OEM trace. Do not read the serialised form as the wire
+> contract. `[OEM 4/4]`
 
 The queue must have room for `_funcCount + 1` jobs on the first send, so
 `AFFA_TX_QUEUE_DEPTH` must be at least 3 for either panel. The default 4 leaves one

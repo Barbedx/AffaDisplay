@@ -238,15 +238,29 @@ Those older logs are historical evidence only; the current bench rig uses the as
 
 ### 3.3 The panel opens the conversation
 
-**Nothing happens until the panel pings.** Powering up your board first and seeing only a
-1 Hz heartbeat is correct behaviour, not a fault. The order is:
+> **Corrected 2026-08-04 against four OEM captures** — see
+> `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`. The heading and the list below said the panel
+> opens the conversation, that we heartbeat "at 1 Hz and answer the panel's `0x69` ping", and
+> that registration waits for a payload. On Carminat all three are wrong.
 
-1. panel announces itself: `3CF  61 11 …`
-2. we answer with the hello burst on `0x3AF` (Carminat: **three** frames, the second and
-   third byte-identical) or `0x3DF` (UpdateList: one)
-3. we heartbeat at 1 Hz and answer the panel's `0x69` ping
-4. only now does a payload trigger the lazy `70` registration probes, and only then does
-   anything appear on the glass
+**On Carminat we make the first move, and the panel answers it.** The order is:
+
+1. **we announce**: one bounded `3AF B9` + `3AF BA` pair into a silent bus. `BA` is the
+   precondition for everything after it, and it must never become a periodic stream.
+2. panel requests: `3CF 61 11 xx`, on its own ~104 ms timer. `xx` is `00` or `01` and they
+   are **the same request** — the low bit reports panel state, not authorization. This first
+   request only *arms* the announce.
+3. the panel's **next** request draws the burst on `0x3AF` **30.75 ms** later (Carminat:
+   **three** byte-identical frames 31 ms apart) or on `0x3DF` (UpdateList: one)
+4. the panel opens its own channel with `1C1 70` between burst frames 1 and 2; **we must
+   answer `5C1 74` within ~0.5 ms, unconditionally**
+5. **registration happens here, as part of the opening** — `151 70` then `1F1 70`, pipelined
+   0.29 ms apart, 0.1–0.3 ms after the third burst frame, with no payload involved
+6. 400 ms after the final registration ACK, `151 03 52 09 …` turns the glass on — always the
+   first application payload — and only then does anything else appear on it
+7. `3AF B9` free-runs at 500 ms from then on. **It is not a reply to the panel's `0x69`**;
+   the two timers are independent and their phase wraps through zero. Answer `69` with
+   nothing.
 
 So: power the panel, *then* look at your log. If you see heartbeats and nothing else, the
 panel is not talking — check power, ground and the harness before you touch any code.
@@ -277,7 +291,7 @@ whether you have a bus at all.
 | nothing at all, `txErr` climbing | `rx`/`tx` swapped, or nothing else on the bus to ACK |
 | `txErr == 0` but no RX | your TX is fine, the panel is not powered or not wired |
 | RX frames but `synced=0` | wrong panel family selected (`AFFA_PANEL_*`) — you are answering the wrong sync id |
-| `synced=1`, `registered=0` | expected: registration is lazy, and `01_link_check` never sends a payload |
+| `synced=1`, `registered=0` | with the enqueue-time (lazy) registration path, expected — `01_link_check` never sends a payload. On Carminat this is nevertheless a **divergence from the OEM radio**, which registers as part of the opening regardless of application traffic; see §3.3. |
 | everything works, then `PeerLost` after a flash write | the TWAI ISR is not in IRAM; an OTA or NVS write stops reception. See `AFFA_PEER_TIMEOUT_MS`. |
 
 ### 3.5 Only now, a payload
@@ -387,14 +401,15 @@ of what differs between the two families' handshakes:
 | `syncId` | `0x3AF` | `0x3DF` | the id **we** transmit sync on |
 | `syncReplyId` | `0x3CF` | `0x3CF` | the id the panel answers on |
 | `replyFlag` | `0x400` | `0x400` | ACK id = `funcId \| replyFlag`, always **computed**, never tabulated |
-| `aliveByte` | `0xB9` | `0x79` | `data[0]` of our 1 Hz heartbeat |
+| `aliveByte` | `0xB9` | `0x79` | `data[0]` of our heartbeat. On Carminat that heartbeat is **free-running at 500.08 ms (σ 0.33)** and starts only after registration; it is **not** a reply to the panel's `0x69` (507.83 ms, σ 4.60, independent timer). `replyToPing` must stay `false`. |
 | `requestByte` | `0xBA` | `0x7A` | `data[0]` of our sync request |
 | `requestArg` | **`0x00`** | `0x01` | `data[1]` of the request. Carminat's `BA 00 00 …` is `0xBA` plus seven filler bytes that merely happen to be zero; UpdateList's `7A 01` is a genuine argument. **The symmetry is an illusion — do not unify them.** |
 | `filler` | `0x00` | `0x81` | pads every frame we build. Note `data[1]` of the **heartbeat** is a literal `0x00` in both families and is *not* the filler. |
-| `hello` / `helloCount` | 3 frames | 1 frame | the burst that answers the panel's `61 11`. Carminat's second and third frames are **byte-identical** — that is in the capture, not a typo. |
+| `hello` / `helloCount` | 3 frames | 1 frame | the burst drawn by a `61 11 xx` that arrives **after our `BA`** — specifically the panel's *next* one, +30.75 ms. All **three** Carminat frames are byte-identical, not just the second and third; that is in the captures, not a typo. |
 
 The function table is **not** in the profile: it is a constructor argument, because its
-**order is on the wire** — it is the order the lazy `0x70` registration probes go out in.
+**order is on the wire** — it is the transmit order the `0x70` registration probes go out in.
+(The OEM radio emits both probes 0.29 ms apart, pipelined, before either ACK returns.)
 
 ```cpp
 AffaDisplayBase(ICanLink&, IClock&, const SyncProfile&,

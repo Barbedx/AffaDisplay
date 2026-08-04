@@ -33,7 +33,7 @@ openspec view                       # dashboard
 | Capability | What it owns |
 | --- | --- |
 | [can-link](openspec/specs/can-link/spec.md) | The only seam to a CAN driver: bring-up, the receive ring, the software transmit gate, bus-off recovery, and health that is counted rather than sampled. |
-| [panel-sync](openspec/specs/panel-sync/spec.md) | The AFFA handshake as data plus one shared state machine: heartbeat, sync request, hello, peer timeout, lazy function registration, passive mode. |
+| [panel-sync](openspec/specs/panel-sync/spec.md) | The AFFA handshake as data plus one shared state machine: heartbeat, sync request, hello, peer timeout, function registration (part of the opening on Carminat), passive mode. |
 | [render-queue](openspec/specs/render-queue/spec.md) | Admission, latest-value-wins coalescing per render slot, priority, retry and backoff, preemption, and the two-verdict contract. |
 | [owned-task](openspec/specs/owned-task/spec.md) | The library owning its own poll task: single-pumper enforcement, RX-before-TX ordering, renders from any task, and making blocking visible. |
 | [carminat-panel](openspec/specs/carminat-panel/spec.md) | The Carminat / AFFA3 family: frame builders, capability answers, menu geometry, key guards, and what is bench-verified versus inferred. |

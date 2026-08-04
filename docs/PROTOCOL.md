@@ -226,9 +226,21 @@ and additionally, **while `FAILED` or `START` is set**:
 then cleared `START`. `[IMPL]`
 
 That is historical behaviour, not the Carminat library's retry policy. The current
-capture-backed rules are in §3.0: one bounded `B9` + `BA` pair announced into silence, no
-periodic BA, and a **free-running** 500 ms `B9` heartbeat that does not start until
-registration is complete.
+capture-backed rules are in §3.0: one bounded announce into silence, no periodic BA, and a
+**free-running** 500 ms `B9` heartbeat that does not start until registration is complete.
+
+> **What we transmit, and where the captures disagree with each other.** The OEM is not
+> consistent here and the documentation must not pretend otherwise. Two captures show the
+> radio's opening as `B9` then `BA` 0.29 ms apart (`on on display.csv` at 4685844,
+> `cONNECT OT POWER.csv` at 147328246); the reattach in `offed display.csv` at 84945066 is a
+> **bare `BA` with no `B9` in front of it**. Both readings fit a radio whose free-running
+> 500 ms heartbeat simply happened to tick during the opening.
+>
+> **This library transmits `BA` alone** — `carminat::kSync.bootstrapAliveFrame = false`. `BA`
+> is the question ("is anyone there?"); `B9` says "still here", which is meaningless before
+> there is a session to be still in, and it is noise in the phase that can least afford it.
+> Proven on glass 2026-08-04: handshake, registration, display-on and clock all complete with
+> the announce as a bare `BA`. Set `bootstrapAliveFrame = true` to reproduce the other form.
 
 > **Retracted here 2026-08-04:** this paragraph used to end *"…one discovery `B9` + `BA` pair
 > for `01` … and no application output before the later good `00`."* There is no "later good
@@ -243,8 +255,8 @@ registration is complete.
 ### 3.3 What the panel sends, unprompted
 
 ```
-3CF   61 11 xx A3 A3 A3 A3 A3      sync request
-3CF   69 00 A3 A3 A3 A3 A3 A3      peer-alive ping, roughly every 500 ms when healthy
+3CF   61 11 xx A3 A3 A3 A3 A3      sync request, ~104 ms while unregistered
+3CF   69 00 A3 A3 A3 A3 A3 A3      peer-alive ping, ~504 ms — an INDEPENDENT timer, §3.6
 ```
 
 Match rules — **and the loose matching is deliberate**:
@@ -254,27 +266,41 @@ Match rules — **and the loose matching is deliberate**:
 - Peer-alive: `data[0] == 0x69` **only**. Bytes 1..7 are never examined, and DLC may be
   as low as 1. `[REF][IMPL][OEM]`
 
-#### `data[2]` of `61 11` — bootstrap versus authorization
+#### `data[2]` of `61 11` — SETTLED 2026-08-04: it is not an authorization grade
 
 | value | meaning |
 |---|---|
-| `0x00` | authorization request: run the selected hello profile, then registration and output may proceed |
-| **`0x01`** | **discovery only: one bounded `B9` + `BA`, no hello/register/output** |
-| any other `xx` | ignore for application authorization and output |
+| `0x00` | the request |
+| `0x01` | **the same request.** Low bit is the panel reporting its own state |
+| any other `xx` | unobserved; treat as the request, the trigger does not read this byte |
 
-`0x01` means the panel is asking us to bootstrap its session, not that application traffic
-may resume. The historical driver treated this as a registration-loss indication and may
-receive it repeatedly while the panel is not ACKed at the CAN link layer.
+> **RETRACTED — this table used to read:** *`0x00` = authorization request … **`0x01` =
+> discovery only: one bounded `B9` + `BA`, no hello/register/output** … `0x01` means the
+> panel is asking us to bootstrap its session, not that application traffic may resume.*
+>
+> **What overturned it.** `docs/captures/aknowledge offed display cONNECT OT POWER.csv`
+> contains **sixteen `3CF 61 11 01` frames and zero `61 11 00`**, and completes a full
+> session on `01` alone — B0 burst, `151`/`1F1` registration, `03 52 00` power command and a
+> segmented text transfer. Its burst is triggered 30.751 ms after a `61 11 **01**`, which is
+> inside the 30.740–31.527 ms band the three `00` captures produce. The trigger is
+> byte-blind at offset 2. Believing otherwise cost a bench session: the panel emitted
+> `61 11 01` for fifteen seconds and the library refused to answer it, waiting for a `00`
+> that the panel had no reason to send. `[OEM][BENCH]`
 
-The legacy behaviour latches `START`, re-arms `BA` on its next tick, and leaves `FUNCSREG`
-set. On a retransmitted request that turns into a `BA` stream while the head unit still
-believes it is registered. The library does the opposite: it holds/drops registration and
-application payloads, sends one nonblocking `B9` + `BA` control sequence, and waits for a
-later full `61 11 00`. That good request is what restarts registration from function index 0
-and permits queued display output.
+**What the byte actually gates is nothing.** The gate is positional: a `61 11 xx` arriving
+**after** we have transmitted `3AF BA` arms the announce, and the panel's *next* request
+draws the B0 burst 31 ms later (§3.0). Before any `BA` has gone out, a `61 11 xx` produces
+only the bounded announce — a bare `BA` as this library sends it — because there is nothing
+else to say yet.
 
-**Read it only after checking `len >= 3`.** Short DLCs are real on this channel; reading
-`data[2]` blind reads uninitialised memory. `[REF][IMPL][CAP]`
+**A registered panel never sends `61 11` at all.** So the byte that matters is not `data[2]`
+but *when the frame arrives*: a complete `61 11 xx` received while `FUNCSREG` is latched is
+the panel telling us our registration is void, whatever the third byte says. Tear down, drop
+registrations, stop application output, re-open. `[OEM 4/4][BENCH]`
+
+**Read `data[2]` only after checking `len >= 3`** — a short `61 11` is not a request and must
+be ignored rather than answered. Short DLCs are real on this channel; reading `data[2]` blind
+reads uninitialised memory. `[REF][IMPL][CAP]`
 
 > **A cluster can send `61 23` instead of `61 11`.** Matching `data[1] == 0x11` means such
 > a peer is never answered. Known hole, not a bug — the Carminat panel sends `61 11`.
@@ -282,11 +308,19 @@ and permits queued display output.
 
 ### 3.4 Captured hello default and the historical compatibility profile
 
-For the default Carminat profile, a good `61 11 00` emits **three identical**
-`B0 14 11 00 1F 00 00 00` frames at approximately +31 ms, +62 ms, and +93 ms from
-the request. The gaps are protocol timing, not a blocking delay: only one B0 is offered at
-a time so the panel's `1C1 -> 5C1` control exchange can occur between them. The default does
-not send either B0 or `70 1A 11` for `01`.
+For the default Carminat profile, a `61 11 xx` that arrives **after our `BA`** emits
+**three identical** `B0 14 11 00 1F 00 00 00` frames at approximately +31 ms, +62 ms, and
++93 ms from that request. Exactly three — never two, never four, `[OEM 4/4]`. The gaps are
+protocol timing, not a blocking delay: only one B0 is offered at a time so the panel's
+`1C1 -> 5C1` control exchange can occur between them, and in the captures the panel's
+`1C1 70` always lands between B0#1 and B0#2.
+
+> **Corrected 2026-08-04.** This paragraph used to say *"a good `61 11 **00**`"* and to end
+> *"The default does not send either B0 or `70 1A 11` for `01`."* Both are disproven: the
+> `cONNECT OT POWER` capture draws a textbook burst 30.751 ms after a `61 11 **01**`, and it
+> is the only trigger in that entire capture because no `61 11 00` occurs in it. The `xx`
+> byte is not read by the trigger (§3.3). Note also that the burst answers the panel's
+> *second* request — the first one only arms the announce (§3.0).
 
 ```text
 TX  3AF  B0 14 11 00 1F 00 00 00   // +31 ms
@@ -305,27 +339,50 @@ TX  3AF  B0 14 11 00 1F 00 00 00
 TX  3AF  B0 14 11 00 1F 00 00 00
 ```
 
-Both profiles retain the same strict good-`00` authorization and bounded recovery policy.
-They differ only in the three opening frames and their timing.
+Both profiles retain the same bounded recovery policy and differ only in the three opening
+frames and their timing. Neither has a "good-`00` gate" any more; there is no such thing
+(§3.3). `70 1A 11` appears in **zero** of the 579 OEM frames, so the legacy profile stays
+behind its explicit opt-in.
 
-### 3.5 Function registration (`FUNCSREG`) — strictly sequential
+### 3.5 Function registration (`FUNCSREG`) — part of the opening, and pipelined
 
 `FUNCSREG` is a one-byte payload `{0x70}` on each registered function ID. It is unrelated
 to the `70 1A 11 ...` sync frame used only by the optional legacy hello profile.
 
-After the good-`00` opening has completed, registration is held behind the application gate.
-The library performs it before the queued application payload; the 10:00 POC performs it
-explicitly before display power and time. A preceding `61 11 01` never starts registration or
-a time/text/power command. Our `funcs[]` is `{0x151, 0x1F1}`, in that order, and the order is
-on the wire:
+> **RETRACTED — this section used to open:** *"After the good-`00` opening has completed,
+> registration is held behind the application gate. The library performs it before the queued
+> application payload … A preceding `61 11 01` never starts registration."* On Carminat that
+> is wrong twice over.
+>
+> **What overturned it.** In all four OEM captures the radio transmits `151 70` **0.10–0.30 ms
+> after B0#3** and `1F1 70` **0.29 ms after that**, unconditionally, with no application
+> involvement whatsoever — the first application payload does not appear until 400 ms later.
+> Registration is a step of the *opening*, not of the first render. A library that registers
+> lazily will sit looking registered and never complete a session if the application never
+> draws. `[OEM 4/4]`
+
+**Registration is triggered by the announce burst.** After B0#3 is accepted, both probes go
+out back-to-back:
 
 ```
-151   70 00 00 00 00 00 00 00      →  wait for ACK on 551
-1F1   70 00 00 00 00 00 00 00      →  wait for ACK on 5F1
+151   70 00 00 00 00 00 00 00      +0.10 ms after B0#3
+1F1   70 00 00 00 00 00 00 00      +0.29 ms after 151 70 — SENT BEFORE 551 74 ARRIVES
+551   74 A3 A3 A3 A3 A3 A3 A3      +0.48 ms
+5F1   74 A3 A3 A3 A3 A3 A3 A3      +0.47 ms   <-- FUNCSREG latches here
 ```
 
-Only after **every** entry is acknowledged is `FUNCSREG` set. After the final `5F1 74`,
-wait approximately 400 ms before `151 03 52 09 00 00 00 00 00` (display ON).
+**The two probes are pipelined, not serialised.** The OEM radio does not wait for `551 74`
+before sending `1F1 70`; the four frames go out and come back in 0.9 ms total. Our `funcs[]`
+is `{0x151, 0x1F1}` and that order is on the wire, but the *ordering* is a transmit order,
+not a request/response chain.
+
+**And the panel's own registration must come first.** The panel opens its control channel
+with `1C1 70` between B0#1 and B0#2, and we must answer `5C1 74` within ~0.5 ms (§4 of the
+ground-truth doc, 12/12) — *before* we register anything of our own, before any
+authorization has completed. Our `151`/`1F1` probes follow ~61 ms later, after B0#3.
+
+Only after **every** entry is acknowledged is `FUNCSREG` set. Then wait 400 ms ± 0.5 ms from
+`5F1 74` before `151 03 52 09 00 00 00 00 00` (display ON).
 
 #### Registration is BIDIRECTIONAL, and the filler is what tells you which way
 
@@ -354,12 +411,19 @@ apart, **immediately after a transfer was truncated mid-flight**, and was follow
 `03 52 09` (display ON) and a full screen redraw from the first frame. So the factory
 recovery for a broken session is: re-register, re-power the display, redraw. `[OEM]`
 
-#### Registration is strictly sequential — one probe, one ACK, then the next
+#### `FUNCSREG` still latches on the ACKs, and on nothing else
 
-`70` on the funcId → **wait** for `74` on `funcId | 0x400` → next funcId. `FUNCSREG` is
-latched on those ACKs and on nothing else.
+`70` on the funcId → `74` on `funcId | 0x400`. Both probes may be in flight at once (see
+above — the OEM radio pipelines them 0.29 ms apart), but `FUNCSREG` is latched on the ACKs
+and on nothing else.
 
-> **Registration therefore cannot be performed blind.** Putting the probes on the wire
+> **Amended 2026-08-04.** This heading used to read *"Registration is strictly sequential —
+> one probe, one ACK, then the next"*. Serialising is functionally equivalent and safe, but
+> it is not what the OEM radio does and it costs one extra round trip inside a
+> latency-sensitive window. Do not treat the serialised form as the wire contract when
+> comparing a bench capture against an OEM trace.
+
+> **Registration still cannot be performed blind.** Putting the probes on the wire
 > without reading the replies latches nothing, leaves unanswered probes on the bus, and
 > achieves exactly zero. Only the *hello* (§3.4) is fire-and-forget — it is an unconditional
 > answer to an unconditional request and carries no state.
@@ -380,12 +444,40 @@ For the Carminat library, `69` remains liveness only: a bare ping before any com
 `61 11 xx` produces no session/control traffic and can never authorize registration or
 application output.
 
-#### Captured heartbeat cadence
+#### Captured heartbeat cadence — `B9` IS NOT A PONG
 
-The normal captured liveness pair is approximately `3CF 69 ...` and `3AF B9 ...` every
-500 ms. A B9 offered in reply to a received 69 is paced/coalesced so retransmitted 69 frames
-cannot become a transmit storm. No B9 path is allowed to append a BA; BA remains the single
-discovery response to `61 11 01`.
+> **RETRACTED — this subsection used to read:** *"The normal captured liveness pair is
+> approximately `3CF 69 ...` and `3AF B9 ...` every 500 ms. **A B9 offered in reply to a
+> received 69 is paced/coalesced** so retransmitted 69 frames cannot become a transmit
+> storm."* Modelling `B9` as a reply to `69` is the single most damaging error available on
+> this bus, and `SyncProfile::replyToPing` is `false` for Carminat as a direct result.
+
+**They are two independent free-running timers.** There is no exchange. `[OEM]`
+
+| stream | sender | period | jitter | must be answered? |
+|---|---|---|---|---|
+| `3AF B9 00 00 00 00 00 00 00` | radio (us) | **500.08 ms** | **σ = 0.33 ms** | no — free-runs |
+| `3CF 69 00 A3 A3 A3 A3 A3 A3` | display | **507.83 ms** (bimodal 504/512 with the display ON) | **σ = 4.60 ms** | **no. Answer nothing.** |
+
+**Three measurements, any one of which is sufficient:**
+
+1. **A reply cannot be 14× more stable than its trigger.** σ 0.33 ms against σ 4.60 ms.
+2. **The phase between them slides monotonically and wraps through zero.** Measured
+   178 ms → 9 ms and then *past* zero to 511 ms, with neither cadence flinching; another
+   capture shows a minimum phase of **0.023 ms**, the two frames virtually colliding, and
+   both carry on unchanged. A reply cannot arrive 511 ms after its trigger and keep going.
+3. **`B9` does not start at all until registration is complete** — it is a registered-session
+   heartbeat, not a response to anything the panel sends before that.
+
+**Consequence for any implementation:** one free-running 500 ms timer and nothing else. Code
+that both paces at 500 ms *and* pongs each ~504 ms ping emits **two `B9` about 4 ms apart
+every ~504 ms — double the OEM rate**, and a one-sided anti-double guard fails from the
+second cycle onward.
+
+The `~504 ms` figure for `69` is **refuted as a constant**: with the display ON it alternates
+504/512 ms (histogram `{498:1, 502:1, 504:10, 505:3, 506:1, 510:2, 511:2, 512:10, 520:1}`).
+Never build a timeout on a tight `69` period; use a generous liveness window of ≥ 3 missed
+pings. No `B9` path is allowed to append a `BA`; `BA` belongs to the opening (§3.0) only.
 
 ---
 
@@ -409,25 +501,55 @@ Consequences:
 - **Frame 0 carries 8 payload bytes**, not 6 or 7 as real ISO-TP would.
 - **The length field is hand-written per command and is not derived from the payload.**
   Two commands declare it wrong; see §5.
-- **The continuation counter does not wrap.** `0x20 + N` monotonic, so continuation 16
-  would emit `0x30` — which collides with the PARTIAL opcode. **Hard ceiling: 15
-  continuations = `8 + 15×7` = 113 payload bytes.** Real ISO-TP wraps `0x2F → 0x20`.
-  (The OEM *does* wrap: `0x1F1` continuations run `…2E 2F 20 21…`. So an OEM message
-  longer than 113 bytes is legal and we cannot send one. `[OEM]`)
+- **The first continuation frame is `0x21`, not `0x20`.** `N` starts at 1, so the sequence
+  number starts at 1 — exactly as ISO 15765-2 specifies, where SN 0 belongs to the first
+  frame. Confirmed on the OEM bus: the 43-CF `0x1F1` transfer runs SN `1..F, 0..F, 0..B`.
+  An implementation that emits `0x20` for the first CF is off by one for the whole transfer.
+  `[OEM]`
+- **The continuation counter does not wrap in our transport.** `0x20 + N` monotonic, so
+  continuation 16 would emit `0x30` — which collides with the flow-control opcode. **Hard
+  ceiling: 15 continuations = `8 + 15×7` = 113 payload bytes.** Real ISO-TP wraps
+  `0x2F → 0x20 → 0x21`. (The OEM *does* wrap: `0x1F1` continuations run `…2E 2F 20 21…`. So
+  an OEM message longer than 113 bytes is legal and we cannot send one. `[OEM]`)
 
-### 4.2 The reply channel — `30 01 00` is NOT flow control
+### 4.2 The reply channel — `30 01 00` IS flow control, with BS = 1
 
 After **every** frame, the receiver answers on `funcId | 0x400`:
 
 | reply | meaning | sender does |
 |---|---|---|
-| `74 …` | **DONE** | stop immediately and report success |
-| `30 01 00 …` | **PARTIAL** — "send the next one" | continue |
+| `74 …` | **DONE** — the declared length is satisfied | stop and report success |
+| `30 01 00 …` | **flow control**, FS = 0 CTS, **BS = 0x01**, **STmin = 0x00** | send exactly one more frame |
 | anything else | error | abort |
 | *(nothing, 2000 ms)* | timeout | abort |
 
-There is no BlockSize, no STmin, no CTS/WAIT/OVFLW. It is strictly **stop-and-wait: one
-frame, one reply**, including for single-frame messages. `[REF][IMPL][EMU]`
+> **CORRECTED 2026-08-04.** This subsection was headed *"`30 01 00` is NOT flow control"* and
+> asserted *"There is no BlockSize, no STmin, no CTS/WAIT/OVFLW."* It is ordinary ISO 15765-2
+> flow control and the fields decode exactly: `0x30` = FC with FS nibble 0 (ContinueToSend),
+> `data[1] = 0x01` = BlockSize 1, `data[2] = 0x00` = STmin 0.
+>
+> **Why the old reading looked right for so long, and why it does not matter in practice:**
+> **BS = 1 means one FC per single CF**, which is observationally identical to stop-and-wait.
+> The OEM capture shows **43 flow-control frames for 43 consecutive frames** on the `0x1F1`
+> transfer and 2 for 2 on the `0x151` transfer, in strict alternation CF→FC→CF→FC. So the
+> existing one-CF-per-reply transmit behaviour is **correct and must be preserved** — a
+> sender that reads FS/BS and then bursts will desynchronise the panel. What the old reading
+> costs is robustness: a decoder that constant-matches `30 01 00` fails an FC with any other
+> BS or STmin (`30 00 14`, say) and kills the transfer instead of adapting. Match
+> `(data[0] & 0xF0) == 0x30` and switch on the FS nibble — `0` CTS, `1` WAIT, `2` OVERFLOW.
+> `[OEM]`
+
+> **`STmin = 0` is not the pacing constraint.** Real CF→CF gaps measured 0.645–11.077 ms
+> (mean 2.399); FC round-trip latency mean 1.533 ms, max 10.611 ms. The rate is set by the FC
+> round trip plus sender think-time, three orders of magnitude above the 0 ms floor.
+> Throughput ≈ 2.9 kB/s. `[OEM]`
+
+> **FC state machines are per-ID-pair, not global.** In the capture the `0x1F1` first frame
+> went out while the `0x151` transfer was still mid-flight. Transfers interleave. `[OEM]`
+
+> **We never send FC in the current configuration.** All display-originated traffic on
+> `0x1C1` is single-frame across the whole corpus. If the panel ever segments on `0x1C1` we
+> must answer `5C1 30 01 00 00 00 00 00`. `[OEM]`
 
 > **`0x74` means STOP, not "all received".** If the panel DONEs early the sender truncates
 > the message and reports **success**. This is the normal path for `showMenu`: the panel
@@ -668,11 +790,18 @@ else:
 
 | | value |
 |---|---|
-| Carminat B9/69 liveness cadence | about 500 ms |
-| peer-alive timeout | 5 ticks ≈ 5 s |
+| our `B9` heartbeat, free-running, starts only after registration | **500.08 ms, σ 0.33 ms** `[OEM]` |
+| panel `69`, free-running, unrelated timer (§3.6) | **507.83 ms, σ 4.60 ms** — bimodal 504/512 with the glass on `[OEM]` |
+| panel `61 11 xx` re-issue rate while unregistered | **103.985 ms** (min 103.838, max 104.230, n=15) `[OEM]` |
+| panel `1C1 70` re-issue rate while unacknowledged | **~610 ms** `[BENCH]` |
+| `61 11 xx` → B0#1 | **30.74–31.53 ms**, anchored on the request `[OEM 4/4]` |
+| B0 → B0 | **30.89–31.21 ms** `[OEM]` |
+| `1C1` → our `5C1 74` | **0.249–0.483 ms**, mean 0.36, 12/12 `[OEM]` |
+| final registration ACK (`5F1 74`) → first application payload | **400 ms ± 0.5 ms** `[OEM 4/4]` |
+| peer-alive timeout | 5 ticks ≈ 5 s — but see §3.6, never build it on a tight `69` period |
 | per-frame ACK timeout | 2000 ms |
 | retry policy | **none** — no retransmission at any layer |
-| panel sync-request rate when unacknowledged | **line rate** — measured 1472 frames/s on a 500 kbit/s bus, ~92 % occupancy |
+| panel sync-request rate when **unacknowledged at the CAN link layer** | **line rate** — 1472 frames/s of controller retransmit; this is §8.1, not a protocol rate |
 
 > **The last row is the one that bites.** A panel that has not been acknowledged does not
 > ask politely once a second — it repeats at line rate. Answering each request with a
@@ -737,8 +866,15 @@ before proposing one.
 
 See §3.5. The panel registers itself on its key channel and expects the master to acknowledge
 it; the master registers its own function ids and expects the panel to acknowledge those.
-Either side can decide the other's registration is void — `61 11 01` is the panel doing
-exactly that — and neither side re-checks it spontaneously.
+Either side can decide the other's registration is void — a `61 11 xx` arriving while we hold
+registrations is the panel doing exactly that — and neither side re-checks it spontaneously.
+
+**The third byte plays no part in that signal.** Corrected 2026-08-04: this paragraph used to
+name `61 11 01` specifically. A registered panel sends **no** `61 11` at all, `00` or `01`, in
+any of the four OEM captures; the *arrival* of a complete request is the void indication and
+the payload byte is irrelevant (§3.3). On the bench the panel sent `61 11 **00**` forty-one
+times while our firmware, believing only `01` meant loss, kept pushing fullscreens at a panel
+that had already dropped us. `[BENCH]`
 
 ---
 
@@ -748,14 +884,18 @@ Ranked by how much time each has cost.
 
 1. **Offset origin.** Reassembly keeps the 2-byte header, so decode offsets are content+2.
    Three origins circulate in the source material.
-2. **`30 01 00` is a per-frame ACK, not flow control**, and `0x74` means *stop*, not
-   *complete*.
+2. **`0x74` means *stop*, not *complete*.** (The companion claim that *"`30 01 00` is a
+   per-frame ACK, not flow control"* is **withdrawn** — it is real ISO-TP flow control with
+   BS = 1, which merely *behaves* like a per-frame ACK. See §4.2. The trap that remains is
+   constant-matching all three bytes instead of parsing the FS nibble.)
 3. **Declared lengths are wrong in two commands and must stay wrong** (`setText` `0x0E`,
    `showMenu` `0x5A`).
 4. **A standard ISO-TP stack cannot be used.** It inserts its own PCI on frame 0 and
    shifts every payload byte by two.
-5. **Registration is lazy and all-or-nothing**, and a function id the panel does not ACK
-   stalls every render for ever.
+5. **Registration is all-or-nothing**, and a function id the panel does not ACK stalls every
+   render for ever. (It is **not lazy on Carminat** — that word was removed 2026-08-04. The
+   OEM radio registers 0.1–0.3 ms after B0#3 with no application involvement; deferring the
+   probes to the first render means an idle build never finishes a session. See §3.5.)
 6. **`0x00` terminates text.** Pad with `0x20` wherever cells must render blank.
 7. **Auto-ACK has no sender test.** "ACK anything not on the sync-reply id and without
    `0x400` set" ACKs your own frames on a self-receiving link, completing transfers after
@@ -770,15 +910,23 @@ Ranked by how much time each has cost.
 
 ## 10. Open questions
 
-- The `0x55` byte at text payload `[4]` remains an unexplained constant. The current
-  captured Carminat power form is zero-padded `03 52 09 00 00 00 00 00`; the older
-  MeganeCAN `FF FF` spelling is historical compatibility evidence, not the default wire form.
+- The `0x55` byte at text payload `[4]` remains an unexplained constant. The Carminat power
+  form is **zero-padded, settled**: `03 52 09 00 00 00 00 00`, in all four OEM captures. The
+  MeganeCAN `03 52 09 FF FF 00 00 00` spelling is **not** what the OEM radio puts on this
+  bus; it is historical compatibility evidence, never the default wire form.
 - Icon byte values do not decode cleanly against the `[REF]` bitmap: `0x94` shows **no**
   icon and `0x9B` shows traffic, neither of which the bitmap predicts. Codes appear to
   repeat cyclically across `0x00..0xFF`. Not fully decoded.
-- What makes the panel choose `data[2] == 0x01` is not known. The strict library policy
-  treats it as discovery only and waits for `00`; the captured legacy radio later proceeds
-  differently, so that behavior remains compatibility evidence rather than authorization.
+- What makes the panel choose `data[2] == 0x01` over `0x00` is **still not known** — but it
+  no longer matters to us, and the old entry here (*"the strict library policy treats it as
+  discovery only and waits for `00`"*) is withdrawn. `01` is a full request (§3.3), so the
+  open question is narrowed to: what panel-side state does the low bit report? All that is
+  known is the correlation with the capture filenames — the `01`-only capture is the
+  `cONNECT OT POWER` one — and one sample is not a decode.
+- **Whether an unanswered `61 11 xx` ever times out on the panel side is unknown.** No
+  capture contains a panel giving up; it simply repeats at ~104 ms. Likewise, the rule that a
+  post-registration `61 11 xx` means session loss is inferred from the panel's permanent
+  silence once registered plus one bench observation, not from an OEM capture of a teardown.
 - The confirm box has **no capture at all**. Every byte of §5.3's confirm layout is
   `[DERIVED]`.
 - `0x1F1` NAV: we register it and never write it. Its 302-byte OEM payload is a field

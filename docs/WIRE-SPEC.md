@@ -11,17 +11,37 @@ disagree, the wire wins and this file is corrected — never silently the other 
 
 Bus parameters: **500 kbit/s, standard (11-bit) identifiers.**
 
-> **Carminat captured profile (2026-08-03).** The display initiates the session. The ESP32
-> waits for complete `3CF 61 11 xx` (DLC >= 3); `00` is the only authorization value.
-> Default `CarminatHelloProfile::CapturedB0x3` sends three
-> `3AF B0 14 11 00 1F 00 00 00` frames at about +31 ms spacing after `00`, allowing
-> the panel's `1C1 70 -> 5C1 74` control ACK to interleave. Then register `151` and
-> `1F1` sequentially, wait about 400 ms, and use zero-padded `03 52 09` before a clock
-> or render. `01` gets one `B9` + `BA` discovery pair only; it does not authorize
-> registration or output, and BA is never periodic. Normal B9/69 liveness is about 500 ms.
-> The old immediate `70/B0/B0` is
-> `CarminatHelloProfile::MeganeCanLegacy70B0B0`, an explicit historical compatibility
-> selection, not the default.
+> **Carminat opening profile — SETTLED 2026-08-04 against four OEM captures.** Full
+> derivation in `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`, which is authoritative for
+> everything in this note; the captures are `docs/captures/*.csv`.
+>
+> **We speak first.** Into silence we send one bounded `3AF B9` + `3AF BA` pair; `BA` is the
+> precondition for everything that follows and is **never periodic**. The panel then requests
+> with `3CF 61 11 xx` (DLC ≥ 3) on its own ~104 ms timer. **`xx` may be `00` or `01` and they
+> are the same request** — the low bit reports panel state, not an authorization grade. The
+> *first* request only arms the announce; the panel's **next** request draws the burst
+> **30.75 ms** after it. Default `CarminatHelloProfile::CapturedB0x3` then sends three
+> `3AF B0 14 11 00 1F 00 00 00` frames at 31 ms spacing, and the panel's
+> `1C1 70 -> 5C1 74` control ACK interleaves between B0#1 and B0#2 — **that ACK is
+> unconditional and owes nothing to prior authorization.** Registration (`151 70`, `1F1 70`,
+> pipelined 0.29 ms apart) follows **0.1–0.3 ms after B0#3, as part of the opening, not on
+> the first render**. Wait **400 ms ± 0.5 ms** from `5F1 74`, then send zero-padded
+> `03 52 09 00 00 00 00 00` — *always* the first application payload — before any clock or
+> render. `B9` is a **free-running 500 ms heartbeat, not a reply to `69`**, and it does not
+> start until registration completes.
+>
+> **Three claims this note used to make are disproven and have been removed:**
+> *"`00` is the only authorization value"* / *"`01` gets one `B9` + `BA` discovery pair only;
+> it does not authorize registration or output"* — refuted by
+> `docs/captures/aknowledge offed display cONNECT OT POWER.csv`, sixteen `61 11 01` frames,
+> zero `61 11 00`, one complete session. *"register `151` and `1F1` **sequentially**"* — the
+> OEM radio pipelines them, both probes on the wire before either ACK returns.
+> *"Normal B9/69 liveness"* implying an exchange — the two are independent free-running
+> timers whose phase wraps through zero (§ "B9 is not a pong", below).
+>
+> The old immediate `70/B0/B0` is `CarminatHelloProfile::MeganeCanLegacy70B0B0`, an explicit
+> historical compatibility selection, not the default; `70 1A 11` appears in **zero** of the
+> 579 OEM frames.
 
 **Everything *we* transmit is DLC 8**, in both families, without exception: `CanUtils::sendCan`
 takes eight bytes and `affa3_do_send` pads to eight with the family filler. **Frames we
@@ -79,9 +99,14 @@ Two facts fall straight out of this capture and are easy to get wrong:
 * **The panel's filler byte is 0xA3, ours is not.** `0xA3` never appears in anything we
   transmit. Carminat TX filler is `0x00`; UpdateList TX filler is `0x81`. A decoder must
   not assume symmetric padding.
-* **`61 11` arrives with `data[2] = 0x00` here.** The current Carminat default takes
-  `01` as discovery only: one `B9` + `BA`, no hello or output, then wait for `00`.
-  The legacy source's periodic BA retry is intentionally not reproduced.
+* **`61 11` arrives with `data[2] = 0x00` here — and that is a coincidence of this capture,
+  not a rule.** This bullet used to end *"The current Carminat default takes `01` as
+  discovery only: one `B9` + `BA`, no hello or output, then wait for `00`."* **Withdrawn
+  2026-08-04:** `docs/captures/aknowledge offed display cONNECT OT POWER.csv` runs a whole
+  session — announce, registration, power, segmented text — off sixteen `61 11 **01**` frames
+  with no `00` anywhere in the file, and its B0 burst starts 30.751 ms after an `01`, inside
+  the band the three `00` captures produce. The trigger does not read `data[2]`.
+  The legacy source's periodic BA retry is still intentionally not reproduced.
 
 ## 1.1 Second witness: an OEM bus, neither node ours
 
@@ -110,10 +135,15 @@ more than any amount of reading our own code. Format is `time id dlc bytes… co
 
 Five things fall out of this that nothing else in the repository tells you:
 
-1. **The lazy-registration handshake (§4) is exactly right, and it is symmetric.** Both
+1. **The `0x70` registration handshake (§4) is exactly right, and it is symmetric.** Both
    directions register: the radio sends `70` to `0x121` and `0x1B1`, the cluster sends `70`
    to `0x1C1`, and each is answered with `74` on `id | 0x400`. Our implementation is the
    radio half of a real, observed exchange. **[OEM]**
+   *(The word "lazy" was struck here on 2026-08-04. The mechanism is right; the trigger is
+   not lazy on Carminat. In the four Carminat OEM captures the radio's `151 70`/`1F1 70` go
+   out 0.1–0.3 ms after the third B0 announce, unconditionally, ~400 ms before any
+   application payload exists. Note this cluster log agrees: `121 70`/`1B1 70` at 04,473 are
+   400 ms ahead of the first content frame at 04,873.)*
 2. **The filler byte is per-node and carries no meaning.** In this one log the radio pads
    with `0xFF` and the cluster with `0x84`; in `notes1`'s other fragment the cluster uses
    `0xA2`; on our bench panel it is `0xA3` (§1); we transmit `0x00` (Carminat) or `0x81`
@@ -223,8 +253,10 @@ Three of these contradict, refine or close something stated elsewhere:
 | Key input (panel -> us) | `0x1C1` | `0x0A9` | `PACKET_ID_KEYPRESSED` |
 | TX filler byte | `0x00` | `0x81` | `PACKET_FILLER` |
 
-**Registered function table** (`initializeFuncs()`), order matters — it is the order the
-lazy `0x70` registration walks:
+**Registered function table** (`initializeFuncs()`), order matters — it is the transmit
+order the `0x70` registration walks. On Carminat the two probes are **pipelined** 0.29 ms
+apart, both on the wire before either ACK returns, and they are emitted as part of the
+opening (0.1–0.3 ms after B0#3), not on the first render:
 
 * Carminat: `{ 0x151, 0x1F1 }`
 * UpdateList: `{ 0x121, 0x1B1 }`
@@ -253,6 +285,12 @@ The transport is a stripped ISO 15765-2: a first frame carrying **8** payload by
 PCI added by the transport, then consecutive frames carrying **7** payload bytes each,
 prefixed with `0x20 + n` where `n` counts from 1. The tail frame is padded to DLC 8 with the
 family filler.
+
+> **`n` counts from 1, so the first consecutive frame is `0x21`, never `0x20`.** This is
+> ordinary ISO-TP — SN 0 belongs to the first frame — and the OEM bus confirms it: the
+> 43-CF `0x1F1` transfer runs SN `1..F, 0..F, 0..B`, wrapping `0x2F → 0x20 → 0x21`. An
+> implementation that emits `0x20` for the first CF is off by one for the entire transfer.
+> `[OEM]`
 
 > The `0x10 <len>` you see at the head of most payloads is **not** added by the transport.
 > Every caller builds it into its own buffer by hand. That is why `setTime` (`0x05 …`) and
@@ -389,12 +427,34 @@ The panel answers each transmitted frame on `funcId | 0x400`:
 
 | `data[0..2]` | Meaning | Legacy `FuncStatus` |
 |---|---|---|
-| `74 xx xx` | End of data — message accepted | `DONE` |
-| `30 01 00` | Partial accepted, send the next consecutive frame | `PARTIAL` |
+| `74 xx xx` | End of data — the declared length is satisfied | `DONE` |
+| `30 01 00` | **ISO-TP flow control**: FS = 0 CTS, BS = 1, STmin = 0 → send exactly one more CF | `PARTIAL` |
 | anything else | Rejected | `ERROR` |
 
 Only `data[0]` is inspected for DONE, and `data[0..2]` for PARTIAL. The remaining bytes are
 don't-care and in practice carry the panel's `0xA3` filler.
+
+> **`30 01 00` IS flow control — corrected 2026-08-04.** This document, and `PROTOCOL.md`
+> §4.2 alongside it, used to insist it was "a per-frame ACK, not flow control", with "no
+> BlockSize, no STmin, no CTS/WAIT/OVFLW". It decodes exactly as ISO 15765-2: `0x30` = FC,
+> FS nibble `0` = ContinueToSend, `data[1] = 0x01` = **BlockSize 1**, `data[2] = 0x00` =
+> **STmin 0**.
+>
+> **BS = 1 is why the old reading survived**: one FC per single CF is observationally
+> identical to stop-and-wait, and the OEM captures confirm the shape exactly — **43 flow
+> control frames for 43 consecutive frames** on a `0x1F1` transfer, 2 for 2 on a `0x151`
+> transfer, strict CF→FC→CF→FC alternation. So the existing one-CF-per-reply transmit
+> behaviour is correct and **must be preserved**; a sender that reads BS and then bursts will
+> desynchronise the panel. What the old reading costs is robustness: constant-matching all
+> three bytes fails any FC with a different BS or STmin and kills the transfer. Match
+> `(data[0] & 0xF0) == 0x30` and switch on the FS nibble (`0` CTS, `1` WAIT, `2` OVERFLOW).
+> `[OEM]`
+>
+> **STmin = 0 is not what paces the transfer.** Measured CF→CF gaps 0.645–11.077 ms
+> (mean 2.399); FC round-trip mean 1.533 ms, max 10.611 ms; throughput ≈ 2.9 kB/s. The rate
+> is the FC round trip plus sender think-time, three orders of magnitude above the 0 ms floor.
+> **FC state is per-ID-pair, not global** — in the capture a `0x1F1` first frame went out
+> while a `0x151` transfer was still mid-flight. `[OEM]`
 
 The ACK is only consumed when the matching function slot is in state `WAIT`
 (`CarminatDisplay.cpp:407`, `UpdateListBase.cpp:113`). An ACK arriving for an idle
@@ -550,8 +610,16 @@ re-runs on the next send after a link drop. That is deliberate: the panel forget
 
 ## 5. Sync handshake
 
-The sync wire constants are shared through `SyncProfile`, but the current Carminat session
-policy is deliberately staged: `01` bootstraps and `00` authorizes application traffic.
+The sync wire constants are shared through `SyncProfile`.
+
+> **Retracted 2026-08-04.** This paragraph used to continue: *"…but the current Carminat
+> session policy is deliberately staged: `01` bootstraps and `00` authorizes application
+> traffic."* There is no such staging. `61 11 00` and `61 11 01` are the same request; the
+> `cONNECT OT POWER` capture completes a full session on sixteen `01` frames and zero `00`.
+> What *is* staged is positional, not by byte value: our `BA` must precede the request that
+> draws the burst, and the burst answers the panel's **next** request, ~104 ms after the one
+> that armed it. See §5.3.
+
 Legacy duplicated a periodic retry state machine in `CarminatDisplay::tick()` and
 `UpdateListBase::tick()`; the library keeps UpdateList compatibility while bounding
 Carminat control recovery.
@@ -567,7 +635,7 @@ Carminat control recovery.
 | `filler` | `0x00` | `0x81` |
 | `helloCount` | 3 | 1 |
 
-### 5.1 Alive heartbeat — legacy/UpdateList cadence, gated on Carminat
+### 5.1 Alive heartbeat — free-running on Carminat, NOT a pong
 
 ```
 Carminat    TX  3AF  B9 00 00 00 00 00 00 00
@@ -577,22 +645,58 @@ UpdateList  TX  3DF  79 00 81 81 81 81 81 81
 `data[1]` is a literal `0x00` in both families (not the filler — for Carminat they happen
 to coincide, for UpdateList they do not: `79 00 81 …`, not `79 81 81 …`).
 
-The Carminat library is silent before the panel's opening request. Its bootstrap `01` produces
-one `B9` as part of the bounded discovery sequence; after the display has initiated a session,
-`B9` is paced at roughly 500 ms. A heartbeat or a reply to `69` is never authorization for
-output.
+**`B9` is a free-running 500 ms heartbeat. It is NOT a reply to the panel's `69`.**
+`SyncProfile::replyToPing` is `false` for Carminat because of this. `[OEM]`
 
-### 5.2 Sync request — legacy retry versus Carminat's one-shot bootstrap
+Measured across the four OEM captures: our `B9` runs at **500.08 ms with σ 0.33 ms**, while
+the panel's `69` runs at **507.83 ms with σ 4.60 ms** (bimodal 504/512 with the glass on).
+Three independent facts kill the pong reading:
+
+* **A reply cannot be 14× more stable than its trigger** — σ 0.33 against σ 4.60.
+* **The phase between them slides monotonically and wraps past zero** — measured 178 ms → 9 ms
+  and on round to 511 ms with neither cadence flinching; a second capture shows a 0.023 ms
+  near-collision and both simply carry on. A reply cannot arrive 511 ms late and continue.
+* **`B9` does not start until registration is complete.** It is a registered-session
+  heartbeat, not a response to anything the panel says beforehand.
+
+> **Retracted 2026-08-04:** this paragraph read *"The Carminat library is silent before the
+> panel's opening request. Its bootstrap `01` produces one `B9` as part of the bounded
+> discovery sequence."* Wrong on both counts. We are **not** silent — we announce first, with
+> one bounded `B9` + `BA` pair into a silent bus, and in the co-boot capture the panel's first
+> `61 11 00` arrives **7.24 ms after our `BA`**, answering it. And nothing about that pair is
+> conditional on `01`.
+
+A heartbeat is never authorization for output.
+
+**Consequence for any implementation:** one free-running 500 ms timer and nothing else. Code
+that both paces at 500 ms *and* pongs each ~504 ms ping emits two `B9` about 4 ms apart every
+~504 ms — double the OEM rate — and a one-sided anti-double guard fails from the second cycle.
+
+### 5.2 Sync request — Carminat's `BA` is the OPENING MOVE, not a response
 
 ```
 Carminat    TX  3AF  BA 00 00 00 00 00 00 00
 UpdateList  TX  3DF  7A 01 81 81 81 81 81 81
 ```
 
-Carminat's `data[1]` is the filler (`0x00`); UpdateList's is a literal `0x01`. The legacy
-Carminat state machine cleared `START` after transmitting and retried while failed. The
-library sends Carminat `BA` **once** after `61 11 01`, paired with one `B9`; it does not
-periodically retry `BA` while failed or in response to a retransmit storm. Legacy then called
+Carminat's `data[1]` is the filler (`0x00`); UpdateList's is a literal `0x01`.
+
+**`BA` is announced into silence and is the precondition for the whole opening.** `[OEM 4/4]`
+We send one bounded `B9` + `BA` pair; the panel then requests on `3CF 61 11 xx`, and the
+*next* such request draws the B0 burst 30.75 ms later. Slow repetition (seconds apart) is
+acceptable if nothing answers; **a periodic BA stream is not, ever**.
+
+> **Corrected 2026-08-04.** This paragraph said *"The library sends Carminat `BA` **once**
+> after `61 11 01`"* — i.e. `BA` as a response to a specific request byte. It is not a
+> response at all. In the co-boot capture the order is `3AF B9 01` → `3AF BA` (+8.17 ms) →
+> `3CF 61 11 00` (+7.24 ms): **the panel answers our `BA`**, not the other way round. And the
+> B0 burst is anchored on the request, not on `BA` — Δ from the triggering `61 11 xx` to B0#1
+> across the four captures spreads **0.79 ms**, while Δ from our last `BA` to B0#1 spreads
+> **80 ms**. A 100× difference in spread names the anchor. Any implementation that times the
+> burst off `BA` is wrong.
+
+The legacy Carminat state machine cleared `START` after transmitting and retried while
+failed; the library does not turn a failure into periodic `BA` traffic. Legacy then called
 `delay(100)` — **deleted outright in the library**, it has no wire meaning; the request is
 idempotent and the panel answers whenever it feels like it.
 
@@ -601,21 +705,34 @@ idempotent and the panel answers whenever it feels like it.
 Trigger: `data[0] == 0x61 && data[1] == 0x11`; Carminat requires `len >= 3` before
 interpreting `data[2]`.
 
-The capture-backed default acts only on a good `61 11 00`:
+The capture-backed default acts on **any** `61 11 xx` that arrives after our `BA` — the
+value of `xx` is not read by the trigger:
 
 ```text
-RX  3CF  61 11 00 A3 A3 A3 A3 A3
-   +31 ms  TX 3AF  B0 14 11 00 1F 00 00 00
-             RX 1C1  70 A3 A3 A3 A3 A3 A3 A3
-             TX 5C1  74 00 00 00 00 00 00 00
-   +31 ms  TX 3AF  B0 14 11 00 1F 00 00 00
-   +31 ms  TX 3AF  B0 14 11 00 1F 00 00 00
+TX  3AF  BA 00 00 00 00 00 00 00      us, first, into silence — the PRECONDITION
+RX  3CF  61 11 xx A3 A3 A3 A3 A3      arms the announce only
+   ~104 ms   RX  3CF  61 11 xx A3 A3 A3 A3 A3   panel's NEXT request — THE TRIGGER
+   +30.75 ms  TX 3AF  B0 14 11 00 1F 00 00 00
+                RX 1C1  70 A3 A3 A3 A3 A3 A3 A3    +0.8..1.6 ms
+                TX 5C1  74 00 00 00 00 00 00 00    +0.25..0.48 ms, UNCONDITIONAL
+   +31 ms     TX 3AF  B0 14 11 00 1F 00 00 00
+   +31 ms     TX 3AF  B0 14 11 00 1F 00 00 00
+      +0.10 ms  TX 151  70 00 00 00 00 00 00 00
+      +0.29 ms  TX 1F1  70 00 00 00 00 00 00 00    pipelined, before 551 74
 ```
 
 These are three separate timed offers, not a prequeued burst. The `1C1 -> 5C1` ACK is
-control-plane traffic and may overtake B0 #2/#3. A single-ended monitor labels all observed
+control-plane traffic and in the captures it *always* lands between B0#1 and B0#2 — that is
+the reason the 31 ms staging exists at all. A single-ended monitor labels all observed
 traffic as RX; the ID pairing establishes direction and the `A3` (panel) / `00` (driver)
 filler is corroborating evidence only, never an RX match requirement.
+
+> **Corrected 2026-08-04:** the lead-in used to read *"The capture-backed default acts only on
+> a good `61 11 00`"* and the sketch began at the request rather than at our `BA`. Both are
+> disproven — see the opening note at the top of this file and §5.2. Note especially the two
+> requests: the burst answers the panel's *second* one. Anchored on the triggering request the
+> 31 ms figure holds to **0.79 ms** across four captures; anchored on `BA` it scatters over
+> **80 ms**.
 
 UpdateList sends one frame on `0x3DF`:
 
@@ -623,15 +740,27 @@ UpdateList sends one frame on `0x3DF`:
 TX  3DF  70 1A 11 00 00 00 00 01
 ```
 
-For Carminat, `01` is discovery only: one `B9` + `BA` pair, no B0, registration, render,
-power, or time. Repeated `01` is coalesced; there is no periodic BA recovery. Only `00`,
-after B0 #3 has been accepted by `ICanLink`, releases sequential `151 70 -> 551 74` then
-`1F1 70 -> 5F1 74` registration.
+> **RETRACTED 2026-08-04 — this paragraph read:** *"For Carminat, `01` is discovery only: one
+> `B9` + `BA` pair, no B0, registration, render, power, or time. … Only `00`, after B0 #3 has
+> been accepted by `ICanLink`, releases **sequential** `151 70 -> 551 74` then
+> `1F1 70 -> 5F1 74` registration."*
+>
+> **Both halves are wrong.** (a) `docs/captures/aknowledge offed display cONNECT OT POWER.csv`
+> contains sixteen `61 11 **01**` and zero `61 11 00`, and runs the entire session — B0 burst
+> at +30.751 ms, registration, `03 52 00` power, ISO-TP text — off `01`. (b) The registration
+> probes are **pipelined**: the OEM radio puts `1F1 70` on the wire 0.29 ms after `151 70`,
+> before `551 74` has come back, and both go out 0.1–0.3 ms after B0#3 **as part of the
+> opening**, ~400 ms before any application payload exists. Believing the strict-`00` half
+> cost a bench session in which the panel repeated `61 11 01` for fifteen seconds while our
+> firmware waited for a `00` the panel had no reason to send.
+
+Repeated requests are coalesced; there is still no periodic BA recovery.
 
 `CarminatHelloProfile::MeganeCanLegacy70B0B0` is an opt-in historical compatibility
-profile. It retains the strict `00` gate but replaces the three staged B0s with the old
-immediate MeganeCAN sequence `70 1A 11 ...`, `B0 ...`, `B0 ...`. It is never selected
-by the capture-backed default and must not be alternated periodically as recovery.
+profile. It replaces the three staged B0s with the old immediate MeganeCAN sequence
+`70 1A 11 ...`, `B0 ...`, `B0 ...` — a frame that appears in **zero** of the 579 OEM frames.
+It is never selected by the capture-backed default and must not be alternated periodically
+as recovery.
 
 ### 5.4 Peer-alive ping (RX on `0x3CF`, `data[0] == 0x69`)
 
@@ -664,9 +793,16 @@ new full `61 11 xx`; it never turns a watchdog failure into periodic `BA` traffi
 > The library's version is a millisecond deadline against `IClock::millis()`, in one place,
 > for both families.
 
-> **Pacing rule:** the capture-backed Carminat profile holds the B9/69 liveness cadence near
-> 500 ms. A received 69 can cause a paced pong, but never BA; duplicate/retransmitted 69
-> frames are coalesced rather than treated as a reason to flood the bus.
+> **Pacing rule, corrected 2026-08-04.** This note used to read *"A received 69 can cause a
+> paced pong, but never BA."* **There is no pong.** `B9` is one free-running 500.08 ms timer
+> (σ 0.33 ms) that ignores `69` entirely — see §5.1 for the phase-wrap proof — and it does not
+> start until registration is complete. A received `69` causes **nothing to be transmitted**;
+> it only re-arms the liveness deadline. It certainly never causes `BA`.
+
+> **And do not build a timeout on a tight `69` period.** The `~504 ms` figure is refuted as a
+> constant: with the glass on it is bimodal, histogram
+> `{498:1, 502:1, 504:10, 505:3, 506:1, 510:2, 511:2, 512:10, 520:1}`, mean 507.83, σ 4.60.
+> Use a generous window of ≥ 3 missed pings. `[OEM]`
 
 ### 5.5 Unknown sync bytes
 
@@ -676,15 +812,32 @@ Anything on `0x3CF` that is neither `61 11` nor `69 ..` is logged and ignored. N
 
 ## 6. Inbound frames we auto-acknowledge
 
-After the Carminat profile has received a **complete** `61 11 xx` request (and immediately
-for profiles without that auth gate), any frame that is **not** on the sync-reply id and
-does **not** have `0x400` set is answered with a DONE on `id | 0x400`, DLC 8, `0x74`
-followed by seven filler bytes:
+Any frame that is **not** on the sync-reply id and does **not** have `0x400` set is answered
+with a DONE on `id | 0x400`, DLC 8, `0x74` followed by seven filler bytes:
 
 ```
 Carminat     RX 1C1 70 A3 ...   ->  TX 5C1  74 00 00 00 00 00 00 00
 UpdateList   RX 0A9 03 89 ...   ->  TX 4A9  74 81 81 81 81 81 81 81
 ```
+
+> **The Carminat `0x1C1 -> 0x5C1` ACK is UNCONDITIONAL — corrected 2026-08-04.** This section
+> used to gate it: *"After the Carminat profile has received a **complete** `61 11 xx`
+> request…"*. That gate is wrong and it is dangerous. **Every frame received on `0x1C1` must
+> be answered with `5C1 74 00 00 00 00 00 00 00` within ~0.5 ms, regardless of payload,
+> regardless of session state, and regardless of whether we understand the payload.**
+> **12/12** across the four OEM captures; latencies 0.470, 0.480, 0.327, 0.483, 0.261, 0.288,
+> 0.249, 0.467, 0.453, 0.253 ms — range 0.249–0.483, mean ≈ 0.36. The panel's `1C1 70` arrives
+> *during* the announce burst, **before** our own `151`/`1F1` registration and before any
+> authorization has completed, so anything that defers it to a post-authorization state will
+> miss the one that matters. Build it as a raw immediate reflex on the receive path,
+> deliberately separate from the gate that releases registration/power/text/clock. On our
+> bench, 22 of 23 `1C1 70` frames went unanswered and the panel stalled for fifteen seconds
+> as a direct consequence. `[OEM][BENCH]`
+>
+> It is also not `1C1`-specific: the general law is *every frame on a requester id `0xNN1` is
+> answered by the peer on `0xNN1 + 0x400`* with `74` (complete) or `30` (flow control). The
+> panel holds up its half on `551`/`5F1`, 7/7 and 45/45. `5C1` is our half of a symmetric
+> contract.
 
 Note the filler asymmetry: Carminat pads with `0x00`, UpdateList with `0x81`.
 
@@ -910,8 +1063,21 @@ TX  151  03 52 00 00 00 00 00 00     disable
 RX  551  74 ..
 ```
 
-The historical MeganeCAN builder used `FF FF` in bytes 3/4. Keep that as compatibility
-evidence only; it is not the default captured wire form.
+The historical MeganeCAN builder used `FF FF` in bytes 3/4. **The OEM bus uses zero padding,
+4/4** — `03 52 09 00 00 00 00 00` and `03 52 00 00 00 00 00 00`. Keep the `FF FF` spelling as
+compatibility evidence only; it is not the wire form.
+
+> **And this frame is ALWAYS the first application payload after registration.** `[OEM 4/4]`
+> Never a screen, never a clock — the third byte even tracks the capture filename (`09` in the
+> display-ON capture, `00` in all three "offed" ones), which independently confirms `0x52` is
+> the display-state command. It is sent **400 ms ± 0.5 ms after the final registration ACK
+> `5F1 74`**; name that anchor, because measured from B0#3 the same interval reads
+> 401.1–402.0 ms.
+>
+> **A fullscreen sent to a dark panel is ACKed exactly like one sent to a lit panel.** This
+> cost a bench session on 2026-08-04: every `551 74` came back `Ok`, the transfer was
+> byte-perfect, and the glass stayed black because `03 52 09` had never been sent. **A `74`
+> proves receipt, not visibility.**
 
 ### 8.4 `highlightItem(uint8_t id)` — `0x151`, **raw**
 
@@ -1360,15 +1526,22 @@ Each vector is tagged with its strongest witness:
 ### Registration
 
 ```cpp
-// Carminat lazy registration: affa3_send() walks funcs[] = {0x151, 0x1F1} in order.
+// Carminat registration: funcs[] = {0x151, 0x1F1}, in that transmit order.
 // payload = {0x70}, L = 1 -> 1 frame, 1 payload byte + 7 filler (0x00).
 // [CAP-VERBATIM] for the 0x1F1 frame: logs contain `0x1F1 { 70 00 00 00 00 00 00 00 }`.
+//
+// NOT LAZY, and NOT serialised -- corrected 2026-08-04 against docs/captures/*.csv.
+// The OEM radio emits both probes as part of the OPENING, 0.10 ms and 0.39 ms after the
+// third B0 announce, with no application payload in existence (the first one lands 400 ms
+// later). They are PIPELINED: 0x1F1 goes out 0.29 ms after 0x151, before 0x551 74 returns.
+// The panel then answers 551 74 (+0.48 ms) and 5F1 74 (+0.47 ms).
+// Deferring these to the first render means an idle build never completes a session.
 static const affa::Frame kCarminatRegister[] = {
   { 0x151, 8, {0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, false },   // expect 0x551: 74
   { 0x1F1, 8, {0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, false },   // expect 0x5F1: 74
 };
 
-// UpdateList lazy registration: funcs[] = {0x121, 0x1B1}, filler 0x81.
+// UpdateList registration: funcs[] = {0x121, 0x1B1}, filler 0x81.
 static const affa::Frame kUpdateListRegister[] = {
   { 0x121, 8, {0x70,0x81,0x81,0x81,0x81,0x81,0x81,0x81}, false },   // expect 0x521: 74
   { 0x1B1, 8, {0x70,0x81,0x81,0x81,0x81,0x81,0x81,0x81}, false },   // expect 0x5B1: 74
@@ -1378,8 +1551,16 @@ static const affa::Frame kUpdateListRegister[] = {
 ### Sync
 
 ```cpp
-// Default Carminat reply to RX 3CF "61 11 00 ..": three separately scheduled
-// frames at about +31 ms / +62 ms / +93 ms. Keep a control-ACK slot between them.
+// Default Carminat announce burst. Three separately scheduled frames at about
+// +31 ms / +62 ms / +93 ms. Keep a control-ACK slot between them -- the panel's 1C1 70
+// lands between B0#1 and B0#2 in every capture, and 5C1 74 must go out within ~0.5 ms.
+//
+// TRIGGER, corrected 2026-08-04: NOT "reply to 61 11 00". It answers ANY complete
+// 3CF 61 11 xx (00 or 01, the byte is not read) that arrives after we have transmitted
+// 3AF BA -- and specifically the panel's NEXT such request, ~104 ms after the one that
+// armed the announce. The +31 ms is anchored on that request, never on our BA:
+// spread across four OEM captures is 0.79 ms anchored on the request, 80 ms on BA.
+// Exactly three frames, never two, never four. [CAP 4/4]
 static const affa::Frame kCarminatHello[] = {
   { 0x3AF, 8, {0xB0,0x14,0x11,0x00,0x1F,0x00,0x00,0x00}, false },
   { 0x3AF, 8, {0xB0,0x14,0x11,0x00,0x1F,0x00,0x00,0x00}, false },
@@ -1398,22 +1579,32 @@ static const affa::Frame kUpdateListHello[] = {
   { 0x3DF, 8, {0x70,0x1A,0x11,0x00,0x00,0x00,0x00,0x01}, false },
 };
 
-// Carminat's captured B9/69 cadence is about 500 ms. data[1] is a literal 0x00 in BOTH families -- for UpdateList
-// that is NOT the filler (0x81).
+// Carminat B9 is a FREE-RUNNING 500.08 ms heartbeat (sigma 0.33 ms), NOT a reply to the
+// panel's 69 (507.83 ms, sigma 4.60) -- the phase between the two slides monotonically and
+// wraps past zero, 178 ms -> 9 ms -> 511 ms, with neither cadence flinching. It does not
+// start until registration is complete. SyncProfile::replyToPing is false for Carminat.
+// data[1] is a literal 0x00 in BOTH families -- for UpdateList that is NOT the filler (0x81).
 static const affa::Frame kCarminatAlive =
   { 0x3AF, 8, {0xB9,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, false };
 static const affa::Frame kUpdateListAlive =
   { 0x3DF, 8, {0x79,0x00,0x81,0x81,0x81,0x81,0x81,0x81}, false };
 
-// Carminat emits this once after a bootstrap 61 11 01, paired with B9; it is never
-// periodically retried. UpdateList retains its separately profiled legacy request. Carminat's
-// arg byte is filler (0x00); UpdateList's is a literal 0x01.
+// Carminat announces this INTO SILENCE, paired with one B9, as the opening move -- it is
+// not a response to anything (corrected 2026-08-04: this comment used to read "once after a
+// bootstrap 61 11 01"). In the co-boot capture the order is 3AF B9 01 -> 3AF BA (+8.17 ms)
+// -> 3CF 61 11 00 (+7.24 ms): the PANEL answers our BA. BA is the precondition for the B0
+// burst; it is never periodically retried and never a storm.
+// UpdateList retains its separately profiled legacy request. Carminat's arg byte is filler
+// (0x00); UpdateList's is a literal 0x01.
 static const affa::Frame kCarminatSyncRequest =
   { 0x3AF, 8, {0xBA,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, false };
 static const affa::Frame kUpdateListSyncRequest =
   { 0x3DF, 8, {0x7A,0x01,0x81,0x81,0x81,0x81,0x81,0x81}, false };
 
 // Auto-ACK we emit for any non-sync, non-reply-flagged inbound frame. Filler differs.
+// On Carminat this is UNCONDITIONAL and must go out within ~0.5 ms of the 1C1 frame, at any
+// phase, before any authorization has completed -- 12/12 in the OEM captures, latencies
+// 0.249..0.483 ms. Do not gate it on _syncRequestObserved or on session state.
 static const affa::Frame kCarminatAckToKeyId =
   { 0x5C1, 8, {0x74,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, false };   // RX 1C1 -> TX 5C1
 static const affa::Frame kUpdateListAckToKeyId =
@@ -1997,9 +2188,12 @@ Everything else in this document is reproduced byte-for-byte. These nine are not
    mojibake bug, not a feature.
 2. **`delay(100)` after the sync request is gone.** No wire meaning (§5.2).
 3. **`delay(5)` between `showInfoMenu` frames is gone.** No wire meaning (§8.10).
-4. **The extra heartbeat emitted from the `69` handler is bounded.** Carminat's captured
-   roughly-500-ms B9/69 cadence is paced internally against `IClock::millis()`; it never
-   appends BA (§5.4).
+4. **The extra heartbeat emitted from the `69` handler is gone on Carminat.** Corrected
+   2026-08-04: this entry used to describe it as "bounded" and "paced". `B9` is a free-running
+   500 ms timer against `IClock::millis()` and the `69` handler transmits **nothing** — it
+   only re-arms the liveness deadline. `SyncProfile::replyToPing` is `false` for Carminat
+   (§5.1). Emitting both a paced `B9` and a pong puts two `B9` about 4 ms apart on the wire
+   every ~504 ms, double the OEM rate. No `B9` path ever appends `BA` (§5.4).
 
 5. **The ISO-TP sequence counter wraps.** `0x20 | (num & 0x0F)` instead of `0x20 + num`.
    Byte-identical for every message in the repertoire (all are ≤ 16 frames); correct rather

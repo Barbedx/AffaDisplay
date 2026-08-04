@@ -55,34 +55,71 @@ The request frame SHALL be transmitted only while the sync state carries `Failed
 - **WHEN** the panel's frames are being received and `Failed` is cleared
 - **THEN** the heartbeat continues and the request frame is no longer transmitted
 
-### Requirement: The Panel Opens The Conversation
+### Requirement: The Radio Announces, Then Answers The Panel's Second Request
 
-The library SHALL react to the panel's frames rather than assume it leads the handshake.
+> **Rewritten 2026-08-04** against four OEM captures of a real radio and a real Carminat
+> (`docs/captures/*.csv`), and proven on glass. The previous version of this requirement —
+> *"The Panel Opens The Conversation"*, with a `70 1A 11 …` hello answering the **first**
+> `61 11` — described a handshake that does not open a session: without our `BA` first, the
+> panel never sends its own `1C1` and registration never begins.
 
-Captured from the bench panel 2026-07-26, with the panel's own filler byte `0xA3`:
+The library SHALL announce itself into silence, and SHALL answer the panel's **next** request
+after that announce — not the first one it hears.
+
+Measured opening, from `aknowledge offed display cONNECT OT POWER.csv`. Filler identifies the
+sender: `0xA3` is the panel, `0x00` is us.
 
 ```
-RX  3CF  61 11 00 A3 A3 A3 A3 A3     panel: sync request
-RX  3CF  61 11 01 A3 A3 A3 A3 A3     panel: sync request, Start flag set
-RX  3CF  69 00 A3 A3 A3 A3 A3 A3     panel: peer-alive ping, ~1 Hz
-RX  1C1  70 A3 A3 A3 A3 A3 A3 A3     panel: function-registration request
-TX  5C1  74 00 ...                   us: DONE ack (0x1C1 | 0x400)
-TX  3AF  70 1A 11 00 00 00 00 01     us: hello, answering 61 11
-TX  3AF  B0 14 11 00 1F 00 00 00     us: sent TWICE, answering 61 11
+RX  3CF  61 11 01 A3 …               panel, repeating every ~104 ms into an empty bus
+TX  3AF  BA 00 00 00 00 00 00 00     us: the announce. THIS FIRST.
+RX  3CF  61 11 01 A3 …               panel asks again, +81 ms, on its own timer
+TX  3AF  B0 14 11 00 1F 00 00 00     us: hello #1, +30.75 ms after THAT request
+RX  1C1  70 A3 …                     panel opens ITS channel, +0.81..1.55 ms
+TX  5C1  74 00 …                     us: mandatory reflex, +0.25..0.48 ms
+TX  3AF  B0 14 11 00 1F 00 00 00     hello #2 and #3, 31 ms apart. Exactly three.
+TX  151  70 00 …                     us: only now, ~61 ms after the panel's 1C1
+TX  1F1  70 00 …                     pipelined, before either is acknowledged
+RX  551  74 A3 …   RX  5F1  74 A3 …  panel: registration complete
+TX  151  03 52 09 00 …               +400 ms exactly. Display ON, always first.
 ```
 
-#### Scenario: Sync request is answered with the hello frames
+#### Scenario: The announce precedes the hello burst
 
-- **WHEN** a frame arrives on the reply id whose first two bytes are `61 11`
-- **THEN** the hello frames are transmitted in profile order
-- **AND** the second Carminat hello is sent twice, reproducing the capture
+- **WHEN** a complete `61 11 xx` arrives and no `BA` has yet been transmitted
+- **THEN** the bounded announce is armed and transmitted
+- **AND** no hello frame is sent for that request
+- **AND** the panel's next `61 11 xx` transmits the hello burst after the profile's delay
 
-#### Scenario: The Start flag is read from byte 2
+#### Scenario: The hello burst is three identical frames paced from the request
 
-- **WHEN** the sync request carries `0x01` in `data[2]`
-- **THEN** the `Start` flag is raised
-- **AND** a frame shorter than three bytes does not raise it, because reading past the
-  length would latch `Start` at random
+- **WHEN** the announce has been transmitted and a `61 11 xx` arrives
+- **THEN** `B0 14 11 00 1F 00 00 00` is transmitted three times, 31 ms apart
+- **AND** the first is timed from the request, not from the announce — anchored on the
+  request the spread across four captures is 0.79 ms; anchored on the announce it is 80 ms
+- **AND** exactly three are sent, never two and never four
+
+#### Scenario: Byte 2 does not gate anything
+
+- **WHEN** the sync request carries `0x00` or `0x01` in `data[2]`
+- **THEN** both are treated as the same request
+- **AND** a frame shorter than three bytes is ignored entirely, because reading past the
+  length would act on a byte the panel never transmitted
+
+> `0x01` was long believed to mean "discovery only, wait for `00`". It does not:
+> `cONNECT OT POWER.csv` completes an entire session — registration, display-on, ISO-TP
+> text — on sixteen `01` frames and **zero** `00` frames. The low bit reports the panel's own
+> state; it is not an authorization grade.
+
+#### Scenario: A registered panel that asks again has voided the session
+
+- **WHEN** a complete `61 11 xx` arrives while function registration is held
+- **THEN** the session is torn down and the opening re-runs
+- **AND** application traffic stops until registration is regained
+- **AND** the value of `data[2]` plays no part in this
+
+> A registered display never sends `61 11` at all in any capture, so one arriving is real
+> loss. Keying this on `0x01` alone let a panel send `61 11 00` forty-one times while the
+> library kept pushing fullscreen renders at it.
 
 #### Scenario: Peer-alive clears the failure
 

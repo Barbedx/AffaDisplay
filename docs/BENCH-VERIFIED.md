@@ -20,7 +20,7 @@ The first run against the **OEM-capture-derived** handshake (`docs/CARMINAT-HAND
 
 | Capability | | Evidence |
 |---|---|---|
-| Cold opening from the display's own `61 11` | ✅ | `61 11 00 -> B0/B0/B0 -> 151 70 -> 1F1 70 -> FUNCSREG` in **194 ms** |
+| Cold opening (our `BA` first, then the display's `61 11`) | ✅ | `BA -> 61 11 00 -> B0/B0/B0 -> 151 70 -> 1F1 70 -> FUNCSREG` in **194 ms**. The `00` here is incidental — `01` is the same request (`CARMINAT-HANDSHAKE-GROUND-TRUTH.md` §2.0) |
 | `setTime` **read off the glass** | ✅ | user: *"I CAN SEE 10 00"* — `151 05 56 31 30 30 30`, ACKed on `0x551` |
 | `setPower(true)` | ✅ | `151 03 52 09 00`, ACKed |
 | Panel control ACK `1C1 -> 5C1 74` | ✅ | `autoAcks-TX+ 2`, emitted between B0 fragments |
@@ -32,7 +32,7 @@ example's own FSM) — the first hardware run since the handshake work:
 
 | Capability | | Evidence |
 |---|---|---|
-| Library opening + lazy registration | ✅ | `AFFA: sync 0x01 -> 0x00`, `[seq] panel answering` |
+| Library opening + `0x70` registration | ✅ | `AFFA: sync 0x01 -> 0x00`, `[seq] panel answering` |
 | `setPower(true)` via `CarminatDisplay` | ✅ | `[seq] power acknowledged` |
 | **`setText("SUCCESS")` — multi-frame ISO-TP** | ✅ | user: *"i see success"*. Three frames with `30 01 00` flow control between them, panel-ACKed |
 | `setTime("1000")` via `CarminatDisplay` | ✅ | `[seq] clock set to 10:00 - done` |
@@ -62,7 +62,7 @@ a statement about the wire.
 | Counter at 2 Hz | ✅ | `0035 → 0041 → 0047` |
 | Media screen, 3 independent marquees | ✅ | *"both rows and time increments as supposed"* |
 | Fullscreen `0x21` mode `0x05` | ✅ | animates at ~190 ms/screen, 14 frames |
-| **Fullscreen OWNS the glass** | ✅ | `setText` after it delivered `Ok` and **changed nothing** until `hideFullscreenText()`. Recorded as `[CAP]` in WIRE-SPEC §8.6 |
+| ~~**Fullscreen OWNS the glass**~~ | ❌ | **RETRACTED — this row contradicted itself and the code.** It records `setText` over a live fullscreen changing nothing until `hideFullscreenText()`; `CarminatDisplay::showFullscreenText`'s own comment records the opposite result from the **same day** — *"a plain setText() over a live fullscreen REPLACED it, with no hideFullscreenText() sent"* — and WIRE-SPEC §8.6 has been corrected to match. A fullscreen is **not** an overlay and needs no teardown: any full-screen-class render replaces the last one, which is what lets 09_golden animate at ~8 screens/second. The true overlay is the **popup**, which survives a redraw underneath it and is cleared only by `hidePopup()`. Whichever observation was mistaken, the two cannot both stand, and the animating build is the one with evidence. |
 | 8.3-hour soak | ✅ | 257 k frames, **0** ring overflows, **0** controller errors, flat heap |
 | Info popup (3 rows) | ⬜ | built and tested on the host, never confirmed on glass |
 | Confirm box | ⬜ | host tests only |
