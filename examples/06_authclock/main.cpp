@@ -1,3 +1,15 @@
+// ============================================================================
+// HISTORICAL. DO NOT COPY THIS HANDSHAKE. Superseded 2026-08-04 by the OEM captures.
+// This file DID put 10:00 on real glass and its black box is still worth reading — but it
+// is built on an authorization model the captures disproved:
+//   * it treats `61 11 00` as the only authorizing request, with `01` behind a compatibility
+//     flag. THEY ARE THE SAME REQUEST: "cONNECT OT POWER" completes an entire session on
+//     `01` with zero `00` frames. The low bit reports the panel's state, not permission.
+//   * it answers the FIRST request with the hello burst rather than with `BA`.
+//   * it registers 151/1F1 without waiting for the display's own `1C1 70`, which the OEM
+//     always sends first (0.81-1.55 ms after B0#1, ~61 ms before our registration).
+// See docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md and examples/README.md. Use 09_golden.
+// ============================================================================
 // 06_authclock — panel-initiated authorization + clock 10:00. Black box.
 //
 // THE EXPERIMENT THIS EXAMPLE EXISTS FOR: every image on this bench so far configured the

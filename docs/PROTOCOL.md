@@ -112,47 +112,97 @@ Picking the wrong column is silent — the bus simply never answers.
 
 ### 3.0 Carminat opening and recovery -- authoritative captured profile
 
-The Carminat panel starts the session. The ESP32 is silent after boot until a complete
-`3CF 61 11 xx` (DLC >= 3) arrives. On a single-ended monitor, `Dir=Rx` only means that
-the monitor received the frame; direction is determined primarily by the IDs:
-`3CF` and `1C1` are panel -> ESP32, while `3AF`, `151`, `1F1`, and `5C1` are
-ESP32 -> panel. The usual fillers corroborate that reading (`A3` from the panel,
-`00` from this driver), but a received filler is never a validation rule.
+> **Superseded 2026-08-04.** Everything in this section was rewritten against four passive
+> sniffs of a real OEM Renault radio talking to a real Carminat panel (579 frames, no ESP32
+> on the bus) plus a bench session on glass the same day. The full derivation, with the
+> per-capture timing tables, is `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`; that document is
+> authoritative and this section is its summary. Four claims that used to live here are now
+> disproven and are called out inline below, because a reader who remembers them needs to
+> know they were tested rather than quietly dropped.
 
-The default `CarminatHelloProfile::CapturedB0x3` is the sequence measured in the supplied
-real-display monitor captures:
+**Direction is carried by the padding byte, and this is proven rather than assumed.**
+Semantically identical messages carry different filler depending on the id group — the same
+`70` "open" appears as `1C1 70 A3 A3…` and as `151 70 00 00…`, the same `74` "ack" appears as
+`551 74 A3…` and as `5C1 74 00…`. Filler is therefore a property of the transmitting node,
+not of the message: **`0xA3` = the DISPLAY, `0x00` = the RADIO (us), 0/579 exceptions.**
+`[OEM]` On a single-ended monitor `Dir=Rx` only means the monitor received the frame. The id
+map is the primary key and the filler corroborates it: `3CF` and `1C1` are panel -> ESP32,
+while `3AF`, `151`, `1F1` and `5C1` are ESP32 -> panel. Reading the filler is encouraged;
+*validating* it is still forbidden (§1.1) — `0xA3` is a positive fingerprint of the display,
+but `0x00` only means "not the display" and is indistinguishable from genuine zero data.
+
+**The opening, in order. Every step below is measured 4/4 across the OEM captures.** `[OEM]`
 
 ```text
-RX  3CF  61 11 00 A3 A3 A3 A3 A3
-   +31 ms  TX 3AF  B0 14 11 00 1F 00 00 00
-             RX 1C1  70 A3 A3 A3 A3 A3 A3 A3
-             TX 5C1  74 00 00 00 00 00 00 00
-   +31 ms  TX 3AF  B0 14 11 00 1F 00 00 00
-   +31 ms  TX 3AF  B0 14 11 00 1F 00 00 00
+  (bus silent)
+TX  3AF  B9 00 00 00 00 00 00 00     we announce ourselves — bounded, ONE pair
+TX  3AF  BA 00 00 00 00 00 00 00     +0.3 .. 8.2 ms.  BA is the load-bearing frame.
+RX  3CF  61 11 xx A3 A3 A3 A3 A3     panel request.  xx = 00 OR 01, same request.
+                                     THIS ONE ONLY ARMS THE ANNOUNCE.
+RX  3CF  61 11 xx A3 A3 A3 A3 A3     the panel's NEXT request, ~104 ms later, on its
+                                     own free-running timer.  THIS is the trigger.
+   +30.75 ms  TX 3AF  B0 14 11 00 1F 00 00 00     announce #1
+      +0.8 .. 1.6 ms  RX 1C1  70 A3 A3 A3 A3 A3 A3 A3   panel opens ITS channel
+         +0.25 .. 0.48 ms  TX 5C1  74 00 00 00 00 00 00 00   MANDATORY, unconditional
+   +31 ms     TX 3AF  B0 14 11 00 1F 00 00 00     announce #2, byte-identical
+   +31 ms     TX 3AF  B0 14 11 00 1F 00 00 00     announce #3, byte-identical
+      +0.10 ms  TX 151  70 00 00 00 00 00 00 00   register function 1
+      +0.29 ms  TX 1F1  70 00 00 00 00 00 00 00   register function 2 (PIPELINED)
+      +0.48 ms  RX 551  74 A3 A3 A3 A3 A3 A3 A3
+      +0.47 ms  RX 5F1  74 A3 A3 A3 A3 A3 A3 A3   <-- the 400 ms anchor
+   +399.8 .. 400.5 ms  TX 151  03 52 09 00 00 00 00 00   display ON — ALWAYS first
 ```
 
+Four consequences, each of which overturns something this document previously asserted:
+
+1. **We speak first, into silence.** The old text — *"the ESP32 is silent after boot until a
+   complete `3CF 61 11 xx` arrives"* — is wrong. In all four captures the radio's `B9`/`BA`
+   pair precedes the request that triggers the burst; in the co-boot capture the panel's very
+   first `61 11 00` arrives **7.24 ms after our `BA`**, answering it. `BA` is the precondition,
+   not the response. It must be one bounded pair, repeated at most slowly (seconds apart) —
+   **never a periodic BA stream, never a storm.**
+2. **`61 11 00` and `61 11 01` are THE SAME REQUEST.** The old text — *"`61 11 01` is
+   discovery only … wait for `61 11 00`"* — is disproven by
+   `docs/captures/aknowledge offed display cONNECT OT POWER.csv`, which contains **sixteen
+   `61 11 01` frames and zero `61 11 00`** and completes an entire session off `01` alone:
+   registration, power command, ISO-TP text. The low bit is a state indication from the
+   panel, not an authorization grade. Any code or comment that gates authorization on `00`
+   is wrong. See §3.3.
+3. **The burst answers the panel's NEXT request, not the first one, and it is timed from
+   that request rather than from our `BA`.** Δ from the triggering `61 11 xx` to B0#1 across
+   the four captures: 30.740, 31.527, 30.817, 30.751 ms — **spread 0.79 ms**. Δ from our last
+   `BA` to B0#1 for the same four: 37.98, 31.63, 61.91, 111.78 ms — **spread 80 ms**. A 100×
+   difference in spread names the anchor unambiguously. **Any implementation that times the
+   burst off `BA` is wrong.** `[OEM]`
+4. **Registration is part of the opening, not of the first render.** `151 70` and `1F1 70` go
+   out 0.10–0.30 ms after B0#3, unconditionally, with no application involvement, and they
+   are **pipelined** — `1F1 70` is on the wire 0.29 ms after `151 70`, before either has been
+   acknowledged. See §3.5, which used to describe this as lazy and strictly sequential.
+
 One opening frame is offered to `ICanLink` at a time; the `1C1 -> 5C1` control ACK is allowed
-to interleave between B0 frames. Only after the third B0 has been accepted by the link may
-the application side register `151`, wait for `551 74`, register `1F1`, and wait for
-`5F1 74` -- strictly in that order. Wait about 400 ms after the final registration ACK
-before the zero-padded display-on frame `151 03 52 09 00 00 00 00 00`. A clock request for
-10:00 is `151 05 56 31 30 30 30 00 00`, and it too requires `551 74`.
+to interleave between B0 frames, and in the captures it always does — the panel's `1C1 70`
+lands *between* B0#1 and B0#2, which is the entire reason the 31 ms staging exists. Wait
+400 ms ± 0.5 ms from the final registration ACK (`5F1 74`, name the anchor — measured from
+B0#3 the same interval reads 401.1–402.0 ms) before the zero-padded display-on frame
+`151 03 52 09 00 00 00 00 00`. A clock request for 10:00 is `151 05 56 31 30 30 30 00 00`,
+and it too requires `551 74`.
 
-`61 11 01` is discovery only in the strict Carminat profile: issue one nonblocking
-`3AF B9 ...` + `3AF BA ...` pair, keep registration/render/power/time locked, and wait
-for `61 11 00`. Repeated `01` frames never create a periodic BA stream. A full request
-also opens the panel control plane, so `1C1 70 -> 5C1 74` remains permitted during discovery;
-that ACK is not authorization for application output.
+**Session loss.** A registered display never sends `61 11` at all — its disappearance after
+B0#1 is the definitive signal that registration took, in all four OEM captures and in our own
+successful bench run. Therefore **any complete `61 11 xx` arriving while we hold registrations
+means the panel has voided us, and the third byte is irrelevant.** Tear the session down,
+drop the registrations, stop application traffic, and re-open from the top. The failure this
+protects against was measured on the bench: the panel sent `61 11 00` **41 times** while our
+firmware kept pushing fullscreens at it. Recovery replays the opening above; it is never a
+timer-driven BA probe.
 
-Healthy traffic is a paced roughly-500-ms `3AF B9` / `3CF 69` liveness exchange. A lost
-session drops registrations and held application work waits for the next panel-originated
-opening; recovery replays the selected profile, never a timer-driven BA probe.
+Steady state is **two independent free-running timers**, not an exchange — see §3.6.
 
 The historical `CarminatHelloProfile::MeganeCanLegacy70B0B0` profile is explicit
 compatibility only. It preserves the old MeganeCAN source's immediate
 `70 1A 11 ...`, `B0 ...`, `B0 ...` opening for a panel that has demonstrated that
-requirement. It is not the capture-backed default, and selecting it does not weaken the
-strict `61 11 00` gate or permit periodic BA.
+requirement. It is not the capture-backed default, and the `70 1A 11` frame appears in
+**zero** of the 579 OEM frames.
 
 ### 3.1 State
 
@@ -176,9 +226,15 @@ and additionally, **while `FAILED` or `START` is set**:
 then cleared `START`. `[IMPL]`
 
 That is historical behaviour, not the Carminat library's retry policy. The current
-capture-backed rules are in section 3.0: one discovery `B9` + `BA` pair for `01`, no
-periodic BA, a roughly-500-ms heartbeat once the panel has opened the session, and no
-application output before the later good `00`.
+capture-backed rules are in §3.0: one bounded `B9` + `BA` pair announced into silence, no
+periodic BA, and a **free-running** 500 ms `B9` heartbeat that does not start until
+registration is complete.
+
+> **Retracted here 2026-08-04:** this paragraph used to end *"…one discovery `B9` + `BA` pair
+> for `01` … and no application output before the later good `00`."* There is no "later good
+> `00`" to wait for. `docs/captures/aknowledge offed display cONNECT OT POWER.csv` runs a
+> complete session — announce, registration, power, ISO-TP text — on sixteen `61 11 **01**`
+> frames and zero `61 11 00`. See §3.3.
 
 > `requestArg` (`data[1]`) is `0x00` on Carminat **and it is filler, not an argument**.
 > UpdateList's `7A 01` carries a genuine `0x01`. The two look symmetric on the wire and

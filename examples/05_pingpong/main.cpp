@@ -1,3 +1,19 @@
+// ============================================================================
+// HISTORICAL. DO NOT COPY THIS HANDSHAKE. Superseded 2026-08-04 by the OEM captures in
+// docs/captures/ — see docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md and examples/README.md.
+//
+// WHAT THIS FILE STILL GETS WRONG:
+//   * "answers ANY 69 ping with a paced B9 pong" — B9 IS NOT A PONG. Measured: B9 runs at
+//     500.08 ms (sigma 0.33) while the display's 69 runs at 507.83 ms (sigma 4.60); the gap
+//     between them slides monotonically from 178 ms to 9 ms and then WRAPS to 511 ms. A
+//     reply cannot be 14x more stable than its trigger, nor arrive 511 ms late and carry on.
+//   * it answers the FIRST `61 11` with the hello burst. The OEM radio answers with `BA`,
+//     and the panel's NEXT request (~104 ms later) is the one that draws the burst.
+//   * it never acknowledges the display's own `1C1 70` on `5C1`, and never sends
+//     `03 52 09` before drawing — the panel then ACKs a screen it never lights.
+//
+// Kept because the measurements in it are still cited. For working code see 09_golden.
+// ============================================================================
 // 05_pingpong — the Carminat handshake BY HAND. No AffaDisplay. One goal: SUCCESS on glass.
 //
 // THIS EXAMPLE DELIBERATELY DOES NOT LINK THE LIBRARY (build_src_filter = -<*>), for the
