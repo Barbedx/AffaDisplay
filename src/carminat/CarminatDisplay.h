@@ -121,8 +121,9 @@ class CarminatDisplay final : public AffaDisplayBase {
                                  carminat::kMenuItemStride * count);
   }
 
-  // The list screen with AS MANY ITEMS AS THE PANEL WILL TAKE — showMenu() above is the
-  // two-row special case this generalises. `items` is `count` NUL-terminated strings, each
+  // The list screen with as many items as the panel will TRACK. It still DRAWS TWO ROWS —
+  // the glass is a two-row viewport — but the panel holds the whole list and scrolls itself
+  // as the selection moves, so the application stops maintaining a sliding window. `items` is `count` NUL-terminated strings, each
   // truncated to 26 characters.
   //
   // `scratch` is BUILT INTO AND THEN BORROWED: it must be at least menuScreenBytes(count)
@@ -136,6 +137,11 @@ class CarminatDisplay final : public AffaDisplayBase {
                                  const char* const* items, uint8_t count,
                                  uint8_t firstVisible = 0, uint8_t selected = 0,
                                  uint8_t scrollMask = 0);
+
+  // Move the selection inside a list already on screen — eight bytes instead of the whole
+  // screen. highlightItem() is the two-row form and refuses anything past row 1; this takes
+  // an ITEM INDEX, and the panel scrolls its two-row viewport to wherever it lands.
+  [[nodiscard]] Result selectMenuItem(uint8_t index);
 #endif
 
 #if AFFA_ENABLE_NAV

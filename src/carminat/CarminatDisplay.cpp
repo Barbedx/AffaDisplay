@@ -376,7 +376,30 @@ Result CarminatDisplay::hidePopup() { return Result::NotSupported; }
 // owns the glass until closed, it is the old one.
 //
 #if AFFA_ENABLE_BIGMENU
-// THE PANEL TAKES AT LEAST SIX ITEMS. showMenu() above hard-codes `0x82` and a 90-byte
+// Move the selection inside an N-item list WITHOUT resending the list.
+//
+// highlightItem() refuses anything past row 1 and sends the two-row tags 0x7E/0x7F. In an
+// N-item screen the tag is the ITEM INDEX — the tag bytes read 00 01 02 03 04 05 — so the
+// same 0x29 command carries 0..N-1 and costs eight bytes instead of two hundred.
+Result CarminatDisplay::selectMenuItem(uint8_t index) {
+  if (index >= kMenuMaxItems) return Result::BadArgument;
+  const uint8_t d[8] = {0x07, kCmdHilite, 0x01, index, 0x80, 0x00, 0x00, 0x00};
+  return submit(kIdSetText, d, sizeof(d), RenderSlot::Highlight);
+}
+
+// THE PANEL TRACKS SIX ITEMS AND DRAWS TWO OF THEM.
+//
+// CORRECTION, bench 2026-08-05: an earlier version of this comment said "the panel takes at
+// least six rows". It does not. The glass is a TWO-ROW VIEWPORT and that is a property of
+// the panel, not of the payload — a six-item screen still shows two rows plus the header.
+//
+// What the six items actually buy is that the panel now TRACKS the whole list and scrolls
+// the viewport ITSELF: send the list once, then move the selection with selectMenuItem(),
+// and selecting item 5 brings item 5 into view without another render. That replaces the
+// sliding window an application used to have to maintain by hand, which is worth having —
+// but it is not more rows on screen.
+//
+// showMenu() above hard-codes `0x82` and a 90-byte
 // payload and can therefore only ever draw two — which is a limit of this library, not of
 // the panel. From the 24-file OEM corpus (docs/OEM-CSV-CORPUS.md §4):
 //
