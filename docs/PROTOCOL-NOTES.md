@@ -1129,13 +1129,42 @@ it. None blocks the port; each blocks a *confident* change to the bytes involved
 
 **Channels**
 
-18. **`0x1F1` (Carminat NAV).** Registered on every cold link, never written to. W4
-    reinterprets it as structured navigation state (turn direction + distance + street
-    name), *not* a streamed bitmap, on the grounds that the idle "globe" glyph already
-    lives in the panel. Its first frame is `11 2E` — a 302-byte message. The capture is
-    frame-lossy because `esp32_can` hardcodes `rx_queue_len = 6` and the ~43-frame burst
-    overflows it. Decoding the fields is future work; the library registers the id because
-    the OEM does and stops there.
+18. **`0x1F1` (Carminat NAV) — DECODED 2026-08-05. It IS a bitmap.** ~~W4 reinterprets it as
+    structured navigation state (turn direction + distance + street name), *not* a streamed
+    bitmap, on the grounds that the idle "globe" glyph already lives in the panel.~~ **That
+    reading is wrong, and so was "the capture is frame-lossy".** The ESP32 capture is lossy
+    — `esp32_can` hardcodes `rx_queue_len = 6` and the 43-frame burst overflows it — but
+    `docs/captures/"aknowledge on on display.csv"` is a bus-analyser trace and it is
+    **complete**: 44 frames, PCI `11` then `21..2F 20..2F 20..2B`, **zero sequence gaps**,
+    302 declared bytes, 5 bytes of pad in the last frame. Nobody had reassembled it.
+
+    ```
+    21 0B 00 25 | 41 42 43 44 45 46 00 | 01 | 30 30 | <288 bytes>
+                  "A  B  C  D  E  F" \0        48 48
+    ```
+
+    **14-byte header + 288 bytes = 48x48 monochrome, row-major, 6 bytes/row, MSB-first.**
+    Three independent confirmations: 288 is an exact 48x6 fit; header bytes 12 and 13 are
+    `0x30 0x30` = 48, 48; and the image renders with exactly three blank rows top and bottom,
+    i.e. centred. Rendered, it draws the idle navigation globe — so the glyph does NOT live
+    in the panel, the radio streams it. LSB-first renders visibly wrong, which settles the
+    bit order.
+
+    Still unknown: `0x21` (command, by analogy with `0x151` byte 0), `0x0B`, `0x00 0x25`
+    (possibly one 16-bit field) and `0x01` (format? bit depth?). `"ABCDEF\0"` is a
+    seven-byte string slot at a placeholder — the captured car had no navigation CD.
+
+    `examples/16_navlab` is the instrument for the rest: it replays those 302 bytes byte for
+    byte, makes every one editable from a browser, and sweeps a single header byte across a
+    range so an unknown field can be characterised in one pass. **Nothing here has been sent
+    to a panel yet.** The one capture that would settle the header outright is `0x1F1` with
+    navigation actually routing; diffing it against these 302 bytes says immediately whether
+    the header is a real street-name/distance struct with a bitmap tail, or whether the whole
+    right-hand pane is streamed pixels on every update.
+
+    Transmit-side consequence: 304 wire bytes needs `enqueueExternal()` (zero-copy, borrows
+    the caller's buffer). See `AffaConfig.h` — `AFFA_MAX_PAYLOAD` stays at 113 and long
+    payloads are opt-in by calling a different function, so no existing consumer pays for it.
 19. **Held rotary detents, and whether the hold mask is one bit or two.** `RollUp`/`RollDown`
     (`0x0101`/`0x0141`) are excluded from hold-masking by both ports, which implies the
     panel never sets the hold bits on them. No capture contains a held detent. Separately,

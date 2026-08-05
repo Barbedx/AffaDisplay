@@ -322,6 +322,99 @@ void test_a_12_bit_first_frame_opens_a_message(void) {
 void setUp(void) {}
 void tearDown(void) {}
 
+
+// ---------------------------------------------------------------------------
+// enqueueExternal() — the zero-copy path past the 113-byte ceiling
+// ---------------------------------------------------------------------------
+// The OEM head unit's 0x1F1 nav screen is 304 wire bytes: 2 PCI + 302 declared. That needs
+// 43 continuation frames, so the counter must wrap TWICE, and it is the first thing in this
+// library to exercise a 12-bit first-frame length on the transmit side.
+
+void test_the_OEM_nav_screen_is_44_frames_with_a_twice_wrapped_counter(void) {
+  Rig r;
+  r.up();
+
+  // 2 PCI + 302 payload, exactly as the capture has it.
+  static uint8_t msg[304];
+  msg[0] = 0x11;                 // FF, high nibble of 302
+  msg[1] = 0x2E;                 // low byte of 302
+  for (uint16_t i = 2; i < sizeof(msg); ++i) msg[i] = static_cast<uint8_t>(i);
+
+  const TxTicket t = r.d.enqueueExternal(0x1F1, msg, sizeof(msg));
+  TEST_ASSERT_NOT_EQUAL_MESSAGE(kNoTicket, t, "304 bytes is inside AFFA_MAX_EXTERNAL_PAYLOAD");
+  pumpUntilIdle(r.d);
+  ASSERT_RESULT(Ok, r.d.lastResult());
+
+  Frame f;
+  int n = 0;
+  uint8_t pcis[64] = {0};
+  while (r.link.takeSent(f)) {
+    if (n == 0) {
+      TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x11, f.data[0], "the caller owns the first-frame PCI");
+      TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x2E, f.data[1], "302, as the OEM declares it");
+    } else if (n < 64) {
+      pcis[n] = f.data[0];
+    }
+    ++n;
+  }
+  TEST_ASSERT_EQUAL_INT_MESSAGE(44, n, "1 first frame + 43 continuations");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x21, pcis[1],  "continuations start at 0x21");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x2F, pcis[15], "...run to 0x2F...");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x20, pcis[16], "...and WRAP to 0x20, never 0x30");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x20, pcis[32], "wrapping a second time");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x2B, pcis[43], "the capture's last PCI");
+}
+
+void test_external_payload_is_borrowed_not_copied(void) {
+  Rig r;
+  r.up();
+
+  // Mutating the caller's buffer AFTER enqueue must change what goes on the wire. That is
+  // the contract, and asserting it is what stops a future 'defensive' memcpy from silently
+  // reinstating the 1.1 kB this path exists to avoid.
+  static uint8_t msg[16];
+  for (uint8_t i = 0; i < sizeof(msg); ++i) msg[i] = 0xAA;
+  const TxTicket t = r.d.enqueueExternal(0x151, msg, sizeof(msg));
+  TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
+  msg[0] = 0x5A;
+  pumpUntilIdle(r.d);
+
+  Frame f;
+  TEST_ASSERT_TRUE(r.link.takeSent(f));
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x5A, f.data[0], "the library reads the caller's storage");
+}
+
+void test_external_refuses_coalescing_and_reassert(void) {
+  Rig r;
+  r.up();
+  static uint8_t msg[16] = {0};
+
+  // The SLOT is what is refused. TxOptions::coalesce defaults to true, so a check on the
+  // flag would reject every ordinary call — this asserts the distinction stays that way.
+  TxOptions co;
+  co.slot = RenderSlot::Text;
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(kNoTicket, r.d.enqueueExternal(0x151, msg, sizeof(msg), co),
+                                   "coalescing would re-copy into a slot that owns no storage");
+  ASSERT_RESULT(BadArgument, r.d.lastResult());
+
+  TxOptions ra;
+  ra.reassertAfterSession = true;
+  ra.slot                 = RenderSlot::Control;
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(kNoTicket, r.d.enqueueExternal(0x151, msg, sizeof(msg), ra),
+                                   "the control cache is a fixed AFFA_MAX_PAYLOAD copy");
+  ASSERT_RESULT(BadArgument, r.d.lastResult());
+}
+
+void test_external_still_has_a_ceiling(void) {
+  Rig r;
+  r.up();
+  static uint8_t msg[8] = {0};
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(
+      kNoTicket, r.d.enqueueExternal(0x151, msg, AFFA_MAX_EXTERNAL_PAYLOAD + 1),
+      "a borrowed pointer is still bounded");
+  ASSERT_RESULT(TooLong, r.d.lastResult());
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_a_12_bit_first_frame_opens_a_message);
@@ -335,5 +428,9 @@ int main(int, char**) {
   RUN_TEST(test_fragment_matches_the_transmit_fsm_for_every_length);
   RUN_TEST(test_the_continuation_counter_wraps_rather_than_reaching_0x30);
   RUN_TEST(test_the_reassembler_stops_at_the_ceiling_rather_than_wrapping);
+  RUN_TEST(test_the_OEM_nav_screen_is_44_frames_with_a_twice_wrapped_counter);
+  RUN_TEST(test_external_payload_is_borrowed_not_copied);
+  RUN_TEST(test_external_refuses_coalescing_and_reassert);
+  RUN_TEST(test_external_still_has_a_ceiling);
   return UNITY_END();
 }

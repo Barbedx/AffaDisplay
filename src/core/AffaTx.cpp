@@ -147,8 +147,9 @@ uint8_t AffaDisplayBase::insertIndexFor(Priority p) const {
   return i;
 }
 
-void AffaDisplayBase::pushJob(uint16_t funcId, const uint8_t* d, uint8_t len, JobKind kind,
-                              TxTicket t, const TxOptions& opt, uint8_t at) {
+void AffaDisplayBase::pushJob(uint16_t funcId, const uint8_t* d, uint16_t len, JobKind kind,
+                              TxTicket t, const TxOptions& opt, uint8_t at,
+                              const uint8_t* ext) {
   if (_qCount >= AFFA_TX_QUEUE_DEPTH) return;      // callers check capacity first
   if (at > _qCount) at = _qCount;
   for (uint8_t i = _qCount; i > at; --i) _queue[i] = _queue[i - 1];
@@ -170,7 +171,11 @@ void AffaDisplayBase::pushJob(uint16_t funcId, const uint8_t* d, uint8_t len, Jo
   j.tries      = 0;
   j.readyAtMs  = _clock.millis();          // startable immediately; a retry moves it out
   j.holdUntilMs = _clock.millis() + AFFA_TX_HOLD_MS;
-  std::memcpy(j.data, d, len);
+  j.ext        = ext;
+  // A borrowed payload is never copied — that is the entire point — and `data` is left as
+  // it was. Only the copying path may touch it, and only enqueue() reaches here with
+  // len <= AFFA_MAX_PAYLOAD already enforced.
+  if (!ext) std::memcpy(j.data, d, len);
 }
 
 void AffaDisplayBase::removeJob(uint8_t index) {
@@ -277,6 +282,50 @@ TxTicket AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t 
   }
 
   pushJob(funcId, data, len, JobKind::Payload, t, opt, insertIndexFor(opt.priority));
+  _lastEnqueued = t;
+  _lastResult   = Result::Ok;
+  return t;
+}
+
+TxTicket AffaDisplayBase::enqueueExternal(uint16_t funcId, const uint8_t* data, uint16_t len,
+                                          TxOptions opt) {
+  _lastEnqueued = kNoTicket;
+
+  if (!data || len == 0)                  { _lastResult = Result::BadArgument; return kNoTicket; }
+  if (len > AFFA_MAX_EXTERNAL_PAYLOAD)    { _lastResult = Result::TooLong;     return kNoTicket; }
+  if (!knownFunc(funcId))                 { _lastResult = Result::UnknownFunc; return kNoTicket; }
+  // Both would re-copy a payload into a slot that does not own its storage. Refuse rather
+  // than silently ignore: a caller that asked for latest-value-wins and did not get it
+  // would see stale screens and no error.
+  //
+  // THE TEST IS THE SLOT, NOT TxOptions::coalesce — that flag DEFAULTS TO TRUE
+  // (AFFA_TX_COALESCE), so testing it would reject every ordinary call. Coalescing only
+  // ever fires for a real RenderSlot; RenderSlot::None is the raw-enqueue slot and never
+  // coalesces, which is exactly what a borrowed payload wants.
+  if (opt.slot != RenderSlot::None || opt.reassertAfterSession) {
+    _lastResult = Result::BadArgument;
+    return kNoTicket;
+  }
+  opt.coalesce = false;                 // belt and braces: nothing may replace these bytes
+
+  const uint32_t now = _clock.millis();
+  if (AFFA_TX_HOLD_MS == 0 && !linkReady()) {
+    _lastResult = _link.isLive() ? Result::NoSync : Result::LinkDown;
+    return kNoTicket;
+  }
+  (void)now;
+
+  const bool needReg = !_passive && linkReady() &&
+                       !hasFlag(_sync, SyncState::FuncsReg) && !registrationQueued();
+  const uint8_t newSlots = static_cast<uint8_t>(1 + (needReg ? _funcCount : 0));
+  if (_qCount + newSlots > AFFA_TX_QUEUE_DEPTH) {
+    _lastResult = Result::QueueFull;
+    return kNoTicket;
+  }
+  if (needReg) (void)queueRegistrations();
+
+  const TxTicket t = nextTicket();
+  pushJob(funcId, nullptr, len, JobKind::Payload, t, opt, insertIndexFor(opt.priority), data);
   _lastEnqueued = t;
   _lastResult   = Result::Ok;
   return t;
@@ -436,9 +485,11 @@ void AffaDisplayBase::pumpTx() {
   // Build against a local cursor. `job.sent` is protocol state, not a staging cursor: a
   // locally full controller has not accepted any bytes, so it stays unchanged until the
   // link accepts this frame.
-  uint8_t proposedSent = job.sent;
+  // The bytes are either inline or borrowed; nothing else in the FSM cares which.
+  const uint8_t* const src = job.ext ? job.ext : job.data;
+  uint16_t proposedSent = job.sent;
   while (i < kPacketLength && proposedSent < job.len)
-    f.data[i++] = job.data[proposedSent++];
+    f.data[i++] = src[proposedSent++];
   const bool more = (proposedSent < job.len);
   const uint8_t filler = packetFiller();
   while (i < kPacketLength) f.data[i++] = filler;
@@ -548,8 +599,12 @@ void AffaDisplayBase::finishJob(Result r, bool allowRetry) {
   const TxTicket ticket = job.ticket;
   const uint16_t funcId = job.funcId;   // read before removeJob() shifts the array under
                                         // `job`, which is a reference into it
-  const bool cacheAfterAck = job.reassertAfterSession;
-  const uint8_t cachedLen = job.len;
+  // enqueueExternal() refuses reassertAfterSession, so a borrowed job can never reach the
+  // cache — but the ceiling is asserted here too rather than trusted, because the copy
+  // below is into a fixed AFFA_MAX_PAYLOAD stack buffer and job.len is now 16-bit.
+  const bool cacheAfterAck =
+      job.reassertAfterSession && !job.ext && job.len <= AFFA_MAX_PAYLOAD;
+  const uint8_t cachedLen = static_cast<uint8_t>(cacheAfterAck ? job.len : 0);
   uint8_t cachedData[AFFA_MAX_PAYLOAD] = {0};
   if (cacheAfterAck) std::memcpy(cachedData, job.data, cachedLen);
   (void)funcId;                         // its only consumer is a log line, which

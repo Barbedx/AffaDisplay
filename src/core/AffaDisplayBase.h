@@ -199,6 +199,21 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   [[nodiscard]] TxTicket enqueue(uint16_t funcId, const uint8_t* data, uint8_t len,
                                  TxOptions opt = TxOptions{});
 
+  // ZERO-COPY, FOR PAYLOADS THAT DO NOT FIT AFFA_MAX_PAYLOAD. Stores `data` by POINTER:
+  // the bytes must stay valid and unchanged until the ticket completes. Everything else —
+  // segmentation, flow control, retries, abort — is the ordinary transmit path.
+  //
+  // THIS EXISTS BECAUSE THE ALTERNATIVE COSTS 1.1 KB. The OEM head unit's 0x1F1 nav screen
+  // is 304 bytes on the wire; raising AFFA_MAX_PAYLOAD to hold it would widen every one of
+  // AFFA_TX_QUEUE_DEPTH inline buffers plus finishJob()'s stack copy, for one message that
+  // is sent from a static image. A borrowed pointer costs 4 bytes per slot instead.
+  //
+  // Coalescing and reassertAfterSession are REFUSED with BadArgument: both re-copy a
+  // payload into a slot that no longer owns the storage, and both are meaningless for a
+  // screen the caller already holds. Ceiling is AFFA_MAX_EXTERNAL_PAYLOAD.
+  [[nodiscard]] TxTicket enqueueExternal(uint16_t funcId, const uint8_t* data, uint16_t len,
+                                         TxOptions opt = TxOptions{});
+
   // ---- preemption ----------------------------------------------------------
   // Drop every job QUEUED AND NOT YET STARTED. The job on the wire is untouched, and so are
   // pending Registration jobs — a payload arriving before its function is registered is
@@ -347,8 +362,13 @@ class AffaDisplayBase : public IDisplay, public IPanel {
                                         // from queue position, TxState or frameIndex.
     uint32_t   sessionEpoch = 0;        // stamped when the first frame is accepted
     bool       abandon    = false;      // abortAll() asked; honoured at a frame boundary
-    uint8_t    len        = 0;
-    uint8_t    sent       = 0;          // bytes already accepted by the link
+    // BORROWED PAYLOAD, and the reason `len` is 16-bit. enqueueExternal() stores the
+    // caller's pointer instead of copying, so a 304-byte 0x1F1 screen costs 4 bytes in this
+    // struct rather than 304 in every one of AFFA_TX_QUEUE_DEPTH slots. Non-null means
+    // `data` is unused and the bytes are the caller's to keep alive until onComplete.
+    const uint8_t* ext    = nullptr;
+    uint16_t   len        = 0;
+    uint16_t   sent       = 0;          // bytes already accepted by the link
     uint8_t    frameIndex = 0;          // ISO-TP continuation counter `num`
     uint8_t    tries      = 0;          // transmit attempts already made and failed
     uint32_t   readyAtMs  = 0;          // not startable before this: retry backoff, or the
@@ -430,8 +450,9 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // has no ticket and has not touched the bus yet, so remove it before admitting the newer
   // desired state; otherwise an old ON replay could follow a newly queued OFF and undo it.
   uint8_t dropUnstartedReasserts();
-  void pushJob(uint16_t funcId, const uint8_t* d, uint8_t len, JobKind kind, TxTicket t,
-               const TxOptions& opt, uint8_t at);
+  // `ext` non-null borrows the buffer instead of copying it into TxJob::data.
+  void pushJob(uint16_t funcId, const uint8_t* d, uint16_t len, JobKind kind, TxTicket t,
+               const TxOptions& opt, uint8_t at, const uint8_t* ext = nullptr);
   void removeJob(uint8_t index);
   void creditAck(bool done);
   // Ends the head job: retries it if the failure was transient and it has attempts left,

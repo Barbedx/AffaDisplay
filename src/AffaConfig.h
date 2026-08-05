@@ -384,6 +384,25 @@
 #  warning "AffaDisplay: AFFA_MAX_PAYLOAD < 96 — showMenu will return Result::TooLong."
 #endif
 
+// Ceiling for enqueueExternal() — the ZERO-COPY path, whose bytes live in the caller's
+// storage and cost this library 4 pointer bytes per queue slot no matter how long they are.
+//
+// SO THIS NUMBER IS NOT A RAM BUDGET AND MUST NOT BE READ AS ONE. It is a sanity bound on a
+// length that reaches the ISO-TP segmenter, nothing more; raising it costs zero bytes. The
+// default holds the OEM head unit's 304-byte 0x1F1 nav screen (2 PCI + 302 declared) with
+// room to spare — see docs/PROTOCOL-NOTES.md §"the 0x1F1 nav bitmap".
+//
+// THE 113-BYTE CEILING ABOVE STILL GOVERNS enqueue(). Long payloads are opt-in, by calling
+// a different function, precisely so that no existing consumer pays for them.
+#ifndef AFFA_MAX_EXTERNAL_PAYLOAD
+#  define AFFA_MAX_EXTERNAL_PAYLOAD 1024
+#endif
+// 0x10|(len>>8) leaves 12 bits of ISO-TP length; past 4095 the first frame cannot describe
+// the message and the panel would be told the wrong size.
+#if AFFA_MAX_EXTERNAL_PAYLOAD > 4095
+#  error "AffaDisplay: AFFA_MAX_EXTERNAL_PAYLOAD > 4095 exceeds the 12-bit ISO-TP length field."
+#endif
+
 // RX ring slots; power of two (static_assert in AffaRing). 32 tolerates a ~7 ms gap between
 // poll() calls on a saturated 500 kbit/s bus. Too small: ringOverflow climbs, ACKs are lost,
 // sends time out and sync flaps.
