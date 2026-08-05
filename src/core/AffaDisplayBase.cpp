@@ -560,6 +560,8 @@ bool AffaDisplayBase::autoPower() const { return _autoPower; }
 // test is unchanged across the inversion, which is what makes the inversion checkable at all.
 Phase AffaDisplayBase::phase() const { return _phase; }
 
+RenderSlot AffaDisplayBase::lastRendered() const { return _lastRendered; }
+uint32_t   AffaDisplayBase::lastRenderedMs() const { return _lastRenderedMs; }
 uint32_t AffaDisplayBase::sessionsLost() const { return _sessionsLost; }
 uint32_t AffaDisplayBase::lastSessionLossMs() const { return _lastSessionLossMs; }
 LossReason AffaDisplayBase::lastLossReason() const { return _lastLossReason; }

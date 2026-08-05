@@ -657,6 +657,7 @@ void AffaDisplayBase::finishJob(Result r, bool allowRetry) {
   // enqueueExternal() refuses reassertAfterSession, so a borrowed job can never reach the
   // cache — but the ceiling is asserted here too rather than trusted, because the copy
   // below is into a fixed AFFA_MAX_PAYLOAD stack buffer and job.len is now 16-bit.
+  const RenderSlot slot = job.slot;
   const bool cacheAfterAck =
       job.reassertAfterSession && !job.ext && job.len <= AFFA_MAX_PAYLOAD;
   const uint8_t cachedLen = static_cast<uint8_t>(cacheAfterAck ? job.len : 0);
@@ -736,6 +737,19 @@ void AffaDisplayBase::finishJob(Result r, bool allowRetry) {
     _cachedControl.funcId = funcId;
     _cachedControl.len = cachedLen;
     std::memcpy(_cachedControl.data, cachedData, cachedLen);
+  }
+
+  // THE PANEL SAID YES. Not "we enqueued it" and not "we put it on the wire" — a render is
+  // only on the glass once the transfer has been acknowledged, so that is where this is set.
+  //
+  // RenderSlot::Control IS EXCLUDED, and the test that caught it is the reason: setPower is a
+  // payload with a slot but it draws nothing, so after the opening lastRendered() reported
+  // Control and an application asking "is my text still on the glass?" got no for ever.
+  // Registration and reassert jobs are not screens either.
+  if (r == Result::Ok && kind == JobKind::Payload &&
+      slot != RenderSlot::None && slot != RenderSlot::Control) {
+    _lastRendered   = slot;
+    _lastRenderedMs = _clock.millis();
   }
 
   completeTicket(ticket, r);

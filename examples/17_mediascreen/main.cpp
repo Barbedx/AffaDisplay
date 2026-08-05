@@ -227,21 +227,35 @@ struct Marquee {
 // because a menu that closes itself while somebody is reading it is the bug this fixes.
 void logmsg(const char* fmt, ...);   // the ring itself is below; this is used before it
 
-enum class Owner : uint8_t { Main, Other };
-Owner    g_owner        = Owner::Main;
-uint32_t g_ownerUntilMs = 0;         // 0 = until something says otherwise
-uint32_t g_ownerHoldMs  = 0;         // 0 = no deadline
+// THE LIBRARY ANSWERS THIS NOW. lastRendered() is the RenderSlot of the last payload the
+// panel acknowledged, set by the transmit path itself — so unlike a flag this example used
+// to keep, it CANNOT drift. The version before it required marking ownership at every call
+// site, and the site that gets forgotten is the bug.
+//
+// What is still ours is the DECISION: the library reports what is on the glass and refuses
+// to have an opinion about whether a marquee may paint over it. That is right — only the
+// application knows whether its menu matters more than its clock.
+uint32_t g_ownerHoldMs  = 0;         // optional deadline; 0 = a screen stays until dismissed
+uint32_t g_ownerUntilMs = 0;
 
+inline bool mainLineIsOurs() {
+  const affa::RenderSlot s = g_base->lastRendered();
+  return s == affa::RenderSlot::None || s == affa::RenderSlot::Text ||
+         s == affa::RenderSlot::Clock;
+}
 void takeMainLine(const char* who) {
-  g_owner        = Owner::Other;
   g_ownerUntilMs = g_ownerHoldMs ? ::millis() + g_ownerHoldMs : 0;
-  logmsg("main line yielded to %s", who);
+  logmsg("screen: %s", who);
 }
 void releaseMainLine(const char* why) {
-  if (g_owner == Owner::Main) return;
-  g_owner = Owner::Main;
+  g_ownerUntilMs = 0;
   logmsg("main line back (%s)", why);
 }
+
+// Pausing the marquee is a SEPARATE question from who owns the line, and both are real: the
+// pause is what you want when the title is short or the bus is busy; the ownership check is
+// what you want when a menu is open, because a manual pause has to be un-paused by hand and
+// the time you forget is the time it matters.
 
 Marquee g_mqTitle;                 // drives setText on the main line
 Marquee g_mqRows;                  // drives the info-menu rows
@@ -469,7 +483,16 @@ affa::Result callApi(const String& w, const String& a, const String& b, const St
   else if (w == "menu" || w == "menun" || w == "fullscreen" || w == "confirm" ||
            w == "infomenu" || w == "infopopup" || w == "popup") takeMainLine(w.c_str());
 
-  if (w == "main")       return affa::Result::Ok;
+  // ASKING FOR THE LINE BACK HAS TO DRAW IT. Ownership is derived from lastRendered() now,
+  // not from a flag this file keeps, so nothing changes until a screen is actually painted
+  // over the old one — a release that only set a variable left the menu on the glass AND the
+  // marquee suppressed, which is worse than the bug it replaced.
+  if (w == "main") {
+    g_mqTitle.nextMs = ::millis();       // repaint on the next pass
+    char win[kMainWidth + 1];
+    g_mqTitle.window(g_p.title, win, kMainWidth);
+    return g_panel->setText(win);
+  }
   if (w == "text")       return g_panel->setText(a.c_str());
   if (w == "time")       return g_panel->setTime(a.c_str());
   if (w == "power_on")   return g_panel->setPower(true);
@@ -528,7 +551,8 @@ void routes() {
     j += ",\"heap\":";     j += (uint32_t)ESP.getFreeHeap();
     j += ",\"nav\":";      j += g_carminat ? "true" : "false";
     j += ",\"opened\":";   j += g_open.done ? "true" : "false";
-    j += ",\"owner\":\"";   j += (g_owner == Owner::Main) ? "main" : "screen"; j += "\"";
+    j += ",\"owner\":\"";   j += mainLineIsOurs() ? "main" : "screen"; j += "\"";
+    j += ",\"slot\":";     j += static_cast<int>(g_base->lastRendered());
     j += ",\"holdms\":";   j += g_ownerHoldMs;
     j += "}";
     PsychicResponse res(r);
@@ -790,12 +814,11 @@ void loop() {
   // The main line. Its own timer, deliberately: the title must not stutter because the pane
   // is busy, and it goes out on 0x151 while the image goes out on 0x1F1, so the two never
   // contend for the same function slot.
-  // The deadline, if one was asked for.
-  if (g_owner == Owner::Other && g_ownerUntilMs &&
-      static_cast<int32_t>(now - g_ownerUntilMs) >= 0)
-    releaseMainLine("hold expired");
+  // The deadline, if one was asked for: repaint the main line and lastRendered() follows.
+  const bool expired = g_ownerUntilMs && static_cast<int32_t>(now - g_ownerUntilMs) >= 0;
+  if (expired) { g_ownerUntilMs = 0; g_mqTitle.nextMs = now; }
 
-  if (g_owner == Owner::Main && static_cast<int32_t>(now - g_mqTitle.nextMs) >= 0) {
+  if ((mainLineIsOurs() || expired) && static_cast<int32_t>(now - g_mqTitle.nextMs) >= 0) {
     g_mqTitle.nextMs = now + g_mqTitle.periodMs;
     char win[kMainWidth + 1];
     g_mqTitle.window(g_p.title, win, kMainWidth);
@@ -807,6 +830,7 @@ void loop() {
     // Same rule as the pane, and for the same reason: a display shows what it was last told,
     // so telling it again is not free and not idempotent as far as the bus is concerned.
     static char sent[kMainWidth + 1] = {0};
+    if (expired) sent[0] = 0;            // force one repaint to reclaim the line
     if (strcmp(win, sent) != 0) {
       (void)g_panel->setText(win);
       memcpy(sent, win, sizeof(sent));
@@ -816,7 +840,7 @@ void loop() {
   // The info-menu rows, scrolling in place. Off by default — three rows repainting on a
   // timer is a lot of traffic next to one main line, and it is here to be demonstrated
   // rather than to be left running.
-  if (g_rowsLive && g_carminat && g_owner == Owner::Other &&
+  if (g_rowsLive && g_carminat && !mainLineIsOurs() &&
       static_cast<int32_t>(now - g_mqRows.nextMs) >= 0) {
     g_mqRows.nextMs = now + g_mqRows.periodMs;
     char w0[kRowWidth + 1], w1[kRowWidth + 1], w2[kRowWidth + 1];

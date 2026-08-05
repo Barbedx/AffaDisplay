@@ -685,6 +685,11 @@ void AffaDisplayBase::setSync(SyncState s, EventKind extra) {
     AFFA_LOGW(kTag, "session lost (#%lu): %s",
               static_cast<unsigned long>(_sessionsLost), lossReasonName(_lastLossReason));
     if (_cachedControl.valid) _cachedControl.pending = true;
+    // The panel has forgotten the screen, so the library must too. Otherwise an application
+    // holding its marquee back for a menu goes on holding it back for a menu that is no
+    // longer there — silently, and for ever.
+    _lastRendered   = RenderSlot::None;
+    _lastRenderedMs = 0;
   }
   _lossReasonNext = LossReason::None;   // never leaks into the next, unrelated transition
 

@@ -575,8 +575,65 @@ void test_menuN_refuses_a_scratch_that_is_too_small(void) {
   TEST_ASSERT_EQUAL(Result::BadArgument, r.d.showMenuN(small, sizeof(small), "T", items, 0));
 }
 
+
+// ---------------------------------------------------------------------------
+// lastRendered — what the panel last acknowledged
+// ---------------------------------------------------------------------------
+// It exists so an application with a periodic repaint can tell whether something else is on
+// the glass, without marking ownership at every call site — the marking that gets forgotten
+// is the bug it removes.
+
+void test_lastRendered_follows_the_acknowledged_screen(void) {
+  Rig r;
+  r.up();
+  // Control is deliberately not a screen: r.up() has already ACKed a setPower.
+  TEST_ASSERT_EQUAL_MESSAGE(RenderSlot::None, r.d.lastRendered(),
+                            "setPower draws nothing, so nothing has been drawn yet");
+
+  TEST_ASSERT_EQUAL(Result::Ok, r.d.setText("HELLO"));
+  pumpUntilIdle(r.d);
+  TEST_ASSERT_EQUAL_MESSAGE(RenderSlot::Text, r.d.lastRendered(), "setText");
+  TEST_ASSERT_NOT_EQUAL_MESSAGE(0u, r.d.lastRenderedMs(), "and when");
+
+  TEST_ASSERT_EQUAL(Result::Ok, r.d.showMenu("HEAD", "ONE", "TWO"));
+  pumpUntilIdle(r.d);
+  TEST_ASSERT_EQUAL_MESSAGE(RenderSlot::Menu, r.d.lastRendered(),
+                            "a menu drawn over the text is what is on the glass now");
+}
+
+void test_lastRendered_is_the_ACK_not_the_enqueue(void) {
+  Rig r;
+  r.up();
+  (void)r.d.setText("A");
+  pumpUntilIdle(r.d);
+  const uint32_t at = r.d.lastRenderedMs();
+
+  // Queued but never acknowledged: the panel has not drawn it, so neither has this.
+  r.d.setSelfAck(false);
+  drain(r.link);
+  TEST_ASSERT_EQUAL(Result::Ok, r.d.showMenu("H", "1", "2"));
+  r.d.poll();
+  TEST_ASSERT_EQUAL_MESSAGE(RenderSlot::Text, r.d.lastRendered(),
+                            "an unacknowledged render is not on the glass");
+  TEST_ASSERT_EQUAL_UINT32(at, r.d.lastRenderedMs());
+}
+
+void test_registration_does_not_count_as_a_screen(void) {
+  Rig r;
+  r.up();
+  // r.up() completes the whole opening, including the 0x70 registrations. Those are not
+  // screens and must not be reported as one.
+  TEST_ASSERT_NOT_EQUAL_MESSAGE(RenderSlot::Menu, r.d.lastRendered(), "not a menu");
+  (void)r.d.setText("X");
+  pumpUntilIdle(r.d);
+  TEST_ASSERT_EQUAL(RenderSlot::Text, r.d.lastRendered());
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_lastRendered_follows_the_acknowledged_screen);
+  RUN_TEST(test_lastRendered_is_the_ACK_not_the_enqueue);
+  RUN_TEST(test_registration_does_not_count_as_a_screen);
   RUN_TEST(test_menuN_length_and_count_byte_match_the_corpus);
   RUN_TEST(test_menuN_item_tags_land_on_a_stride_of_27);
   RUN_TEST(test_menuN_refuses_a_scratch_that_is_too_small);

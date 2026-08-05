@@ -152,6 +152,35 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // A 1 h 36 m soak on 2026-08-04 reported `failed 0` and every driver counter at zero while
   // the panel deauthorized us FOURTEEN times, because nothing counted it.
   uint32_t sessionsLost() const;
+
+  // ---- what is on the glass ------------------------------------------------
+  // The RenderSlot of the last SCREEN the panel ACKED, and when. Reset to None on a lost
+  // session, because a panel that has taken the session away has forgotten the screen.
+  //
+  // WHY THIS IS A FACT AND NOT A POLICY. Every render call already carries its slot, so the
+  // library knows which screen was drawn most recently; reporting that costs one byte and
+  // commits to nothing. DECIDING whether a periodic repaint may draw over it is a different
+  // question — one only the application can answer — and this deliberately does not answer
+  // it. It removes the bookkeeping, not the decision.
+  //
+  // The bug it exists to prevent: an application with both a scrolling now-playing line and
+  // a menu will repaint over the menu a fraction of a second after the user opens it, unless
+  // something suppresses the repaint. Tracking that by hand means marking ownership at every
+  // call site and the one that gets forgotten is the bug. This cannot drift, because it is
+  // set by the transmit path itself.
+  //
+  //   if (display.lastRendered() == RenderSlot::Text) marquee.tick();
+  //
+  // RenderSlot::Control never appears here: setPower is a payload with a slot but it draws
+  // nothing, and reporting it would tell an application its text had been replaced by the
+  // backlight command.
+  //
+  // OVERLAYS DO NOT REPLACE THE SCREEN UNDERNEATH. RenderSlot::Popup and
+  // RenderSlot::InfoPopup are overlays — the screen below keeps its content and reappears
+  // when they are hidden — so an application that cares about both layers must track the
+  // overlay separately. This reports the last thing drawn, not a stack.
+  RenderSlot lastRendered()   const;
+  uint32_t   lastRenderedMs() const;   // 0 if nothing has been drawn this session
   uint32_t lastSessionLossMs() const;   // 0 if none since begin()
   // WHICH of the four ways it went. The counters cannot tell a deauthorizing panel from a
   // silent one, and that is exactly the distinction the open ~7-minute drop needs.
@@ -625,6 +654,8 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   TaskIdFn  _pollOwnerFn = nullptr;
   uint32_t  _foreignPolls = 0;  // poll() calls from a task that is not the owner
   // Sessions the panel has taken away since begin(). See sessionsLost().
+  RenderSlot _lastRendered     = RenderSlot::None;
+  uint32_t   _lastRenderedMs   = 0;
   uint32_t  _sessionsLost      = 0;
   uint32_t  _lastSessionLossMs = 0;
   LossReason _lastLossReason   = LossReason::None;
