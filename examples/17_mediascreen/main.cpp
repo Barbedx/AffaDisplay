@@ -1,18 +1,18 @@
-// 17_mediascreen — a media screen that uses BOTH layers at once.
+// 17_mediascreen — the presentation. Everything this library can put on a panel, at once.
 //
-// This is what 16_navlab's findings were for. Three things were established on the bench on
-// 2026-08-05, and this example is the first thing that could not be built without all three:
+// It began as a media screen and it still is one: a live 48x48 spectrum, clock and progress
+// bar in the `0x1F1` nav pane while `setText` marquees the track title on the main line.
+// That pairing is the point — it is the first thing in this repo that needs all three bench
+// results from 2026-08-05:
 //
-//   1. The 0x1F1 nav pane renders a 48x48 monochrome bitmap.
+//   1. The nav pane renders a 48x48 monochrome bitmap.
 //   2. It is an INDEPENDENT LAYER. The info menu draws with it; the image can be replaced
-//      underneath an open popup and is seen to change. It is not a screen mode.
-//   3. The OEM itself sends two nav images 478 ms apart with different pixels, so animating
-//      the channel is something the factory radio does, not something we invented.
+//      underneath an open popup and is seen to change. Not a screen mode.
+//   3. The OEM animates the channel itself — two nav images 478 ms apart, different pixels.
 //
-// So: the pane carries a live spectrum, a clock and a progress bar, while `setText` carries
-// the track title on the main line — at the same time, on one screen. The pane is redrawn
-// on the device rather than replayed from flash, because a clock that advances and a bar
-// that fills are not knowable at build time.
+// Everything else here hangs off that: a picker of animated scenes for the pane, every
+// render call the library exposes, a marquee that can drive any of them, and the panel
+// family selectable at boot. If you want to know what this library does, run this.
 //
 //   pio run -e ex17_mediascreen -t upload --upload-port COM5
 //   then http://<ip>/          console      http://<ip>/update  OTA
@@ -21,18 +21,18 @@
 // THE BUS BUDGET, WHICH IS THE REAL CONSTRAINT
 // ---------------------------------------------------------------------------
 // One 48x48 frame is 304 wire bytes = 44 CAN frames, and the panel runs ISO-TP BlockSize 1,
-// so every consecutive frame costs a round trip. Measured on this rig: 47-54 ms per image.
+// so every consecutive frame costs a round trip. Measured on this rig: 47-54 ms alone,
+// ~64 ms with a title interleaving on 0x151.
 //
-// That is the ceiling. At a 250 ms frame period the pane alone occupies ~20% of the link and
-// leaves room for the title, the clock and whatever else the application wants. At 100 ms it
-// is ~50% and the title updates start queueing behind images. kFramePeriodMs defaults to 250
-// for that reason and the console reports the duty cycle so the trade is visible rather than
-// guessed at.
+// That is the ceiling, and it is why the scenes lean on persistence — trails, peak-hold,
+// sweeps — rather than on smoothness. At a 250 ms period the pane occupies ~23% of the link
+// and leaves room for everything else. At 100 ms it is ~50% and the title queues behind
+// images. The floor is 120 ms and the console reports duty and dropped frames so the trade
+// is visible rather than guessed at.
 //
 // THE FRAME BUFFER IS DOUBLE. showNavBitmap() BORROWS the bytes until the ticket completes,
 // so drawing the next frame into the buffer the transmitter is still reading would tear the
-// image on the wire. Two buffers, and the renderer only ever touches the one that is not in
-// flight.
+// image on the wire. Two buffers, and the renderer only ever touches the idle one.
 
 #include <Arduino.h>
 #include <AffaDisplay.h>
@@ -43,9 +43,12 @@
 #include <WiFi.h>
 
 #include "media_render.h"
+// The generated 48x48 set, shared with 16_navlab rather than duplicated: one generator,
+// one header, two consumers. `node tools/gen_navicons.js` rebuilds it.
+#include "../16_navlab/nav_images.h"
 
 #if !AFFA_PANEL_CARMINAT
-#  error "17_mediascreen is a Carminat example: build with -D AFFA_PANEL_CARMINAT=1"
+#  error "17_mediascreen needs the Carminat panel: build with -D AFFA_PANEL_CARMINAT=1"
 #endif
 #if !AFFA_ENABLE_NAV
 #  error "17_mediascreen needs the nav pane: build with -D AFFA_ENABLE_NAV=1"
@@ -59,6 +62,7 @@ constexpr gpio_num_t kTxPin   = GPIO_NUM_4;
 constexpr uint32_t   kBitrate = 500000;
 
 constexpr const char* kWifiNamespace = "megaopen";
+constexpr const char* kPrefsNamespace = "affamedia";
 constexpr const char* kApSsid   = "AffaMedia";
 constexpr const char* kApPass   = "affa1234";
 constexpr const char* kMdnsName = "affamedia";
@@ -70,48 +74,129 @@ struct ArduinoClock final : affa::IClock {
 
 affa::CanCommonLink   g_link;
 ArduinoClock          g_clock;
-affa::CarminatDisplay g_display(g_link, g_clock);
 PsychicHttpServer     g_server;
 
 // ---------------------------------------------------------------------------
-// Player state
+// Panel family — chosen at BOOT, not at runtime
 // ---------------------------------------------------------------------------
+// A panel is one family or the other: Carminat syncs on 0x3AF, UpdateList on 0x3DF, and the
+// handshake, the ids and the text encoding all differ. There is no runtime switch that is
+// honest — so the choice is stored in NVS and applied on the next boot, and the console says
+// so rather than pretending otherwise.
+//
+// `g_panel` is the IDisplay surface both families share, and it is what every generic render
+// call below goes through. `g_carminat` is non-null ONLY on Carminat and is what the nav
+// pane, the N-item menu and the info menu hang off — the features UpdateList does not have.
+enum class Family : uint8_t { Carminat = 0, UpdateList = 1 };
+Family g_family = Family::Carminat;
+
+affa::CarminatDisplay*  g_carminat = nullptr;
+#if AFFA_PANEL_UPDATELIST
+affa::UpdateListDisplay* g_updatelist = nullptr;
+#endif
+affa::IDisplay*         g_panel  = nullptr;
+affa::AffaDisplayBase*  g_base   = nullptr;      // phase(), onComplete(), lastEnqueued()
+
+// ---------------------------------------------------------------------------
+// Player + scene state
+// ---------------------------------------------------------------------------
+enum class Scene : uint8_t {
+  Spectrum = 0, Vu, Wave, Clock, Stars, Bounce, Rings,
+  Globe, Tryzub, TryzubClock, Renault, Dash, Gauges, Combo, FontSheet, Checker,
+  kCount
+};
+const char* kSceneName[] = {
+  "spectrum", "vu", "wave", "clock", "stars", "bounce", "rings",
+  "globe", "tryzub", "tryzubclock", "renault", "dash", "gauges", "combo",
+  "fontsheet", "checker"
+};
+static_assert(sizeof(kSceneName) / sizeof(kSceneName[0]) == static_cast<size_t>(Scene::kCount),
+              "scene name table drifted from the enum");
+
+Scene g_scene = Scene::Spectrum;
+
 struct Player {
-  char     title[64]  = "NEVER GONNA GIVE YOU UP";
-  char     artist[32] = "RICK ASTLEY";
-  uint32_t elapsed    = 0;          // seconds
-  uint32_t total      = 213;        // seconds
+  char     title[80]  = "NEVER GONNA GIVE YOU UP";
+  char     artist[40] = "RICK ASTLEY";
+  uint32_t elapsed    = 0;
+  uint32_t total      = 213;
   uint8_t  track      = 3;
   uint8_t  trackCount = 12;
   bool     playing    = true;
 } g_p;
 
-media::Bars g_bars;
+media::Bars   g_bars;
+media::Vu     g_vu;
+media::Wave   g_wave;
+media::Stars  g_stars;
+media::Bounce g_bounce;
+uint32_t      g_sceneFrame = 0;
 
-// DOUBLE-BUFFERED ON PURPOSE. showNavBitmap() borrows until the ticket completes; drawing
-// into the buffer still being transmitted would tear the image mid-transfer.
+// DOUBLE-BUFFERED ON PURPOSE. showNavBitmap() borrows until the ticket completes.
 uint8_t  g_frame[2][media::kBytes];
 uint8_t  g_drawInto = 0;
 volatile bool  g_navBusy = false;
 affa::TxTicket g_navTicket = affa::kNoTicket;
 
+// The N-item menu is built into a buffer WE own and the library borrows, same contract.
+uint8_t  g_menuBuf[affa::CarminatDisplay::menuScreenBytes(affa::carminat::kMenuMaxItems)];
+volatile bool  g_menuBusy = false;
+affa::TxTicket g_menuTicket = affa::kNoTicket;
+
+bool     g_paneOn        = true;
 uint32_t g_framePeriodMs = 250;
 uint32_t g_nextFrameMs   = 0;
 uint32_t g_nextSecondMs  = 0;
-uint32_t g_nextTitleMs   = 0;
-uint32_t g_titlePeriodMs = 700;
-uint16_t g_marqueeAt     = 0;
 
-// Counters the console reads back.
+// ---------------------------------------------------------------------------
+// Marquee — one engine, several targets
+// ---------------------------------------------------------------------------
+// The panel's text fields are narrow (the main line shows 8 characters; an info-menu row
+// shows 8) and real metadata is not. Rather than truncating, every text target here can
+// scroll, on its own timer, from one shared windowing function.
+//
+// TWO SPACES OF GAP at the wrap, deliberately: without them the loop reads as a jump cut
+// rather than as a rotation.
+struct Marquee {
+  bool     on       = true;
+  uint16_t at       = 0;
+  uint32_t periodMs = 700;
+  uint32_t nextMs   = 0;
+
+  void window(const char* src, char* out, uint8_t width) {
+    const size_t len = strlen(src);
+    if (!on || len <= width) {
+      snprintf(out, width + 1u, "%-*s", width, src);
+      return;
+    }
+    const size_t span = len + 2;
+    for (uint8_t i = 0; i < width; ++i) {
+      const size_t k = (at + i) % span;
+      out[i] = (k < len) ? src[k] : ' ';
+    }
+    out[width] = 0;
+    at = static_cast<uint16_t>((at + 1) % span);
+  }
+};
+Marquee g_mqTitle;                 // drives setText on the main line
+Marquee g_mqRows;                  // drives the info-menu rows
+
+constexpr uint8_t kMainWidth = 8;  // 0x77 plain-ASCII field
+constexpr uint8_t kRowWidth  = 8;  // measured with the ruler on the bench
+
+char g_row[3][40] = { "DESTINATION MEMORY", "TRAFFIC INFORMATION", "SYSTEM SETTINGS" };
+bool g_rowsLive = false;           // keep repainting the info menu with scrolling rows
+
+// Counters.
 volatile uint32_t g_frames = 0, g_framesOk = 0, g_framesFail = 0, g_busyDrops = 0;
-volatile uint32_t g_txMsAccum = 0;      // total time images spent in flight
+volatile uint32_t g_txMsAccum = 0;
 uint32_t g_frameStartMs = 0;
 
 // ---------------------------------------------------------------------------
 // Log ring
 // ---------------------------------------------------------------------------
 portMUX_TYPE g_logMux = portMUX_INITIALIZER_UNLOCKED;
-constexpr int kLogLines = 32;
+constexpr int kLogLines = 40;
 char     g_log[kLogLines][96];
 uint16_t g_logHead = 0;
 
@@ -125,60 +210,121 @@ void logmsg(const char* fmt, ...) {
 }
 
 // ---------------------------------------------------------------------------
-// The two layers
+// The pane
 // ---------------------------------------------------------------------------
-
-// THE PANE. Draw into the idle buffer, hand it over, swap.
-void pushFrame() {
-  if (g_navBusy) { ++g_busyDrops; return; }   // still in flight — skip, never queue up
-
-  uint8_t* const buf = g_frame[g_drawInto];
-  media::drawMedia(buf, g_bars, g_p.elapsed, g_p.total, g_p.track, g_p.trackCount,
-                   g_p.playing);
-
-  const affa::Result r = g_display.showNavBitmap(buf);
-  if (r != affa::Result::Ok) { ++g_framesFail; return; }
-
-  g_navTicket    = g_display.lastEnqueued();
-  g_navBusy      = true;
-  g_frameStartMs = ::millis();
-  g_drawInto    ^= 1;                          // next frame goes in the other buffer
-  ++g_frames;
+void renderScene(uint8_t* b) {
+  switch (g_scene) {
+    case Scene::Spectrum:
+      media::drawMedia(b, g_bars, g_p.elapsed, g_p.total, g_p.track, g_p.trackCount,
+                       g_p.playing);
+      break;
+    case Scene::Vu:     media::drawVu(b, g_vu);                  break;
+    case Scene::Wave:   media::drawWave(b, g_wave);              break;
+    case Scene::Clock:  media::drawClockFace(b, g_p.elapsed);    break;
+    case Scene::Stars:  media::drawStars(b, g_stars);            break;
+    case Scene::Bounce: media::drawBounce(b, g_bounce);          break;
+    case Scene::Rings:  media::drawRings(b, g_sceneFrame);       break;
+    // The generated set. Static, and that is the contrast worth showing: the same channel
+    // carries a baked logo and a live instrument equally well.
+    case Scene::Globe:       memcpy(b, navlab::kBmpGlobe,       media::kBytes); break;
+    case Scene::Tryzub:      memcpy(b, navlab::kBmpTryzub,      media::kBytes); break;
+    case Scene::TryzubClock: memcpy(b, navlab::kBmpTryzubClock, media::kBytes); break;
+    case Scene::Renault:     memcpy(b, navlab::kBmpRenault,     media::kBytes); break;
+    case Scene::Dash:        memcpy(b, navlab::kBmpDash,        media::kBytes); break;
+    case Scene::Gauges:      memcpy(b, navlab::kBmpGauges,      media::kBytes); break;
+    case Scene::Combo:       memcpy(b, navlab::kBmpCombo,       media::kBytes); break;
+    case Scene::FontSheet:   memcpy(b, navlab::kBmpFontSheet,   media::kBytes); break;
+    case Scene::Checker:     memcpy(b, navlab::kBmpChecker,     media::kBytes); break;
+    default: media::clear(b); break;
+  }
 }
 
-// THE MAIN LINE. The title is longer than the field, so it marquees — and the field width
-// is the thing to be careful about: `0x77` format 0x60 is plain ASCII, up to 8 characters
-// visible. Anything wider is the panel's business, not ours.
-void pushTitle() {
-  char win[9];
-  const size_t len = strlen(g_p.title);
-  // Two spaces of gap so the wrap reads as a loop rather than a jump cut.
-  const size_t span = len + 2;
-  for (int i = 0; i < 8; ++i) {
-    const size_t at = (g_marqueeAt + i) % span;
-    win[i] = (at < len) ? g_p.title[at] : ' ';
+void stepScene() {
+  ++g_sceneFrame;
+  switch (g_scene) {
+    case Scene::Spectrum: g_bars.step(g_p.playing);   break;
+    case Scene::Vu:       g_vu.step(g_p.playing);     break;
+    case Scene::Wave:     g_wave.step(g_p.playing);   break;
+    case Scene::Stars:    g_stars.step();             break;
+    case Scene::Bounce:   g_bounce.step();            break;
+    default: break;
   }
-  win[8] = 0;
-  g_marqueeAt = static_cast<uint16_t>((g_marqueeAt + 1) % span);
-  (void)g_display.setText(win);
+}
+
+void pushFrame() {
+  if (!g_carminat || !g_paneOn) return;
+  if (g_navBusy) { ++g_busyDrops; return; }   // still in flight — SKIP, never queue up
+
+  uint8_t* const buf = g_frame[g_drawInto];
+  renderScene(buf);
+
+  if (g_carminat->showNavBitmap(buf) != affa::Result::Ok) { ++g_framesFail; return; }
+  g_navTicket    = g_base->lastEnqueued();
+  g_navBusy      = true;
+  g_frameStartMs = ::millis();
+  g_drawInto    ^= 1;
+  ++g_frames;
 }
 
 // ---------------------------------------------------------------------------
 void onDone(affa::TxTicket t, affa::Result r, void*) {
+  if (t == g_menuTicket) { g_menuBusy = false; g_menuTicket = affa::kNoTicket; }
   if (t != g_navTicket) return;
   g_navBusy = false;
-  if (r == affa::Result::Ok) {
-    ++g_framesOk;
-    g_txMsAccum += ::millis() - g_frameStartMs;
-  } else {
-    ++g_framesFail;
-    logmsg("frame FAILED (%d)", static_cast<int>(r));
-  }
+  if (r == affa::Result::Ok) { ++g_framesOk; g_txMsAccum += ::millis() - g_frameStartMs; }
+  else { ++g_framesFail; logmsg("frame FAILED (%d)", static_cast<int>(r)); }
 }
 
 void onSyncChanged(affa::SyncState s, void*) {
   logmsg("sync 0x%02X%s", static_cast<unsigned>(s),
          affa::hasFlag(s, affa::SyncState::Failed) ? " FAILED" : "");
+}
+
+// ---------------------------------------------------------------------------
+// Every render call the library exposes, behind one route
+// ---------------------------------------------------------------------------
+const char* sendMenuN(const String& title, const String& csv, uint8_t first, uint8_t sel) {
+  if (!g_carminat) return "Carminat only";
+  if (g_menuBusy)  return "busy: the menu buffer is still lent out";
+  static char store[512];
+  static const char* items[affa::carminat::kMenuMaxItems];
+  snprintf(store, sizeof(store), "%s", csv.c_str());
+  uint8_t n = 0;
+  char* cur = store;
+  while (n < affa::carminat::kMenuMaxItems && cur && *cur) {
+    items[n++] = cur;
+    char* bar = strchr(cur, '|');
+    if (!bar) break;
+    *bar = 0; cur = bar + 1;
+  }
+  if (!n) return "no items";
+  if (g_carminat->showMenuN(g_menuBuf, sizeof(g_menuBuf), title.c_str(), items, n, first, sel)
+      != affa::Result::Ok) return "refused";
+  g_menuTicket = g_base->lastEnqueued();
+  g_menuBusy   = true;
+  return nullptr;
+}
+
+affa::Result callApi(const String& w, const String& a, const String& b, const String& c,
+                     long n) {
+  if (w == "text")       return g_panel->setText(a.c_str());
+  if (w == "time")       return g_panel->setTime(a.c_str());
+  if (w == "power_on")   return g_panel->setPower(true);
+  if (w == "power_off")  return g_panel->setPower(false);
+  if (w == "menu")       return g_panel->showMenu(a.c_str(), b.c_str(), c.c_str());
+  if (w == "hilite")     return g_panel->highlightItem(static_cast<uint8_t>(n));
+  if (w == "popup")      return g_panel->showPopupText(a.c_str());
+  if (w == "pophide")    return g_panel->hidePopup();
+  if (w == "fullscreen") return g_panel->showFullscreenText(a.c_str(), b.c_str(), c.c_str());
+  if (w == "fshide")     return g_panel->hideFullscreenText();
+  if (w == "confirm")    return g_panel->showConfirmBox(a.c_str(), b.c_str(), c.c_str());
+  if (w == "infopopup")  return g_panel->showInfoPopup(a.c_str(), b.c_str(), c.c_str());
+  if (w == "infohide")   return g_panel->hideInfoPopup();
+  if (!g_carminat) return affa::Result::NotSupported;
+  if (w == "infomenu")   return g_carminat->showInfoMenu(a.c_str(), b.c_str(), c.c_str());
+  if (w == "select")     return g_carminat->selectMenuItem(static_cast<uint8_t>(n));
+  if (w == "navtick")    return g_carminat->navTick(n != 0);
+  return affa::Result::BadArgument;
 }
 
 #include "web_ui.h"
@@ -194,8 +340,11 @@ void routes() {
   g_server.on("/api/state", HTTP_GET, [](PsychicRequest* r) {
     const uint32_t up = ::millis() ? ::millis() : 1;
     String j("{");
-    j += "\"phase\":\"";   j += affa::phaseName(g_display.phase()); j += "\"";
+    j += "\"family\":\"";  j += (g_family == Family::Carminat) ? "carminat" : "updatelist"; j += "\"";
+    j += ",\"phase\":\"";  j += affa::phaseName(g_base->phase()); j += "\"";
     j += ",\"live\":";     j += g_link.isLive() ? "true" : "false";
+    j += ",\"scene\":\"";  j += kSceneName[static_cast<int>(g_scene)]; j += "\"";
+    j += ",\"paneon\":";   j += g_paneOn ? "true" : "false";
     j += ",\"playing\":";  j += g_p.playing ? "true" : "false";
     j += ",\"elapsed\":";  j += g_p.elapsed;
     j += ",\"total\":";    j += g_p.total;
@@ -203,16 +352,18 @@ void routes() {
     j += ",\"tracks\":";   j += g_p.trackCount;
     j += ",\"title\":\"";  j += g_p.title;  j += "\"";
     j += ",\"artist\":\""; j += g_p.artist; j += "\"";
+    j += ",\"mqtitle\":";  j += g_mqTitle.on ? "true" : "false";
+    j += ",\"mqrows\":";   j += g_mqRows.on ? "true" : "false";
+    j += ",\"rowslive\":"; j += g_rowsLive ? "true" : "false";
     j += ",\"frames\":";   j += g_frames;
     j += ",\"ok\":";       j += g_framesOk;
     j += ",\"fail\":";     j += g_framesFail;
     j += ",\"drops\":";    j += g_busyDrops;
     j += ",\"periodms\":"; j += g_framePeriodMs;
-    // The number that decides whether the frame rate is sane: how much of the link the
-    // images are actually occupying.
     j += ",\"duty\":";     j += (g_txMsAccum * 100) / up;
     j += ",\"avgms\":";    j += (g_framesOk ? g_txMsAccum / g_framesOk : 0);
     j += ",\"heap\":";     j += (uint32_t)ESP.getFreeHeap();
+    j += ",\"nav\":";      j += g_carminat ? "true" : "false";
     j += "}";
     PsychicResponse res(r);
     res.setContentType("application/json");
@@ -220,35 +371,84 @@ void routes() {
     return res.send();
   });
 
+  // Every render call, behind one route.
+  g_server.on("/api/call", HTTP_GET, [](PsychicRequest* r) {
+    const auto s = [&](const char* k, const char* d) {
+      return r->hasParam(k) ? r->getParam(k)->value() : String(d);
+    };
+    const String w = s("w", "");
+    const long n = r->hasParam("n") ? strtol(r->getParam("n")->value().c_str(), nullptr, 0) : 0;
+    if (w == "menun") {
+      const char* err = sendMenuN(s("a", "NAVIGATION"),
+                                  s("i", "DESTINATION|ROUTE|MAP|TRAFFIC|SETTINGS|BACK"),
+                                  0, static_cast<uint8_t>(n));
+      return r->reply(err ? 409 : 200, "text/plain", err ? err : "menu queued");
+    }
+    const affa::Result res = callApi(w, s("a", "AFFA"), s("b", "ROW ONE"), s("c", "ROW TWO"), n);
+    logmsg("%s -> %d", w.c_str(), static_cast<int>(res));
+    String m(w);
+    m += (res == affa::Result::Ok) ? " ok" : " refused";
+    return r->reply(res == affa::Result::Ok ? 200 : 409, "text/plain", m.c_str());
+  });
+
+  g_server.on("/api/scene", HTTP_GET, [](PsychicRequest* r) {
+    const String n = r->hasParam("n") ? r->getParam("n")->value() : String();
+    for (int i = 0; i < static_cast<int>(Scene::kCount); ++i)
+      if (n == kSceneName[i]) {
+        g_scene = static_cast<Scene>(i);
+        g_sceneFrame = 0;
+        logmsg("scene %s", kSceneName[i]);
+        return r->reply(200, "text/plain", kSceneName[i]);
+      }
+    if (r->hasParam("on")) {
+      g_paneOn = r->getParam("on")->value() != "0";
+      return r->reply(200, "text/plain", g_paneOn ? "pane on" : "pane off");
+    }
+    return r->reply(400, "text/plain", "unknown scene");
+  });
+
   g_server.on("/api/player", HTTP_GET, [](PsychicRequest* r) {
     const auto has = [&](const char* k) { return r->hasParam(k); };
     const auto str = [&](const char* k) { return r->getParam(k)->value(); };
     const auto num = [&](const char* k) { return strtoul(str(k).c_str(), nullptr, 10); };
-
     if (has("title"))  { snprintf(g_p.title, sizeof(g_p.title), "%s", str("title").c_str());
-                         g_marqueeAt = 0; }
+                         g_mqTitle.at = 0; }
     if (has("artist")) snprintf(g_p.artist, sizeof(g_p.artist), "%s", str("artist").c_str());
-    if (has("total"))  g_p.total   = num("total");
-    if (has("elapsed"))g_p.elapsed = num("elapsed");
-    if (has("track"))  g_p.track   = static_cast<uint8_t>(num("track"));
-    if (has("tracks")) g_p.trackCount = static_cast<uint8_t>(num("tracks"));
-    if (has("play"))   g_p.playing = (str("play") != "0");
+    if (has("total"))   g_p.total   = num("total");
+    if (has("elapsed")) g_p.elapsed = num("elapsed");
+    if (has("track"))   g_p.track   = static_cast<uint8_t>(num("track"));
+    if (has("tracks"))  g_p.trackCount = static_cast<uint8_t>(num("tracks"));
+    if (has("play"))    g_p.playing = (str("play") != "0");
+    if (has("mqtitle")) g_mqTitle.on = (str("mqtitle") != "0");
+    if (has("mqrows"))  g_mqRows.on  = (str("mqrows")  != "0");
+    if (has("rowslive"))g_rowsLive   = (str("rowslive") != "0");
+    for (int i = 0; i < 3; ++i) {
+      char k[8]; snprintf(k, sizeof(k), "row%d", i);
+      if (has(k)) snprintf(g_row[i], sizeof(g_row[i]), "%s", str(k).c_str());
+    }
     if (has("period")) {
-      // FLOOR AT 120 ms. One image is ~50 ms of round trips; below about 120 ms the pane
-      // starves the title and the handshake and every frame lands on a busy transmitter.
+      // FLOOR AT 120 ms. One image is ~50 ms of round trips; below that every frame lands
+      // on a busy transmitter and the title starves.
       const uint32_t v = num("period");
       g_framePeriodMs = v < 120 ? 120 : (v > 5000 ? 5000 : v);
     }
-    if (has("titlems")) g_titlePeriodMs = num("titlems") < 150 ? 150 : num("titlems");
-    logmsg("player: %s %lu/%lu track %u", g_p.playing ? "play" : "pause",
-           (unsigned long)g_p.elapsed, (unsigned long)g_p.total, g_p.track);
+    if (has("titlems")) g_mqTitle.periodMs = num("titlems") < 150 ? 150 : num("titlems");
+    if (has("rowms"))   g_mqRows.periodMs  = num("rowms")   < 250 ? 250 : num("rowms");
     return r->reply(200, "text/plain", "ok");
   });
 
-  g_server.on("/api/power", HTTP_GET, [](PsychicRequest* r) {
-    const bool on = !r->hasParam("on") || r->getParam("on")->value() != "0";
-    const affa::Result res = g_display.setPower(on);
-    return r->reply(res == affa::Result::Ok ? 200 : 409, "text/plain", on ? "on" : "off");
+  // The family is a BOOT choice, not a runtime one: the two panels do not share a handshake.
+  g_server.on("/api/family", HTTP_GET, [](PsychicRequest* r) {
+    if (!r->hasParam("f")) return r->reply(400, "text/plain", "f=carminat|updatelist");
+    const String f = r->getParam("f")->value();
+    Preferences p;
+    if (!p.begin(kPrefsNamespace, false)) return r->reply(500, "text/plain", "nvs");
+    p.putUChar("family", f == "updatelist" ? 1 : 0);
+    p.end();
+    r->reply(200, "text/plain", "stored - rebooting into that family");
+    delay(250);
+    ESP.restart();
+    return ESP_OK;
   });
 
   g_server.on("/api/log", HTTP_GET, [](PsychicRequest* r) {
@@ -293,7 +493,7 @@ void startWifi() {
   if (!sta) { WiFi.mode(WIFI_AP); WiFi.softAP(kApSsid, kApPass); }
   if (MDNS.begin(kMdnsName)) MDNS.addService("http", "tcp", 80);
   const String ip = sta ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
-  Serial.printf("\n[wifi] %s ip=%s  http://%s/  OTA http://%s/update\n",
+  Serial.printf("\n[media] %s ip=%s  http://%s/  OTA http://%s/update\n",
                 sta ? "STA" : "AP", ip.c_str(), ip.c_str(), ip.c_str());
 }
 
@@ -320,21 +520,44 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n[media] 17_mediascreen — both layers at once");
+
+  {
+    Preferences p;
+    if (p.begin(kPrefsNamespace, true)) {
+      g_family = static_cast<Family>(p.getUChar("family", 0));
+      p.end();
+    }
+  }
+#if AFFA_PANEL_UPDATELIST
+  if (g_family == Family::UpdateList) {
+    static affa::UpdateListDisplay d(g_link, g_clock);
+    g_updatelist = &d; g_panel = &d; g_base = &d;
+  }
+#else
+  g_family = Family::Carminat;     // not compiled in; do not pretend
+#endif
+  if (!g_panel) {
+    static affa::CarminatDisplay d(g_link, g_clock);
+    g_carminat = &d; g_panel = &d; g_base = &d;
+    g_family = Family::Carminat;
+  }
+  Serial.printf("\n[media] 17_mediascreen — %s\n",
+                g_family == Family::Carminat ? "Carminat" : "UpdateList");
 
   if (!g_link.begin(kRxPin, kTxPin, kBitrate)) Serial.println("[media] CAN begin FAILED");
-  g_display.onComplete(&onDone, nullptr);
-  g_display.onSync(&onSyncChanged, nullptr);
-  if (!g_display.begin()) Serial.println("[media] display begin FAILED");
+  g_base->onComplete(&onDone, nullptr);
+  g_base->onSync(&onSyncChanged, nullptr);
+  if (!g_base->begin()) Serial.println("[media] display begin FAILED");
 
   startWifi();
   startHttp();
-  logmsg("boot: %u-byte frames, %lu ms period", media::kBytes,
-         (unsigned long)g_framePeriodMs);
+  logmsg("boot: %s, %u-byte frames, %lu ms",
+         g_family == Family::Carminat ? "carminat" : "updatelist",
+         media::kBytes, (unsigned long)g_framePeriodMs);
 }
 
 void loop() {
-  g_display.poll();
+  g_base->poll();
   ElegantOTA.loop();
 
   const uint32_t now = millis();
@@ -344,7 +567,7 @@ void loop() {
     g_nextSecondMs = now + 1000;
     if (g_p.playing && g_p.elapsed < g_p.total) ++g_p.elapsed;
     else if (g_p.playing && g_p.total) {
-      g_p.elapsed = 0;                                    // loop the track
+      g_p.elapsed = 0;
       g_p.track = static_cast<uint8_t>((g_p.track % g_p.trackCount) + 1);
     }
   }
@@ -352,16 +575,32 @@ void loop() {
   // The pane.
   if (static_cast<int32_t>(now - g_nextFrameMs) >= 0) {
     g_nextFrameMs = now + g_framePeriodMs;
-    g_bars.step(g_p.playing);
+    stepScene();
     pushFrame();
   }
 
-  // The main line. Deliberately on its own timer: the title should not stutter because the
-  // spectrum is busy, and it goes out on 0x151 while the image goes out on 0x1F1, so the
-  // two never contend for the same function slot.
-  if (static_cast<int32_t>(now - g_nextTitleMs) >= 0) {
-    g_nextTitleMs = now + g_titlePeriodMs;
-    pushTitle();
+  // The main line. Its own timer, deliberately: the title must not stutter because the pane
+  // is busy, and it goes out on 0x151 while the image goes out on 0x1F1, so the two never
+  // contend for the same function slot.
+  if (static_cast<int32_t>(now - g_mqTitle.nextMs) >= 0) {
+    g_mqTitle.nextMs = now + g_mqTitle.periodMs;
+    char win[kMainWidth + 1];
+    g_mqTitle.window(g_p.title, win, kMainWidth);
+    (void)g_panel->setText(win);
+  }
+
+  // The info-menu rows, scrolling in place. Off by default — three rows repainting on a
+  // timer is a lot of traffic next to one main line, and it is here to be demonstrated
+  // rather than to be left running.
+  if (g_rowsLive && g_carminat &&
+      static_cast<int32_t>(now - g_mqRows.nextMs) >= 0) {
+    g_mqRows.nextMs = now + g_mqRows.periodMs;
+    char w0[kRowWidth + 1], w1[kRowWidth + 1], w2[kRowWidth + 1];
+    const uint16_t at = g_mqRows.at;               // one phase for all three rows
+    g_mqRows.at = at; g_mqRows.window(g_row[0], w0, kRowWidth);
+    g_mqRows.at = at; g_mqRows.window(g_row[1], w1, kRowWidth);
+    g_mqRows.at = at; g_mqRows.window(g_row[2], w2, kRowWidth);
+    (void)g_carminat->showInfoMenu(w0, w1, w2);
   }
 
   delay(1);      // yield: without it the IDLE task starves and the console stops answering

@@ -37,6 +37,39 @@ small{color:var(--dim)}
 <main>
 
 <section>
+  <h2>Scene</h2>
+  <div class="row">
+    <button onclick="sc('spectrum')">spectrum</button>
+    <button onclick="sc('vu')">VU</button>
+    <button onclick="sc('wave')">wave</button>
+    <button onclick="sc('clock')">clock</button>
+    <button onclick="sc('stars')">stars</button>
+    <button onclick="sc('bounce')">bounce</button>
+    <button onclick="sc('rings')">rings</button>
+  </div>
+  <div class="row">
+    <button onclick="sc('globe')">globe</button>
+    <button onclick="sc('tryzub')">tryzub</button>
+    <button onclick="sc('tryzubclock')">tryzub+clock</button>
+    <button onclick="sc('renault')">renault</button>
+    <button onclick="sc('dash')">dash</button>
+    <button onclick="sc('gauges')">gauges</button>
+    <button onclick="sc('combo')">combo</button>
+    <button onclick="sc('fontsheet')">font</button>
+    <button onclick="sc('checker')">checker</button>
+  </div>
+  <div class="row">
+    <button onclick="fetch('/api/scene?on=1').then(poll)">pane ON</button>
+    <button onclick="fetch('/api/scene?on=0').then(poll)">pane OFF</button>
+  </div>
+  <p><small>
+    The first seven are drawn on the device from a frame counter; the rest are the generated
+    48&times;48 set, shared with <span class="k">16_navlab</span>. Same channel either way
+    &mdash; which is the contrast worth showing.
+  </small></p>
+</section>
+
+<section>
   <h2>The pane &mdash; mirrored from the same state</h2>
   <canvas id="cv" width="48" height="48" style="width:288px;height:288px"></canvas>
   <p><small>
@@ -65,6 +98,84 @@ small{color:var(--dim)}
     <button onclick="send('power=1')" title="52 09 00">display ON</button>
     <button onclick="fetch('/api/power?on=0')">display OFF</button>
   </div>
+</section>
+
+<section>
+  <h2>Every render call</h2>
+  <div class="row">
+    <input id="ca" value="AFFA" size="9"><input id="cb" value="ROW ONE" size="9"><input id="cc" value="ROW TWO" size="9">
+    <small>n</small><input id="cn" type="number" value="0" style="width:52px">
+  </div>
+  <div class="row">
+    <button onclick="call('text')">setText</button>
+    <button onclick="call('time')">setTime</button>
+    <button onclick="call('power_on')">power ON</button>
+    <button onclick="call('power_off')">power OFF</button>
+  </div>
+  <div class="row">
+    <button onclick="call('menu')">showMenu</button>
+    <button onclick="call('menun')">showMenuN</button>
+    <button onclick="call('hilite')">highlightItem n</button>
+    <button onclick="call('select')">selectMenuItem n</button>
+  </div>
+  <div class="row">
+    <button onclick="call('infomenu')">showInfoMenu</button>
+    <button onclick="call('infopopup')">showInfoPopup</button>
+    <button onclick="call('infohide')">hideInfoPopup</button>
+  </div>
+  <div class="row">
+    <button onclick="call('popup')">showPopupText</button>
+    <button onclick="call('pophide')">hidePopup</button>
+    <button onclick="call('fullscreen')">showFullscreen</button>
+    <button onclick="call('fshide')">hideFullscreen</button>
+  </div>
+  <div class="row">
+    <button onclick="call('confirm')">showConfirmBox</button>
+    <button onclick="call('navtick')">navTick n</button>
+  </div>
+  <div class="row"><small>menuN items</small><input id="ci" value="DESTINATION|ROUTE|MAP|TRAFFIC|SETTINGS|BACK" style="flex:1;min-width:200px"></div>
+  <p><small>
+    <b>showMenuN</b> tracks all six items but the glass is a <b>two-row viewport</b> &mdash;
+    send it once, then move the selection with <b>selectMenuItem</b> (eight bytes) and the
+    panel scrolls itself.
+  </small></p>
+</section>
+
+<section>
+  <h2>Running text</h2>
+  <div class="row">
+    <label><input type="checkbox" id="mt" onchange="send('mqtitle='+(mt.checked?1:0))"> marquee the title</label>
+    <small>ms</small><input id="mtm" type="number" value="700" style="width:64px" onchange="send('titlems='+mtm.value)">
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="mr" onchange="send('mqrows='+(mr.checked?1:0))"> marquee info rows</label>
+    <label><input type="checkbox" id="rl" onchange="send('rowslive='+(rl.checked?1:0))"> keep repainting</label>
+    <small>ms</small><input id="mrm" type="number" value="700" style="width:64px" onchange="send('rowms='+mrm.value)">
+  </div>
+  <div class="row"><input id="r0" size="20" value="DESTINATION MEMORY"><button onclick="send('row0='+encodeURIComponent(r0.value))">row 0</button></div>
+  <div class="row"><input id="r1" size="20" value="TRAFFIC INFORMATION"><button onclick="send('row1='+encodeURIComponent(r1.value))">row 1</button></div>
+  <div class="row"><input id="r2" size="20" value="SYSTEM SETTINGS"><button onclick="send('row2='+encodeURIComponent(r2.value))">row 2</button></div>
+  <p><small>
+    The main line shows <b>8 characters</b> and an info-menu row shows <b>8</b> &mdash;
+    measured with the ruler, not assumed. Anything longer has to scroll, which is what this
+    is. <span class="w">Three rows repainting on a timer is a lot of traffic next to one main
+    line</span>, so it is off by default.
+  </small></p>
+</section>
+
+<section>
+  <h2>Panel family &mdash; a BOOT choice</h2>
+  <div class="row">
+    <span id="fam"><small>&nbsp;</small></span>
+    <button onclick="if(confirm('Reboot into Carminat?'))location='/api/family?f=carminat'">Carminat</button>
+    <button onclick="if(confirm('Reboot into UpdateList?'))location='/api/family?f=updatelist'">UpdateList</button>
+  </div>
+  <p><small>
+    Carminat syncs on <span class="k">0x3AF</span>, UpdateList on <span class="k">0x3DF</span>,
+    and the handshake, the ids and the text encoding all differ. There is no honest runtime
+    switch, so the choice is stored in NVS and applied on the next boot. The nav pane and the
+    N-item menu are <b>Carminat only</b>.
+  </small></p>
 </section>
 
 <section>
@@ -158,16 +269,29 @@ function apply(){
   send('title='+encodeURIComponent(ti.value)+'&artist='+encodeURIComponent(ar.value)+
        '&track='+tk.value+'&tracks='+tc.value+'&total='+tt.value);
 }
+function sc(n){fetch('/api/scene?n='+n).then(poll);}
+function call(w){
+  const q=new URLSearchParams({w,a:ca.value,b:cb.value,c:cc.value,n:cn.value,i:ci.value});
+  fetch('/api/call?'+q).then(async r=>{
+    const t=await r.text();
+    const el=document.getElementById('bud');
+    el.insertAdjacentHTML('afterbegin','<span class="'+(r.ok?'g':'r')+'">'+t+'</span>\n');
+  }).then(poll);
+}
 let first=true;
 async function poll(){
   try{
     const s=await (await fetch('/api/state')).json();
     S=s;
     if(first){ti.value=s.title;ar.value=s.artist;tk.value=s.track;tc.value=s.tracks;
-             tt.value=s.total;pm.value=s.periodms;first=false;}
+             tt.value=s.total;pm.value=s.periodms;
+             mt.checked=s.mqtitle;mr.checked=s.mqrows;rl.checked=s.rowslive;first=false;}
+    document.getElementById('fam').innerHTML='<small>running <span class="k">'+s.family+
+      '</span>'+(s.nav?'':' &mdash; <span class="w">no nav pane</span>')+'</small>';
     document.getElementById('st').innerHTML=
       'phase <span class="k">'+s.phase+'</span> &middot; '+
       (s.live?'<span class="g">link up</span>':'<span class="r">LINK DOWN</span>')+
+      ' &middot; <span class="k">'+s.scene+'</span>'+(s.paneon?'':' <span class="w">(pane off)</span>')+
       ' &middot; '+(s.playing?'<span class="g">&#9654; playing</span>':'&#9646;&#9646; paused')+
       ' &middot; heap '+s.heap;
     document.getElementById('bud').innerHTML=

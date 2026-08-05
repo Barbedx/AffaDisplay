@@ -171,4 +171,193 @@ inline void drawMedia(uint8_t* b, const Bars& bars, uint32_t elapsed, uint32_t t
   trackAt(b, 18, 39, track, trackCount);
 }
 
+// ---------------------------------------------------------------------------
+// The other scenes
+// ---------------------------------------------------------------------------
+// Every one of these is drawn from a frame counter and a little state, never from a table of
+// baked frames. 288 bytes per baked frame is the reason: at 4 fps a ten-second loop would be
+// 11 kB of flash for one animation, and none of it could show a clock that is actually right.
+//
+// They also exist to answer a question a still image cannot: how much MOTION this pane will
+// carry. A 44-frame ISO-TP transfer per image at BlockSize 1 is a hard rate limit, so the
+// interesting scenes are the ones that still read at 3-5 fps — which is why several of these
+// lean on persistence (trails, peak-hold, sweeps) rather than on smoothness.
+
+inline int isin(int deg) {              // sine * 1024, integer, 1-degree resolution
+  static const int16_t q[91] = {
+    0,18,36,54,71,89,107,125,143,160,178,195,213,230,248,265,282,299,316,333,350,367,384,400,
+    416,433,449,465,481,496,512,527,543,558,573,587,602,616,630,644,658,672,685,698,711,724,
+    737,749,761,773,784,796,807,818,828,839,849,859,868,878,887,896,904,912,920,928,935,942,
+    949,955,962,967,973,978,983,987,992,995,999,1002,1005,1008,1010,1012,1013,1014,1015,1016,
+    1016,1016,1016};
+  deg = ((deg % 360) + 360) % 360;
+  if (deg <= 90)  return q[deg];
+  if (deg <= 180) return q[180 - deg];
+  if (deg <= 270) return -q[deg - 180];
+  return -q[360 - deg];
+}
+inline int icos(int deg) { return isin(deg + 90); }
+
+inline void line(uint8_t* b, int x0, int y0, int x1, int y1) {
+  int dx = x1 - x0, dy = y1 - y0;
+  const int n = (abs(dx) > abs(dy) ? abs(dx) : abs(dy));
+  if (n == 0) { px(b, x0, y0); return; }
+  for (int i = 0; i <= n; ++i) px(b, x0 + dx * i / n, y0 + dy * i / n);
+}
+
+inline void circle(uint8_t* b, int cx, int cy, int r) {
+  for (int a = 0; a < 360; a += 4)
+    px(b, cx + r * icos(a) / 1024, cy + r * isin(a) / 1024);
+}
+
+// A VU meter: arc scale, swinging needle, and a peak pip that lags behind it. The needle is
+// the part that reads at a low frame rate — a swinging line carries motion where a bar chart
+// only carries a value.
+struct Vu {
+  int angle = 0, target = 0, peak = 0;
+  uint32_t rng = 0xC0FFEE11;
+  void step(bool live) {
+    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+    if (live) target = 20 + static_cast<int>(rng % 120);
+    else      target = 15;
+    angle += (target - angle) / 2;            // critically damped enough to look mechanical
+    if (angle > peak) peak = angle;
+    else if (peak > angle + 2) peak -= 3;
+  }
+};
+
+inline void drawVu(uint8_t* b, const Vu& v) {
+  clear(b);
+  const int cx = 24, cy = 42, r = 34;
+  for (int a = 20; a <= 160; a += 2)          // the arc
+    px(b, cx + r * icos(a) / 1024, cy - r * isin(a) / 1024);
+  for (int a = 20; a <= 160; a += 20) {       // ticks
+    const int x0 = cx + (r - 5) * icos(a) / 1024, y0 = cy - (r - 5) * isin(a) / 1024;
+    const int x1 = cx + r * icos(a) / 1024,       y1 = cy - r * isin(a) / 1024;
+    line(b, x0, y0, x1, y1);
+  }
+  const int a = 160 - v.angle;                // needle, drawn thick so it survives the pane
+  line(b, cx, cy, cx + (r - 7) * icos(a) / 1024, cy - (r - 7) * isin(a) / 1024);
+  line(b, cx - 1, cy, cx + (r - 7) * icos(a) / 1024, cy - (r - 7) * isin(a) / 1024);
+  const int pa = 160 - v.peak;
+  px(b, cx + (r - 3) * icos(pa) / 1024, cy - (r - 3) * isin(pa) / 1024);
+  rect(b, cx - 2, cy - 2, cx + 2, cy + 2, true);
+  rect(b, 0, 0, 47, 47, false);
+}
+
+// A scrolling waveform. The buffer shifts one column per frame, so the shape drifts across
+// the pane and the eye reads continuous motion out of four frames a second.
+struct Wave {
+  uint8_t h[48];
+  int phase = 0;
+  Wave() { for (int i = 0; i < 48; ++i) h[i] = 24; }
+  void step(bool live) {
+    for (int i = 0; i < 47; ++i) h[i] = h[i + 1];
+    phase = (phase + 23) % 360;
+    const int amp = live ? 18 : 3;
+    const int v = 24 + (amp * isin(phase) / 1024) + (amp / 2) * isin(phase * 3) / 1024;
+    h[47] = static_cast<uint8_t>(v < 1 ? 1 : (v > 46 ? 46 : v));
+  }
+};
+
+inline void drawWave(uint8_t* b, const Wave& w) {
+  clear(b);
+  hline(b, 0, 47, 24);
+  for (int x = 0; x < 48; ++x) {
+    const int y = w.h[x];
+    if (y < 24) rect(b, x, y, x, 24, true); else rect(b, x, 24, x, y, true);
+  }
+}
+
+// An analogue clock with a second hand — the scene that makes the frame rate visible, and
+// the one worth pointing at when somebody asks how live this pane really is.
+inline void drawClockFace(uint8_t* b, uint32_t secs) {
+  clear(b);
+  const int cx = 23, cy = 23, r = 22;
+  circle(b, cx, cy, r);
+  for (int k = 0; k < 12; ++k) {
+    const int a = k * 30;
+    line(b, cx + (r - 4) * isin(a) / 1024, cy - (r - 4) * icos(a) / 1024,
+            cx + (r - 2) * isin(a) / 1024, cy - (r - 2) * icos(a) / 1024);
+  }
+  const uint32_t s = secs % 60, m = (secs / 60) % 60, h = (secs / 3600) % 12;
+  const int ha = static_cast<int>(h * 30 + m / 2), ma = static_cast<int>(m * 6), sa = static_cast<int>(s * 6);
+  line(b, cx, cy, cx + 10 * isin(ha) / 1024, cy - 10 * icos(ha) / 1024);
+  line(b, cx + 1, cy, cx + 10 * isin(ha) / 1024, cy - 10 * icos(ha) / 1024);
+  line(b, cx, cy, cx + 16 * isin(ma) / 1024, cy - 16 * icos(ma) / 1024);
+  line(b, cx, cy, cx + 19 * isin(sa) / 1024, cy - 19 * icos(sa) / 1024);
+  rect(b, cx - 1, cy - 1, cx + 1, cy + 1, true);
+}
+
+// A starfield, integer perspective, same idea as 13_starfield but in two dimensions of pane
+// instead of three rows of text. The depth cue is the RATE, not the size.
+struct Stars {
+  static constexpr int kN = 28;
+  int16_t x[kN], y[kN], z[kN];
+  uint32_t rng = 0x5EED1F1A;
+  uint32_t next() { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return rng; }
+  Stars() { for (int i = 0; i < kN; ++i) respawn(i, true); }
+  void respawn(int i, bool anywhere) {
+    x[i] = static_cast<int16_t>(next() % 2048) - 1024;
+    y[i] = static_cast<int16_t>(next() % 2048) - 1024;
+    z[i] = anywhere ? static_cast<int16_t>(1 + next() % 1024) : 1024;
+  }
+  void step() {
+    for (int i = 0; i < kN; ++i) {
+      z[i] -= 40;
+      if (z[i] < 40) respawn(i, false);
+    }
+  }
+};
+
+inline void drawStars(uint8_t* b, const Stars& s) {
+  clear(b);
+  for (int i = 0; i < Stars::kN; ++i) {
+    const int sx = 24 + (s.x[i] * 24) / s.z[i];
+    const int sy = 24 + (s.y[i] * 24) / s.z[i];
+    if (sx < 0 || sx > 47 || sy < 0 || sy > 47) continue;
+    px(b, sx, sy);
+    if (s.z[i] < 400) { px(b, sx + 1, sy); px(b, sx, sy + 1); }   // near stars are fatter
+    if (s.z[i] < 180) px(b, sx + 1, sy + 1);
+  }
+}
+
+// A bouncing box with a decaying trail. The trail is what makes it read at 4 fps: without
+// persistence the box appears to teleport.
+struct Bounce {
+  int x = 8, y = 8, dx = 3, dy = 2, n = 0;
+  int8_t tx[8], ty[8];
+  Bounce() { for (int i = 0; i < 8; ++i) { tx[i] = 8; ty[i] = 8; } }
+  void step() {
+    x += dx; y += dy;
+    if (x < 0)  { x = 0;  dx = -dx; }
+    if (x > 37) { x = 37; dx = -dx; }
+    if (y < 0)  { y = 0;  dy = -dy; }
+    if (y > 37) { y = 37; dy = -dy; }
+    tx[n] = static_cast<int8_t>(x); ty[n] = static_cast<int8_t>(y);
+    n = (n + 1) & 7;
+  }
+};
+
+inline void drawBounce(uint8_t* b, const Bounce& s) {
+  clear(b);
+  for (int i = 0; i < 8; ++i) {                 // trail: older marks get sparser
+    const int k = (s.n + i) & 7;
+    if (i < 5) { px(b, s.tx[k] + 5, s.ty[k] + 5); px(b, s.tx[k] + 5, s.ty[k] + 6); }
+    else rect(b, s.tx[k], s.ty[k], s.tx[k] + 10, s.ty[k] + 10, false);
+  }
+  rect(b, s.x, s.y, s.x + 10, s.y + 10, true);
+}
+
+// Expanding rings. Cheap, hypnotic, and the one scene where the low frame rate is invisible
+// because each ring is somewhere new every time.
+inline void drawRings(uint8_t* b, uint32_t frame) {
+  clear(b);
+  for (int k = 0; k < 3; ++k) {
+    const int r = static_cast<int>((frame * 3 + k * 11) % 33);
+    if (r > 1) circle(b, 23, 23, r);
+  }
+  rect(b, 21, 21, 25, 25, false);
+}
+
 }  // namespace media
