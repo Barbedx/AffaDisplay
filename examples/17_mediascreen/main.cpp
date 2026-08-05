@@ -102,13 +102,13 @@ affa::AffaDisplayBase*  g_base   = nullptr;      // phase(), onComplete(), lastE
 // ---------------------------------------------------------------------------
 enum class Scene : uint8_t {
   Spectrum = 0, Vu, Wave, Clock, Stars, Bounce, Rings,
-  Globe, Tryzub, TryzubClock, Renault, Dash, Gauges, Combo, FontSheet, Checker,
+  Globe, Tryzub, TryzubClock, Renault, Dash, Gauges, Combo, FontSheet, Checker, Blank,
   kCount
 };
 const char* kSceneName[] = {
   "spectrum", "vu", "wave", "clock", "stars", "bounce", "rings",
   "globe", "tryzub", "tryzubclock", "renault", "dash", "gauges", "combo",
-  "fontsheet", "checker"
+  "fontsheet", "checker", "blank"
 };
 static_assert(sizeof(kSceneName) / sizeof(kSceneName[0]) == static_cast<size_t>(Scene::kCount),
               "scene name table drifted from the enum");
@@ -235,6 +235,10 @@ void renderScene(uint8_t* b) {
     case Scene::Combo:       memcpy(b, navlab::kBmpCombo,       media::kBytes); break;
     case Scene::FontSheet:   memcpy(b, navlab::kBmpFontSheet,   media::kBytes); break;
     case Scene::Checker:     memcpy(b, navlab::kBmpChecker,     media::kBytes); break;
+    // THE ONLY WAY WE HAVE FOUND TO EMPTY THE PANE. No command to erase it is known, and
+    // simply stopping the frame pump leaves the last image on the glass — so "clear" is
+    // 288 zero bytes sent like any other image.
+    case Scene::Blank:       media::clear(b);                                  break;
     default: media::clear(b); break;
   }
 }

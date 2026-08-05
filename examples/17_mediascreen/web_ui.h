@@ -59,13 +59,20 @@ small{color:var(--dim)}
     <button onclick="sc('checker')">checker</button>
   </div>
   <div class="row">
-    <button onclick="fetch('/api/scene?on=1').then(poll)">pane ON</button>
-    <button onclick="fetch('/api/scene?on=0').then(poll)">pane OFF</button>
+    <button onclick="fetch('/api/scene?on=1').then(poll)">resume sending</button>
+    <button onclick="fetch('/api/scene?on=0').then(poll)">stop sending</button>
+    <button onclick="sc('blank')">blank the pane</button>
   </div>
   <p><small>
     The first seven are drawn on the device from a frame counter; the rest are the generated
     48&times;48 set, shared with <span class="k">16_navlab</span>. Same channel either way
     &mdash; which is the contrast worth showing.
+  </small></p>
+  <p><small>
+    <b>stop sending</b> halts the frame pump. <span class="w">It does not clear the glass</span>
+    &mdash; the last image stays there, because no command to erase this pane is known. To
+    empty it, send <b>blank</b>: 288 zero bytes, which is the only way we have found.
+    <b>display OFF</b> is a different thing again &mdash; that is the backlight.
   </small></p>
 </section>
 
@@ -95,9 +102,14 @@ small{color:var(--dim)}
     <button onclick="send('elapsed=0')">&#9664;&#9664; restart</button>
   </div>
   <div class="row">
-    <button onclick="send('power=1')" title="52 09 00">display ON</button>
-    <button onclick="fetch('/api/power?on=0')">display OFF</button>
+    <button onclick="call('power_on')" title="151 03 52 09 00">display ON</button>
+    <button onclick="call('power_off')" title="151 03 52 00 00">display OFF</button>
   </div>
+  <p><small>
+    <b>display ON/OFF</b> is the panel's backlight — <span class="k">52 09 00</span> /
+    <span class="k">52 00 00</span>. Nothing draws at all while it is off. Not the same thing
+    as <b>pane</b> above, which only stops us sending images.
+  </small></p>
 </section>
 
 <section>
