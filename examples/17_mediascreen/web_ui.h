@@ -101,6 +101,14 @@ small{color:var(--dim)}
     <small>len s</small><input id="tt" type="number" style="width:66px">
   </div>
   <div class="row">
+    <button class="pri" style="border-color:var(--bad);color:#ffd9d9" onclick="location='/api/panic'">STOP EVERYTHING</button>
+  </div>
+  <p><small>
+    <b>STOP EVERYTHING</b> is a plain link, not a fetch and not a handler that depends on any
+    other script working: marquee off, pane off, a short static line. It exists because when
+    the console broke, nothing on this page could stop a scrolling title.
+  </small></p>
+  <div class="row">
     <button class="pri" onclick="apply()">apply</button>
     <button onclick="send('play=1')">&#9654; play</button>
     <button onclick="send('play=0')">&#9646;&#9646; pause</button>
@@ -317,7 +325,15 @@ function draw(){
   cx.putImageData(im,0,0);
 }
 
-const send=q=>fetch('/api/player?'+q).then(poll);
+// A FUNCTION DECLARATION, NOT A const ARROW, and that is the whole bug fix. Inline onclick
+// handlers here resolved 'call' and 'sc' — both function declarations, hoisted onto the
+// global object — but never 'send', so every control that used it did nothing at all and
+// said nothing about it: play, pause, restart, both marquee toggles, the frame period, the
+// row text. The page looked alive because the buttons that happened to use the other two
+// worked fine.
+//
+// Anything an inline handler calls is declared with 'function' from here on.
+function send(q){ return fetch('/api/player?'+q).then(poll); }
 function apply(){
   send('title='+encodeURIComponent(ti.value)+'&artist='+encodeURIComponent(ar.value)+
        '&track='+tk.value+'&tracks='+tc.value+'&total='+tt.value);

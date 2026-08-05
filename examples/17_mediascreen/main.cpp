@@ -116,8 +116,12 @@ static_assert(sizeof(kSceneName) / sizeof(kSceneName[0]) == static_cast<size_t>(
 Scene g_scene = Scene::Spectrum;
 
 struct Player {
-  char     title[80]  = "NEVER GONNA GIVE YOU UP";
-  char     artist[40] = "RICK ASTLEY";
+  // NOT A JOKE TITLE. The default used to be a Rick Astley lyric, which was funny exactly
+  // once — and then every OTA reset it and put a scrolling rickroll back on a car radio that
+  // had no working pause button. A default that reappears on every flash has to be one
+  // somebody would not mind seeing.
+  char     title[80]  = "AFFADISPLAY MEDIA DEMO";
+  char     artist[40] = "AFFA";
   uint32_t elapsed    = 0;
   uint32_t total      = 213;
   uint8_t  track      = 3;
@@ -227,6 +231,16 @@ struct Marquee {
 // because a menu that closes itself while somebody is reading it is the bug this fixes.
 void logmsg(const char* fmt, ...);   // the ring itself is below; this is used before it
 
+// ---------------------------------------------------------------------------
+// Settings survive the flash
+// ---------------------------------------------------------------------------
+// Every OTA rebooted into the compiled defaults, so anything set from the console was undone
+// by the next upload — including turning a scrolling title off. On a board that is reflashed
+// twenty times an evening that is not a small annoyance: it silently reverts the one setting
+// somebody changed because they wanted it changed.
+void saveSettings();
+void loadSettings();
+
 // THE LIBRARY ANSWERS THIS NOW. lastRendered() is the RenderSlot of the last payload the
 // panel acknowledged, set by the transmit path itself — so unlike a flag this example used
 // to keep, it CANNOT drift. The version before it required marking ownership at every call
@@ -257,6 +271,8 @@ void releaseMainLine(const char* why) {
 // what you want when a menu is open, because a manual pause has to be un-paused by hand and
 // the time you forget is the time it matters.
 
+// STARTS OFF. A scrolling line is the thing hardest to stop from a browser if anything else
+// is broken, so it is opt-in rather than the state a fresh flash lands in.
 Marquee g_mqTitle;                 // drives setText on the main line
 Marquee g_mqRows;                  // drives the info-menu rows
 
@@ -553,6 +569,8 @@ void routes() {
     j += ",\"opened\":";   j += g_open.done ? "true" : "false";
     j += ",\"owner\":\"";   j += mainLineIsOurs() ? "main" : "screen"; j += "\"";
     j += ",\"slot\":";     j += static_cast<int>(g_base->lastRendered());
+    j += ",\"queued\":";   j += g_base->queued();
+    j += ",\"lastres\":"; j += static_cast<int>(g_base->lastResult());
     j += ",\"holdms\":";   j += g_ownerHoldMs;
     j += "}";
     PsychicResponse res(r);
@@ -601,6 +619,7 @@ void routes() {
         g_paneOn     = true;
         g_forceFrame = true;
         pushFrame();                    // now, not up to a frame period from now
+        saveSettings();
         logmsg("scene %s", kSceneName[i]);
         return r->reply(200, "text/plain", kSceneName[i]);
       }
@@ -639,6 +658,7 @@ void routes() {
     }
     if (has("hold"))    g_ownerHoldMs = num("hold");   // 0 = a screen stays until dismissed
     if (has("titlems")) g_mqTitle.periodMs = num("titlems") < 150 ? 150 : num("titlems");
+    saveSettings();
     if (has("rowms"))   g_mqRows.periodMs  = num("rowms")   < 250 ? 250 : num("rowms");
     return r->reply(200, "text/plain", "ok");
   });
@@ -681,6 +701,24 @@ void routes() {
     return res.send();
   });
 
+  // THE PANIC ROUTE. A plain GET so it works as a bare link from any browser, from curl, or
+  // typed into an address bar — no script, no JSON, no dependency on the console being
+  // healthy. It exists because the console broke once and there was then nothing on the page
+  // that could stop a scrolling title on somebody's car radio.
+  g_server.on("/api/panic", HTTP_GET, [](PsychicRequest* r) {
+    g_mqTitle.on = false;
+    g_rowsLive   = false;
+    g_paneOn     = false;
+    g_p.playing  = false;
+    snprintf(g_p.title, sizeof(g_p.title), "%s", "AFFA");
+    (void)g_panel->setText("AFFA");
+    saveSettings();
+    logmsg("PANIC: marquee off, pane off, static line");
+    return r->reply(200, "text/plain",
+                    "stopped: marquee off, pane off, line set to AFFA. "
+                    "The pane keeps its last image; /api/scene?n=blank clears it.");
+  });
+
   g_server.on("/api/log", HTTP_GET, [](PsychicRequest* r) {
     static char out[kLogLines * 96 + 64];
     size_t at = 0;
@@ -704,6 +742,35 @@ void routes() {
     r->reply(200, "text/plain", "rebooting");
     delay(200); ESP.restart(); return ESP_OK;
   });
+}
+
+void saveSettings() {
+  Preferences p;
+  if (!p.begin(kPrefsNamespace, false)) return;
+  p.putString("title", g_p.title);
+  p.putString("artist", g_p.artist);
+  p.putUChar("mqtitle", g_mqTitle.on ? 1 : 0);
+  p.putUChar("mqrows", g_mqRows.on ? 1 : 0);
+  p.putUChar("rowslive", g_rowsLive ? 1 : 0);
+  p.putUChar("scene", static_cast<uint8_t>(g_scene));
+  p.putUShort("period", static_cast<uint16_t>(g_framePeriodMs));
+  p.putUShort("titlems", static_cast<uint16_t>(g_mqTitle.periodMs));
+  p.end();
+}
+
+void loadSettings() {
+  Preferences p;
+  if (!p.begin(kPrefsNamespace, true)) return;
+  if (p.isKey("title"))  p.getString("title", g_p.title, sizeof(g_p.title));
+  if (p.isKey("artist")) p.getString("artist", g_p.artist, sizeof(g_p.artist));
+  g_mqTitle.on  = p.getUChar("mqtitle", 0) != 0;
+  g_mqRows.on   = p.getUChar("mqrows", 1) != 0;
+  g_rowsLive    = p.getUChar("rowslive", 0) != 0;
+  const uint8_t sc = p.getUChar("scene", 0);
+  if (sc < static_cast<uint8_t>(Scene::kCount)) g_scene = static_cast<Scene>(sc);
+  g_framePeriodMs    = p.getUShort("period", 250);
+  g_mqTitle.periodMs = p.getUShort("titlems", 700);
+  p.end();
 }
 
 void startWifi() {
@@ -771,6 +838,7 @@ void setup() {
     g_carminat = &d; g_panel = &d; g_base = &d;
     g_family = Family::Carminat;
   }
+  loadSettings();
   Serial.printf("\n[media] 17_mediascreen — %s\n",
                 g_family == Family::Carminat ? "Carminat" : "UpdateList");
 
