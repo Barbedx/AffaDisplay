@@ -260,6 +260,7 @@ th{color:var(--dim);font-weight:normal}
     </div>
     <div class="r">
       <button class="p" onclick="sendConfirm()">showConfirmBox</button>
+      <button onclick="cmd('fshide')">close box</button>
       <button onclick="cmd('boxsel',{n:0})">select 0</button>
       <button onclick="cmd('boxsel',{n:1})">select 1</button>
     </div>
@@ -271,6 +272,9 @@ th{color:var(--dim);font-weight:normal}
       builder for it yet. The select buttons send <span class="k">29 05 &lt;n&gt;</span>,
       which is how a box moves its selection &mdash; on a one-button box only index 0 exists,
       so index 1 doing nothing is the expected answer, not a fault.
+      <br><br><b>close box</b> is <span class="k">54 03</span> &mdash; the same command that
+      closes the full window, because the box IS a mode <span class="k">0x05</span> screen.
+      It had no close button at all until somebody was left staring at a delete prompt.
     </small></p>
   </section>
 </main>
@@ -516,8 +520,19 @@ function exportWire() {
 }
 
 // ---- status ----------------------------------------------------------------
-var first = true;
+// SEQUENTIAL, NOT PARALLEL, and that is a bug fix rather than a tidy-up. The Wire tab used
+// to fire /api/state, /api/frames and /api/log at the same instant every 1.2 s; a browser
+// keeps those connections alive and esp_http_server has seven sockets, so the table filled
+// and the next request was REFUSED — the page died with ERR_CONNECTION_REFUSED while the
+// board was perfectly healthy and answering curl.
+//
+// Chaining keeps exactly one request outstanding. It also means a slow response delays the
+// next poll instead of stacking another on top of it, which is the behaviour you want from
+// a console talking to a microcontroller.
+var first = true, polling = false;
 function poll() {
+  if (polling) return;                 // never overlap two polls either
+  polling = true;
   fetch('/api/state').then(function (r) { return r.json(); }).then(function (s) {
     if (first) {
       el('mt').value = s.main; el('msc').checked = s.scroll; el('mms').value = s.mainms;
@@ -544,19 +559,18 @@ function poll() {
       '\nframes   ' + s.frames + '  ok ' + s.ok + '  fail ' + s.fail + '  drops ' + s.drops +
       '\nper img  ' + s.avgms + ' ms\nduty     ' + s.duty + '%' +
       '\nheap     ' + s.heap + '\nuptime   ' + s.up + ' s';
-  }).catch(function () { el('st').innerHTML = '<span class="b">offline</span>'; });
-
-  if (cur === 'wire') {
-    fetch('/api/frames').then(function (r) { return r.text(); }).then(function (t) {
+  }).then(function () {
+    if (cur !== 'wire') return null;
+    return fetch('/api/frames').then(function (r) { return r.text(); }).then(function (t) {
       var e = el('fr'); e.textContent = t;
       if (el('wauto').checked) e.scrollTop = e.scrollHeight;
+      return fetch('/api/log').then(function (r) { return r.text(); }).then(function (t2) {
+        el('log').textContent = t2;
+      });
     });
-    fetch('/api/log').then(function (r) { return r.text(); }).then(function (t) {
-      el('log').textContent = t;
-    });
-  }
-  if (cur === 'keys') {
-    fetch('/api/keys').then(function (r) { return r.json(); }).then(function (a) {
+  }).then(function () {
+    if (cur !== 'keys') return null;
+    return fetch('/api/keys').then(function (r) { return r.json(); }).then(function (a) {
       var b = '';
       for (var i = a.length - 1; i >= 0; i--)
         b += '<tr><td>' + a[i].ms + '</td><td class="k">' + a[i].name +
@@ -565,11 +579,13 @@ function poll() {
       document.querySelector('#kt tbody').innerHTML = b ||
         '<tr><td colspan="4"><small>nothing yet &mdash; press a key on the stalk</small></td></tr>';
     });
-  }
+  }).catch(function () {
+    el('st').innerHTML = '<span class="b">offline &mdash; retrying</span>';
+  }).then(function () { polling = false; });
 }
 load('tryzub');
 poll();
-setInterval(poll, 1200);
+setInterval(poll, 1500);
 </script>
 </body></html>
 )HTML";
