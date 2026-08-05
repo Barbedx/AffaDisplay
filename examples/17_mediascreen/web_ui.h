@@ -155,7 +155,22 @@ small{color:var(--dim)}
   <div class="row">
     <button onclick="call('confirm')">showConfirmBox</button>
     <button onclick="call('navtick')">navTick n</button>
+    <button class="pri" onclick="call('main')">give the main line back</button>
   </div>
+  <div class="row">
+    <small>auto-return after</small>
+    <input id="hd" type="number" value="0" style="width:70px" onchange="send('hold='+hd.value)">
+    <small>ms &mdash; 0 = never</small>
+  </div>
+  <p><small>
+    <b>A screen takes the main line and the marquee shuts up.</b> Otherwise the next marquee
+    tick repaints over your menu a fraction of a second after it opens &mdash; which is not
+    the library misbehaving: <span class="k">setText</span> and <span class="k">showMenu</span>
+    are both screens on <span class="k">0x151</span> and the panel shows whichever was drawn
+    last. Deciding which one matters is the application's job, and this is it.
+    The hide calls give the line back; <b>auto-return</b> is off by default, because a menu
+    that closes itself while you are reading it is the bug this exists to fix.
+  </small></p>
   <div class="row"><small>menuN items</small><input id="ci" value="DESTINATION|ROUTE|MAP|TRAFFIC|SETTINGS|BACK" style="flex:1;min-width:200px"></div>
   <p><small>
     <b>showMenuN</b> tracks all six items but the glass is a <b>two-row viewport</b> &mdash;
@@ -351,6 +366,7 @@ async function poll(){
       'phase <span class="k">'+s.phase+'</span> &middot; '+
       (s.live?'<span class="g">link up</span>':'<span class="r">LINK DOWN</span>')+
       ' &middot; '+(s.opened?'':'<span class="r">NOT OPENED</span> &middot; ')+
+      (s.owner==='main'?'':'<span class="w">screen holds the line</span> &middot; ')+
       '<span class="k">'+s.scene+'</span>'+(s.paneon?'':' <span class="w">(pane off)</span>')+
       ' &middot; '+(s.playing?'<span class="g">&#9654; playing</span>':'&#9646;&#9646; paused')+
       ' &middot; heap '+s.heap;

@@ -207,6 +207,42 @@ struct Marquee {
     at = static_cast<uint16_t>((at + 1) % span);
   }
 };
+// ---------------------------------------------------------------------------
+// WHO OWNS THE MAIN LINE
+// ---------------------------------------------------------------------------
+// A menu opened from the console used to close itself a moment later, and the library was
+// not at fault: setText and showMenu are both screens on 0x151, distinguished only by
+// RenderSlot, and the panel shows whatever was drawn last. AffaDisplay deliberately does not
+// model "which screen is current" — that is policy, and it says so where the popup is built:
+// the overlay's lifetime belongs to the application. It cannot know that a menu the user is
+// reading matters more than a marquee tick.
+//
+// So the application has to know, and this is the smallest thing that does: while a screen
+// other than the main line is up, the marquee SHUTS UP. Any real app needs this the moment
+// it has both a now-playing line and a menu, and an example that trips over it is teaching
+// the wrong lesson.
+//
+// Returning to Main is explicit — an actual hide call, or the console asking for the main
+// line back — with an OPTIONAL deadline for the case where nothing ever asks. Not a default,
+// because a menu that closes itself while somebody is reading it is the bug this fixes.
+void logmsg(const char* fmt, ...);   // the ring itself is below; this is used before it
+
+enum class Owner : uint8_t { Main, Other };
+Owner    g_owner        = Owner::Main;
+uint32_t g_ownerUntilMs = 0;         // 0 = until something says otherwise
+uint32_t g_ownerHoldMs  = 0;         // 0 = no deadline
+
+void takeMainLine(const char* who) {
+  g_owner        = Owner::Other;
+  g_ownerUntilMs = g_ownerHoldMs ? ::millis() + g_ownerHoldMs : 0;
+  logmsg("main line yielded to %s", who);
+}
+void releaseMainLine(const char* why) {
+  if (g_owner == Owner::Main) return;
+  g_owner = Owner::Main;
+  logmsg("main line back (%s)", why);
+}
+
 Marquee g_mqTitle;                 // drives setText on the main line
 Marquee g_mqRows;                  // drives the info-menu rows
 
@@ -426,6 +462,14 @@ const char* sendMenuN(const String& title, const String& csv, uint8_t first, uin
 
 affa::Result callApi(const String& w, const String& a, const String& b, const String& c,
                      long n) {
+  // Anything that draws a screen of its own takes the main line; the hide calls give it back.
+  // setText IS the main line, so asking for it explicitly is a request to have it back.
+  if (w == "text" || w == "main")            releaseMainLine(w.c_str());
+  else if (w == "fshide" || w == "pophide" || w == "infohide") releaseMainLine(w.c_str());
+  else if (w == "menu" || w == "menun" || w == "fullscreen" || w == "confirm" ||
+           w == "infomenu" || w == "infopopup" || w == "popup") takeMainLine(w.c_str());
+
+  if (w == "main")       return affa::Result::Ok;
   if (w == "text")       return g_panel->setText(a.c_str());
   if (w == "time")       return g_panel->setTime(a.c_str());
   if (w == "power_on")   return g_panel->setPower(true);
@@ -484,6 +528,8 @@ void routes() {
     j += ",\"heap\":";     j += (uint32_t)ESP.getFreeHeap();
     j += ",\"nav\":";      j += g_carminat ? "true" : "false";
     j += ",\"opened\":";   j += g_open.done ? "true" : "false";
+    j += ",\"owner\":\"";   j += (g_owner == Owner::Main) ? "main" : "screen"; j += "\"";
+    j += ",\"holdms\":";   j += g_ownerHoldMs;
     j += "}";
     PsychicResponse res(r);
     res.setContentType("application/json");
@@ -499,6 +545,7 @@ void routes() {
     const String w = s("w", "");
     const long n = r->hasParam("n") ? strtol(r->getParam("n")->value().c_str(), nullptr, 0) : 0;
     if (w == "menun") {
+      takeMainLine("menun");
       const char* err = sendMenuN(s("a", "NAVIGATION"),
                                   s("i", "DESTINATION|ROUTE|MAP|TRAFFIC|SETTINGS|BACK"),
                                   0, static_cast<uint8_t>(n));
@@ -566,6 +613,7 @@ void routes() {
       const uint32_t v = num("period");
       g_framePeriodMs = v < 120 ? 120 : (v > 5000 ? 5000 : v);
     }
+    if (has("hold"))    g_ownerHoldMs = num("hold");   // 0 = a screen stays until dismissed
     if (has("titlems")) g_mqTitle.periodMs = num("titlems") < 150 ? 150 : num("titlems");
     if (has("rowms"))   g_mqRows.periodMs  = num("rowms")   < 250 ? 250 : num("rowms");
     return r->reply(200, "text/plain", "ok");
@@ -742,7 +790,12 @@ void loop() {
   // The main line. Its own timer, deliberately: the title must not stutter because the pane
   // is busy, and it goes out on 0x151 while the image goes out on 0x1F1, so the two never
   // contend for the same function slot.
-  if (static_cast<int32_t>(now - g_mqTitle.nextMs) >= 0) {
+  // The deadline, if one was asked for.
+  if (g_owner == Owner::Other && g_ownerUntilMs &&
+      static_cast<int32_t>(now - g_ownerUntilMs) >= 0)
+    releaseMainLine("hold expired");
+
+  if (g_owner == Owner::Main && static_cast<int32_t>(now - g_mqTitle.nextMs) >= 0) {
     g_mqTitle.nextMs = now + g_mqTitle.periodMs;
     char win[kMainWidth + 1];
     g_mqTitle.window(g_p.title, win, kMainWidth);
@@ -763,7 +816,7 @@ void loop() {
   // The info-menu rows, scrolling in place. Off by default — three rows repainting on a
   // timer is a lot of traffic next to one main line, and it is here to be demonstrated
   // rather than to be left running.
-  if (g_rowsLive && g_carminat &&
+  if (g_rowsLive && g_carminat && g_owner == Owner::Other &&
       static_cast<int32_t>(now - g_mqRows.nextMs) >= 0) {
     g_mqRows.nextMs = now + g_mqRows.periodMs;
     char w0[kRowWidth + 1], w1[kRowWidth + 1], w2[kRowWidth + 1];
