@@ -72,6 +72,18 @@ small{color:var(--dim)}
     <small>&nbsp;draw: left = set, right = clear</small>
   </div>
   <div class="row">
+    <small>W</small><input id="bw" type="number" value="48" min="8" max="128" step="8" style="width:62px">
+    <small>H</small><input id="bh" type="number" value="48" min="8" max="96" style="width:62px">
+    <button onclick="resize()">resize</button>
+    <small id="geo"></small>
+  </div>
+  <p><small>
+    W and H write header bytes <span class="g">12</span> and <span class="g">13</span> and
+    change how many bitmap bytes are sent: stride = ceil(W/8), total = stride &times; H.
+    <b>Whether the panel honours the field at all is the open question</b> &mdash; a fixed
+    48&times;48 window would draw garbage, and that answer counts too. W is rounded to a byte.
+  </small></p>
+  <div class="row">
     <input id="txt" placeholder="text to render" size="10" value="AFFA">
     <input id="tsz" type="number" value="20" min="5" max="48" style="width:56px" title="px">
     <button onclick="drawText()">render text</button>
@@ -105,8 +117,24 @@ small{color:var(--dim)}
   <div class="row">
     <input id="txtline" value="RENAULT" size="10">
     <button onclick="get('/api/text?t='+encodeURIComponent(txtline.value))">setText</button>
-    <button onclick="get('/api/oemtext?t='+encodeURIComponent(txtline.value))" title="77 09 55 FF 31 01 + 8 chars, verbatim from the capture">OEM 0x77</button>
+    <button onclick="oemText()" title="the radio's own 0x77 message">OEM 0x77</button>
   </div>
+  <div class="row">
+    <small>mode</small><select id="omode"><option value="77">77 windowed</option><option value="74">74 full window</option></select>
+    <small>rds</small><select id="ords"><option value="09">09 (capture)</option><option value="45">45 AF-RDS</option><option value="55">55 none</option></select>
+    <small>src</small><select id="osrc"><option value="FF">FF none</option><option value="DF">DF MANU</option><option value="FD">FD PRESET</option></select>
+  </div>
+  <div class="row">
+    <small>fmt</small><select id="ofmt"><option value="31">31 radio 5+.+1</option><option value="19">19 radio +tick</option><option value="60">60 plain ASCII</option><option value="5F">5F plain</option></select>
+    <button onclick="get('/api/probe?w=5403')" title="151 02 54 03">close full window</button>
+  </div>
+  <p><small>
+    Parameter names and values are MeganeCAN's (<span class="k">CarminatDisplay.cpp</span>).
+    Format <span class="k">0x31</span> is why the capture's <span class="k">"   1056 "</span>
+    is not the number 1056 &mdash; it is <b>105.6 FM with the point drawn between the digits</b>.
+    <span class="w">rds 0x09 is in neither documented list</span>; sweep it.
+    A <span class="k">0x77</span> sent while the full window is up freezes the main screen.
+  </small></p>
   <div class="row">
     <button class="pri" onclick="get('/api/replay?t='+encodeURIComponent(txtline.value))">REPLAY OEM OPENING</button>
   </div>
@@ -122,6 +150,35 @@ small{color:var(--dim)}
     <button onclick="get('/api/probe?w=5403')">54 03</button>
     <button onclick="get('/api/probe?w=25')">25 00 00 00</button>
   </div>
+
+  <h2 style="margin-top:16px">Other screens &mdash; do they coexist with 0x1F1?</h2>
+  <div class="row">
+    <input id="sa" value="AFFA" size="7">
+    <input id="sb" value="ROW ONE" size="7">
+    <input id="sc" value="ROW TWO" size="7">
+  </div>
+  <div class="row">
+    <button onclick="scr('menu')">menu</button>
+    <button onclick="scr('hi0')">hi 0</button>
+    <button onclick="scr('hi1')">hi 1</button>
+    <button onclick="scr('infomenu')">info menu</button>
+  </div>
+  <div class="row">
+    <button onclick="scr('fullscreen')">fullscreen</button>
+    <button onclick="scr('fshide')">hide fs</button>
+    <button onclick="scr('confirm')">confirm box</button>
+  </div>
+  <div class="row">
+    <button onclick="scr('popup')">popup</button>
+    <button onclick="scr('pophide')">hide popup</button>
+    <button onclick="scr('infopopup')">info popup</button>
+    <button onclick="scr('infohide')">hide info</button>
+  </div>
+  <p><small>
+    Put the bitmap up first, then walk these. The question is not whether they render &mdash;
+    it is what each one does to the nav pane: does the bitmap survive a menu, does the full
+    window cover it, does a popup leave it alone.
+  </small></p>
 </section>
 
 <section>
@@ -163,11 +220,30 @@ small{color:var(--dim)}
 </main>
 
 <script>
-const W=48,H=48,STRIDE=6,NBYTES=288;
+// Geometry is MUTABLE — it follows header bytes 12/13, which is the whole experiment.
+let W=48,H=48;
+const stride=()=>Math.ceil(W/8);
+const nbytes=()=>stride()*H;
 const cv=document.getElementById('cv'), cx=cv.getContext('2d');
 let px=new Uint8Array(W*H);
 
+function resize(){
+  const nw=Math.max(8,Math.min(128,Math.round((+bw.value||48)/8)*8));
+  const nh=Math.max(8,Math.min(96,+bh.value||48));
+  const old=px, oW=W, oH=H;
+  W=nw; H=nh; bw.value=W; bh.value=H;
+  px=new Uint8Array(W*H);
+  for(let y=0;y<Math.min(H,oH);y++)for(let x=0;x<Math.min(W,oW);x++) px[y*W+x]=old[y*oW+x];
+  cv.width=W; cv.height=H;
+  const scale=Math.min(288/W,288/H);
+  cv.style.width=(W*scale)+'px'; cv.style.height=(H*scale)+'px';
+  hdr[12]=W; hdr[13]=H;                       // the geometry field follows the canvas
+  buildHdrUi();
+  paint();
+}
+
 function paint(){
+  geo.textContent=W+'x'+H+' -> stride '+stride()+', '+nbytes()+' bytes';
   const im=cx.createImageData(W,H);
   for(let i=0;i<W*H;i++){
     const v=px[i]?255:0;
@@ -178,14 +254,19 @@ function paint(){
 }
 // Canvas -> the OEM's packing: row-major, 6 bytes a row, MSB-first.
 function pack(){
-  const b=new Uint8Array(NBYTES);
+  const st=stride(), b=new Uint8Array(st*H);
   for(let y=0;y<H;y++)for(let x=0;x<W;x++)
-    if(px[y*W+x]) b[y*STRIDE+(x>>3)] |= 0x80>>(x&7);
+    if(px[y*W+x]) b[y*st+(x>>3)] |= 0x80>>(x&7);
   return b;
 }
-function unpack(b){
-  for(let y=0;y<H;y++)for(let x=0;x<W;x++)
-    px[y*W+x]=(b[y*STRIDE+(x>>3)]>>(7-(x&7)))&1;
+// Presets are 48x48; loading one snaps the canvas back to that geometry.
+function unpack(b,w,h){
+  if(w&&h&&(w!==W||h!==H)){ bw.value=w; bh.value=h; resize(); }
+  const st=stride();
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const i=y*st+(x>>3);
+    px[y*W+x]= i<b.length ? (b[i]>>(7-(x&7)))&1 : 0;
+  }
   paint();
 }
 const hex=a=>Array.from(a).map(v=>v.toString(16).toUpperCase().padStart(2,'0')).join('');
@@ -268,7 +349,7 @@ async function resetHdr(){
 
 function preview(){
   const b=pack();
-  const wire = hdr.length+NBYTES;
+  const wire = hdr.length+b.length;
   const pci = wire<=7 ? [wire] : [0x10|(wire>>8), wire&0xFF];
   const frames = 1 + Math.ceil(Math.max(0,(pci.length+wire)-8)/7);
   document.getElementById('wire').innerHTML =
@@ -276,7 +357,8 @@ function preview(){
     '<span class="k">hdr  </span>'+hex(hdr)+'\n'+
     '<span class="k">bmp  </span>'+hex(b.slice(0,24))+'&hellip;\n'+
     '<span class="k">tail </span>&hellip;'+hex(b.slice(-12))+'\n'+
-    frames+' CAN frames, '+(pci.length+wire)+' wire bytes';
+    frames+' CAN frames, '+(pci.length+wire)+' wire bytes'+
+    (b.length!==288?'   <span class="w">non-OEM geometry '+W+'x'+H+'</span>':'');
 }
 
 // ---- transport -----------------------------------------------------------
@@ -288,7 +370,7 @@ async function get(u){
 }
 async function loadPreset(){
   const n=document.getElementById('preset').value;
-  unpack(parseHexStr(await (await fetch('/api/img?n='+n)).text()));
+  unpack(parseHexStr(await (await fetch('/api/img?n='+n)).text()),48,48);
 }
 async function sendNav(){
   const body=hex(hdr)+'|'+hex(pack());
@@ -315,6 +397,16 @@ async function rawTx(){
   poll();
 }
 
+function scr(w){
+  const q=new URLSearchParams({w,a:sa.value,b:sb.value,c:sc.value});
+  get('/api/screen?'+q);
+}
+function oemText(){
+  const q=new URLSearchParams({t:txtline.value,mode:omode.value,rds:ords.value,
+                               src:osrc.value,fmt:ofmt.value});
+  get('/api/oemtext?'+q);
+}
+
 // ---- status --------------------------------------------------------------
 async function poll(){
   try{
@@ -336,6 +428,7 @@ async function poll(){
 (async function(){
   await resetHdr();
   await loadPreset();
+  resize();
   poll(); setInterval(poll,1500);
 })();
 </script>

@@ -1127,9 +1127,29 @@ it. None blocks the port; each blocks a *confident* change to the bytes involved
 17. **`0x7E` as a text command** (W3) versus `0x76` (W6) — both accepted by a panel, effect
     difference not catalogued.
 
+    **But `0x77` is not a mystery, and it decodes the capture completely.** MeganeCAN
+    documents the whole header in `src/display/Carminat/CarminatDisplay.cpp`, and every field
+    lines up with `151 10 0E 77 09 55 FF 31 01 …` in `"aknowledge on on display.csv"`:
+
+    | byte | field | values |
+    |---|---|---|
+    | 0 | mode | `0x74` full window · `0x77` windowed radio text. A `0x77` sent while the full window is up **freezes the main screen**; `151 02 54 03` is what closes it. |
+    | 1 | rdsIcon | `0x45` AF-RDS icon · `0x55` none. **The capture has `0x09`, which is in neither list** — undocumented, and worth a sweep. |
+    | 2 | fixed | `0x55`, always |
+    | 3 | sourceIcon | `0xDF` "MANU" · `0xFD` "PRESET" · `0xFF` none · others draw "LIST" etc. |
+    | 4 | format | `0x19`–`0x3F` radio style: 5 digits + `.` + 1 char (+ channel) · `0x59`–`0x7F` plain ASCII, up to 8 chars |
+    | 5 | control | `0x01`, required |
+
+    Which explains the text slot's width and the capture's contents at once: format `0x31` is
+    radio style, so `"   1056 "` is **not the string 1056 — it is 105.6 FM with the decimal
+    point drawn between the digits**. Eight characters is the field, not a coincidence.
+
+    This also settles `54 03`: it closes the full window, which is why the OEM sends it during
+    the opening and MeganeCAN sends it either side of a full-window popup.
+
 **Channels**
 
-18. **`0x1F1` (Carminat NAV) — DECODED 2026-08-05. It IS a bitmap.** ~~W4 reinterprets it as
+18. **`0x1F1` (Carminat NAV) — DECODED AND CONFIRMED ON GLASS, 2026-08-05. It IS a bitmap.** ~~W4 reinterprets it as
     structured navigation state (turn direction + distance + street name), *not* a streamed
     bitmap, on the grounds that the idle "globe" glyph already lives in the panel.~~ **That
     reading is wrong, and so was "the capture is frame-lossy".** The ESP32 capture is lossy
@@ -1154,10 +1174,23 @@ it. None blocks the port; each blocks a *confident* change to the bytes involved
     (possibly one 16-bit field) and `0x01` (format? bit depth?). `"ABCDEF\0"` is a
     seven-byte string slot at a placeholder — the captured car had no navigation CD.
 
+    **CONFIRMED ON THE BENCH PANEL: the bitmap renders.** `examples/16_navlab` replays the
+    302 bytes and the image appears in the nav pane. Geometry, row order and bit order are
+    therefore not inferences any more — they are right.
+
+    **Confirmed NOT to work: bytes 4–10 as text.** ASCII written into that slot puts nothing
+    on the glass. So `"ABCDEF\0"` is either not a string field at all, or it needs one of the
+    four unknown bytes set before the panel will draw it. That is now the sharpest open
+    question and it is what the sweep exists for.
+
+    Also open: whether bytes 12/13 are a real geometry field or whether the pane is a fixed
+    48×48 window that ignores them. `16_navlab` sends any width/height with the byte count
+    following (stride = `ceil(W/8)`), so this is one button away.
+
     `examples/16_navlab` is the instrument for the rest: it replays those 302 bytes byte for
     byte, makes every one editable from a browser, and sweeps a single header byte across a
-    range so an unknown field can be characterised in one pass. **Nothing here has been sent
-    to a panel yet.** The one capture that would settle the header outright is `0x1F1` with
+    range so an unknown field can be characterised in one pass. The capture that would settle
+    the header outright is `0x1F1` with
     navigation actually routing; diffing it against these 302 bytes says immediately whether
     the header is a real street-name/distance struct with a bitmap tail, or whether the whole
     right-hand pane is streamed pixels on every update.

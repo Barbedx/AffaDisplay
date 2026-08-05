@@ -115,12 +115,23 @@ PsychicHttpServer     g_server;
 // The message under test
 // ---------------------------------------------------------------------------
 constexpr uint16_t kHdrMax  = 32;
-constexpr uint16_t kBmpLen  = navlab::kBitmapBytes;    // 288
-constexpr uint16_t kWireMax = 2 + kHdrMax + kBmpLen;   // PCI + header + bitmap
+
+// THE BITMAP IS NOT FIXED AT 288 BYTES, and that is the point of the buffer being this big.
+// Header bytes 12 and 13 are 0x30 0x30 = 48, 48 — a GEOMETRY FIELD, not a constant. If the
+// panel honours it, a different width and height are a different number of bitmap bytes:
+// stride = ceil(W/8), total = stride * H. 768 covers 128x48 or 64x96 and still leaves
+// 2 + 32 + 768 = 802 inside AFFA_MAX_EXTERNAL_PAYLOAD.
+//
+// Whether the panel honours it is EXACTLY the open question. The pane may be a fixed 48x48
+// window that ignores the field, in which case a wrong size draws garbage or nothing — and
+// that answer is worth as much as the other one.
+constexpr uint16_t kBmpMax  = 768;
+constexpr uint16_t kWireMax = 2 + kHdrMax + kBmpMax;   // PCI + header + bitmap
 
 uint8_t  g_hdr[kHdrMax];
 uint16_t g_hdrLen = sizeof(navlab::kOemHeader);        // 14
-uint8_t  g_bmp[kBmpLen];
+uint8_t  g_bmp[kBmpMax];
+uint16_t g_bmpLen = navlab::kBitmapBytes;              // 288 until the console says otherwise
 
 // BORROWED BY THE LIBRARY between enqueueExternal() and onComplete. See the header comment.
 uint8_t  g_wire[kWireMax];
@@ -205,7 +216,7 @@ void appendHex(String& s, const uint8_t* d, uint16_t n) {
 const char* sendFramed(uint16_t id, const uint8_t* msg, uint16_t len) {
   if (len == 0) return "empty";
   if (g_navBusy) return "busy: a transfer still owns the buffer";
-  if (len > kHdrMax + kBmpLen) return "too long";
+  if (len > kHdrMax + kBmpMax) return "too long";
 
   uint16_t n = 0;
   if (len <= 7) {
@@ -252,10 +263,10 @@ const char* sendShort(uint16_t id, const uint8_t* msg, uint8_t len) {
 
 // Builds header + bitmap into one contiguous message and sends it.
 const char* sendNav() {
-  static uint8_t msg[kHdrMax + kBmpLen];
+  static uint8_t msg[kHdrMax + kBmpMax];
   memcpy(msg, g_hdr, g_hdrLen);
-  memcpy(msg + g_hdrLen, g_bmp, kBmpLen);
-  return sendFramed(affa::carminat::kIdNav, msg, static_cast<uint16_t>(g_hdrLen + kBmpLen));
+  memcpy(msg + g_hdrLen, g_bmp, g_bmpLen);
+  return sendFramed(affa::carminat::kIdNav, msg, static_cast<uint16_t>(g_hdrLen + g_bmpLen));
 }
 
 // ---------------------------------------------------------------------------
@@ -266,12 +277,30 @@ const char* sendNav() {
 //   151  10 0E 77 09 55 FF 31 01 | 21 20 20 20 31 30 35 36 | 22 20 ...
 //        = 14 bytes: 77 09 55 FF 31 01 "   1056 "
 //
-// Command 0x77 — NOT the 0x76 / 0x7E this library's setText uses — then five header bytes
-// nobody has explained, then EXACTLY EIGHT characters. "   1056 " is the radio showing
-// 105.6 FM. Sent here byte for byte because the point of the lab is to reproduce what the
-// OEM did, not what we would have done.
+// The five bytes after the command are NOT unknown — MeganeCAN documents them, in
+// `src/display/Carminat/CarminatDisplay.cpp`, and every one of them lines up with the
+// capture:
+//
+//   [0] mode        0x74 full window / 0x77 windowed radio text.
+//                   A 0x77 sent when the full window is up FREEZES the main screen;
+//                   `151 02 54 03` is what closes the full window.
+//   [1] rdsIcon     0x45 AF-RDS icon / 0x55 none.  THE CAPTURE HAS 0x09, which is in
+//                   neither list — an undocumented value, and worth a sweep of its own.
+//   [2] fixed       0x55, always.
+//   [3] sourceIcon  0xDF "MANU" / 0xFD "PRESET" / 0xFF none / others draw "LIST" etc.
+//   [4] format      0x19-0x3F radio style: 5 digits + '.' + 1 char (+ channel).
+//                   0x59-0x7F plain ASCII, up to 8 characters.
+//   [5] control     0x01, required.
+//
+// Which decodes the capture completely: format 0x31 is radio style, so "   1056 " is not
+// the string 1056 — it is **105.6 FM with the decimal point drawn between the digits**.
+// That is why the text slot is exactly eight characters wide.
+struct OemText {
+  uint8_t mode = 0x77, rds = 0x09, fixed = 0x55, src = 0xFF, fmt = 0x31, ctl = 0x01;
+} g_oem;
+
 const char* sendOemText(const String& t) {
-  uint8_t msg[14] = { 0x77, 0x09, 0x55, 0xFF, 0x31, 0x01,
+  uint8_t msg[14] = { g_oem.mode, g_oem.rds, g_oem.fixed, g_oem.src, g_oem.fmt, g_oem.ctl,
                       ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
   for (int i = 0; i < 8; ++i)
     if (i < static_cast<int>(t.length())) msg[6 + i] = static_cast<uint8_t>(t[i]);
@@ -458,6 +487,7 @@ void routes() {
     j += ",\"hdrlen\":";  j += g_hdrLen;
     j += ",\"hdr\":\"";   appendHex(j, g_hdr, g_hdrLen); j += "\"";
     j += ",\"wirelen\":"; j += g_wireLen;
+    j += ",\"bmplen\":";  j += g_bmpLen;
     j += ",\"heap\":";    j += (uint32_t)ESP.getFreeHeap();
     j += ",\"sweep\":";   j += g_sweep.active ? "true" : "false";
     if (g_sweep.active) {
@@ -477,7 +507,7 @@ void routes() {
     const uint8_t* p = presetByName(n);
     if (!p) return r->reply(404, "text/plain", "no such preset");
     String s;
-    appendHex(s, p, kBmpLen);
+    appendHex(s, p, navlab::kBitmapBytes);
     PsychicResponse res(r);
     res.setContentType("text/plain");
     res.setContent(s.c_str());
@@ -497,16 +527,16 @@ void routes() {
     const int bar = b.indexOf('|');
     if (bar < 0) return r->reply(400, "text/plain", "expected <hdr>|<bmp>");
 
-    uint8_t hdr[kHdrMax], bmp[kBmpLen];
+    static uint8_t hdr[kHdrMax], bmp[kBmpMax];
     const int hn = parseHex(b.substring(0, bar), hdr, kHdrMax);
-    const int bn = parseHex(b.substring(bar + 1), bmp, kBmpLen);
+    const int bn = parseHex(b.substring(bar + 1), bmp, kBmpMax);
     if (hn <= 0) return r->reply(400, "text/plain", "bad header hex");
-    if (bn != static_cast<int>(kBmpLen))
-      return r->reply(400, "text/plain", "bitmap must be exactly 288 bytes");
+    if (bn <= 0) return r->reply(400, "text/plain", "bad bitmap hex, or past kBmpMax");
 
     memcpy(g_hdr, hdr, hn);
     g_hdrLen = static_cast<uint16_t>(hn);
-    memcpy(g_bmp, bmp, kBmpLen);
+    memcpy(g_bmp, bmp, bn);
+    g_bmpLen = static_cast<uint16_t>(bn);
 
     const char* err = sendNav();
     if (err) return r->reply(409, "text/plain", err);
@@ -536,11 +566,56 @@ void routes() {
                     res == affa::Result::Ok ? "text queued" : "setText refused");
   });
 
-  // The radio's own text message from the capture: 77 09 55 FF 31 01 + exactly 8 characters.
+  // The radio's own text message, every documented parameter exposed. Defaults are the
+  // capture's; ?mode=74 puts up the full window, ?fmt=60 switches to plain ASCII.
   g_server.on("/api/oemtext", HTTP_GET, [](PsychicRequest* r) {
+    const auto hx = [&](const char* k, uint8_t dflt) -> uint8_t {
+      return r->hasParam(k)
+                 ? static_cast<uint8_t>(strtoul(r->getParam(k)->value().c_str(), nullptr, 16))
+                 : dflt;
+    };
+    g_oem.mode  = hx("mode",  g_oem.mode);
+    g_oem.rds   = hx("rds",   g_oem.rds);
+    g_oem.fixed = hx("fixed", g_oem.fixed);
+    g_oem.src   = hx("src",   g_oem.src);
+    g_oem.fmt   = hx("fmt",   g_oem.fmt);
+    g_oem.ctl   = hx("ctl",   g_oem.ctl);
     const String t = r->hasParam("t") ? r->getParam("t")->value() : String("   1056 ");
+    logmsg("oem 0x77: %02X %02X %02X %02X %02X %02X \"%s\"", g_oem.mode, g_oem.rds,
+           g_oem.fixed, g_oem.src, g_oem.fmt, g_oem.ctl, t.c_str());
     const char* err = sendOemText(t);
     return r->reply(err ? 409 : 200, "text/plain", err ? err : "OEM 0x77 text sent");
+  });
+
+  // ---- the other screens, so their coexistence with 0x1F1 can be read off the glass ----
+  //
+  // EVERY ONE OF THESE IS A DIFFERENT SCREEN ON THE SAME 0x151. The question this answers
+  // is not whether they render — they do — but what each does to the nav pane: does the
+  // bitmap survive a menu, does the full window cover it, does a popup leave it alone.
+  g_server.on("/api/screen", HTTP_GET, [](PsychicRequest* r) {
+    const String w  = r->hasParam("w") ? r->getParam("w")->value() : String();
+    const String a  = r->hasParam("a") ? r->getParam("a")->value() : String("AFFA");
+    const String b  = r->hasParam("b") ? r->getParam("b")->value() : String("ROW ONE");
+    const String c  = r->hasParam("c") ? r->getParam("c")->value() : String("ROW TWO");
+    affa::Result res = affa::Result::NotSupported;
+
+    if      (w == "menu")       res = g_display.showMenu(a.c_str(), b.c_str(), c.c_str());
+    else if (w == "infomenu")   res = g_display.showInfoMenu(a.c_str(), b.c_str(), c.c_str());
+    else if (w == "fullscreen") res = g_display.showFullscreenText(a.c_str(), b.c_str(), c.c_str());
+    else if (w == "fshide")     res = g_display.hideFullscreenText();
+    else if (w == "popup")      res = g_display.showPopupText(a.c_str());
+    else if (w == "pophide")    res = g_display.hidePopup();
+    else if (w == "confirm")    res = g_display.showConfirmBox(a.c_str(), b.c_str(), c.c_str());
+    else if (w == "infopopup")  res = g_display.showInfoPopup(a.c_str(), b.c_str(), c.c_str());
+    else if (w == "infohide")   res = g_display.hideInfoPopup();
+    else if (w == "hi0")        res = g_display.highlightItem(0);
+    else if (w == "hi1")        res = g_display.highlightItem(1);
+    else return r->reply(400, "text/plain", "unknown screen");
+
+    logmsg("screen %s -> %d", w.c_str(), static_cast<int>(res));
+    String m(w);
+    m += (res == affa::Result::Ok) ? " queued" : " refused";
+    return r->reply(res == affa::Result::Ok ? 200 : 409, "text/plain", m.c_str());
   });
 
   g_server.on("/api/time", HTTP_GET, [](PsychicRequest* r) {
@@ -586,7 +661,7 @@ void routes() {
         : affa::carminat::kIdSetText;
     const bool addPci = !r->hasParam("pci") || r->getParam("pci")->value() != "0";
 
-    static uint8_t buf[kHdrMax + kBmpLen];
+    static uint8_t buf[kHdrMax + kBmpMax];
     const int n = parseHex(r->body(), buf, sizeof(buf));
     if (n <= 0) return r->reply(400, "text/plain", "bad hex");
 
@@ -728,7 +803,7 @@ void setup() {
   Serial.println("\n[navlab] 16_navlab — the 0x1F1 bench");
 
   memcpy(g_hdr, navlab::kOemHeader, sizeof(navlab::kOemHeader));
-  memcpy(g_bmp, navlab::kBmpGlobe, kBmpLen);
+  memcpy(g_bmp, navlab::kBmpGlobe, navlab::kBitmapBytes);
 
   // CAN BEFORE WIFI. A blocking WiFi.begin() with the controller already up banks hundreds
   // of thousands of bogus bus errors; bring the link up first and let it settle.
@@ -740,7 +815,7 @@ void setup() {
 
   startWifi();
   startHttp();
-  logmsg("boot: header and globe loaded, %u bitmap bytes", kBmpLen);
+  logmsg("boot: header and globe loaded, %u bitmap bytes", g_bmpLen);
 }
 
 void loop() {
@@ -750,4 +825,9 @@ void loop() {
   ElegantOTA.loop();
   sweepPoll();
   replayPoll();
+  // YIELD. Without this loop() spins at full rate, the IDLE task never runs, lwIP never
+  // reclaims closed sockets and the console stops answering part-way through a long sweep —
+  // which reads exactly like a crashed board. 1 ms is one FreeRTOS tick and costs nothing
+  // next to a 105 ms transfer.
+  delay(1);
 }

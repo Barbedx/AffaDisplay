@@ -65,32 +65,36 @@ function renault() {
   return g;
 }
 
-// Tryzub: three prongs, the outer pair sweeping inward into the belt, and the descender.
+// Tryzub — the Ukrainian coat of arms. Central tooth deliberately WIDER than the side
+// pair (roughly the emblem's own ratio), tight sweeps so the negative space between the
+// teeth stays open, a proper обруч, and a ніжка that flares before it points.
 function tryzub() {
-  const g = blank(), CX = 23.5, BELT0 = 26, BELT1 = 29;
+  const g = blank(), CX = 23.5, B0 = 27, B1 = 30;
   const set = (x, y) => {
     x = Math.round(x); y = Math.round(y);
     if (x >= 0 && x < W && y >= 0 && y < H) g[y][x] = 1;
   };
-  const prong = (cx, y0, y1, halfw, tip) => {
+  const prong = (cx, y0, y1, hw, tip) => {
     for (let y = y0; y <= y1; y++) {
-      const t = (y - y0) / tip, hw = t >= 1 ? halfw : 0.5 + (halfw - 0.5) * t;
-      for (let x = Math.ceil(cx - hw); x <= Math.floor(cx + hw); x++) set(x, y);
+      const t = (y - y0) / tip, w = t >= 1 ? hw : 0.5 + (hw - 0.5) * t;
+      for (let x = Math.ceil(cx - w); x <= Math.floor(cx + w); x++) set(x, y);
     }
   };
   const arc = (ccx, ccy, r, th, a0, a1, ymax) => {
-    for (let a = a0; a <= a1; a += 0.3)
-      for (let dd = -th / 2; dd <= th / 2; dd += 0.3) {
-        const rad = a * Math.PI / 180, y = ccy + (r + dd) * Math.sin(rad);
-        if (y <= ymax) set(ccx + (r + dd) * Math.cos(rad), y);
+    for (let a = a0; a <= a1; a += 0.25)
+      for (let d = -th / 2; d <= th / 2; d += 0.25) {
+        const rad = a * Math.PI / 180, y = ccy + (r + d) * Math.sin(rad);
+        if (y <= ymax) set(ccx + (r + d) * Math.cos(rad), y);
       }
   };
-  prong(CX, 3, BELT1, 3.0, 6);                    // central prong, down through the belt
-  prong(9.5, 9, 19, 2.3, 5);                      // outer prong (left half only)
-  arc(18.0, 18.5, 8.7, 4.6, 90, 180, BELT1);      // its inward sweep
-  for (let y = BELT0; y <= BELT1; y++) for (let x = 11; x <= 36; x++) set(x, y);
-  for (let y = BELT1 + 1; y <= 40; y++) {         // the descender, tapering to a point
-    const hw = 3.0 * (1 - (y - BELT1 - 1) / 12.0);
+  prong(CX, 2, B1, 3.5, 7);                        // центральний зуб
+  prong(8.5, 10, 20, 2.4, 5);                      // бічний зуб (left; mirrored below)
+  arc(17.5, 19.5, 9.2, 4.8, 88, 180, B1);          // its sweep into the обруч
+  for (let y = B0; y <= B1; y++) for (let x = 10; x <= 37; x++) set(x, y);   // обруч
+  for (let y = B1 + 1; y <= 37; y++) for (let x = 21; x <= 26; x++) set(x, y);
+  for (let y = 38; y <= 40; y++) for (let x = 19; x <= 28; x++) set(x, y);   // the flare
+  for (let y = 41; y <= 44; y++) {
+    const hw = 4.5 * (1 - (y - 41) / 4.2);
     for (let x = Math.ceil(CX - hw); x <= Math.floor(CX + hw); x++) set(x, y);
   }
   for (let y = 0; y < H; y++) for (let x = 0; x < 24; x++) if (g[y][x]) g[y][47 - x] = 1;
