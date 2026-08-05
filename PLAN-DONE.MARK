@@ -1,0 +1,56 @@
+# PLAN-DONE
+
+Console rebuild finished and verified on the bench panel at 192.168.100.97.
+
+commit    05f97a1  "Rebuild the console: one command route, six tabs, every button verifiable"
+branch    main
+tests     272/272 host tests pass  (pio test -e native)
+build     ex17_mediascreen  RAM 19.4%  Flash 63.9%
+flashed   yes, over OTA, and every command exercised against the live panel
+
+## What was asked, and where it is
+
+| asked for | where |
+|---|---|
+| normal command pattern | `GET /api/cmd?op=<name>` — one route, one result shape `{ok,op,msg}` |
+| load bitmaps + animations + editor, send with one command | Bitmap tab; `POST /api/bmp` takes 288 bytes of hex |
+| drop now-playing, use random | gone; fullscreen uses random phrases |
+| setText with scroll options | Text tab — scroll is a checkbox, not a fact |
+| icons on setText | `setTextStyled(text, icon, src, fmt)` — new in the library |
+| power on/off | Text tab |
+| clock: input + browser | Text tab, HHMM field + browser-clock button |
+| showMenu, highlight 1/2 | Menus tab |
+| info menu, per-row running | Menus tab, a scroll checkbox per row |
+| popup open/close with icon select | Text tab, same icon set as setText |
+| fullscreen, random full width | Text tab |
+| confirm box with Yes/No | Menus tab — **see the caveat below** |
+| change panel family | Settings tab (a BOOT choice, stored in NVS) |
+| wire log with export | Wire tab, exports `.tsv` |
+| test menu for buttons | Keys tab — live, decoded, nothing emulated |
+| overall settings page | Settings tab |
+| tabs, fast, embedded | six tabs, one page, no external requests |
+
+## Library additions (display-related only)
+
+* `affa::keyName(Key)` / `affa::edgeName(KeyEdge)`
+* `CarminatDisplay::setTextStyled(text, icon, srcIcon, fmt)` — the four documented `0x77`
+  header bytes, previously hard-coded
+* `carminat::kButtonsNone/Ok/YesNo`, `kButtonLabelLen`, `kSelectModeBox/List`
+
+Earlier in the session, also landed: `enqueueExternal`, `enqueueSplit`, `showNavBitmap`,
+`navTick`, `showMenuN`, `selectMenuItem`, `lastRendered()` / `lastRenderedMs()`.
+
+## NOT DONE — read before assuming
+
+**`showConfirmBox` is a one-button OK box.** It emits `21 05 00 00 01 49`; byte 4 is the
+button count, confirmed on four OEM captures with 0, 1 and 2 buttons. The real Yes/No form is
+`21 05 01 00 02 49` with two 6-byte labels before the body, and **the library has no builder
+for it**. The console's "select 0 / select 1" buttons send `29 05 <n>`, which is how a box
+moves its selection — on a one-button box only index 0 exists, so index 1 doing nothing is
+the expected answer, not a fault. The console says this where the buttons are.
+
+## The standing caveat
+
+This panel ACKs everything. All 23 ops returning `ok` proves the transport worked and
+nothing else. Every button still needs confirming against the glass — that is what the
+Keys and Wire tabs are for.
