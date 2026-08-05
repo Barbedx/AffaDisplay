@@ -2,7 +2,7 @@
 //
 //   node tools/gen_navicons.js
 //
-// Three 48x48 monochrome bitmaps in the OEM's own format: row-major, 6 bytes per row,
+// Eight 48x48 monochrome bitmaps in the OEM's own format: row-major, 6 bytes per row,
 // MSB-first (bit 7 of byte 0 is the leftmost pixel of the row). 288 bytes each.
 //
 // The globe is not drawn — it is LIFTED, byte for byte, out of the OEM head unit's own
@@ -11,10 +11,12 @@
 // re-derives it from the CSV rather than trusting the checked-in bytes, so if the capture
 // is ever re-cut the icon follows.
 //
-// The other two are generated geometry, because there is nothing to lift them from.
+// The tryzub is TRACED from tools/assets/tryzub.png, because a hand-drawn one came out
+// recognisably a trident and recognisably not the герб. The rest are generated geometry.
 
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 
 const W = 48, H = 48, STRIDE = 6, BYTES = STRIDE * H;   // 288
 const REPO = path.join(__dirname, '..');
@@ -65,41 +67,94 @@ function renault() {
   return g;
 }
 
-// Tryzub — the Ukrainian coat of arms. Central tooth deliberately WIDER than the side
-// pair (roughly the emblem's own ratio), tight sweeps so the negative space between the
-// teeth stays open, a proper обруч, and a ніжка that flares before it points.
-function tryzub() {
-  const g = blank(), CX = 23.5, B0 = 27, B1 = 30;
-  const set = (x, y) => {
-    x = Math.round(x); y = Math.round(y);
-    if (x >= 0 && x < W && y >= 0 && y < H) g[y][x] = 1;
-  };
-  const prong = (cx, y0, y1, hw, tip) => {
-    for (let y = y0; y <= y1; y++) {
-      const t = (y - y0) / tip, w = t >= 1 ? hw : 0.5 + (hw - 0.5) * t;
-      for (let x = Math.ceil(cx - w); x <= Math.floor(cx + w); x++) set(x, y);
-    }
-  };
-  const arc = (ccx, ccy, r, th, a0, a1, ymax) => {
-    for (let a = a0; a <= a1; a += 0.25)
-      for (let d = -th / 2; d <= th / 2; d += 0.25) {
-        const rad = a * Math.PI / 180, y = ccy + (r + d) * Math.sin(rad);
-        if (y <= ymax) set(ccx + (r + d) * Math.cos(rad), y);
-      }
-  };
-  prong(CX, 2, B1, 3.5, 7);                        // центральний зуб
-  prong(8.5, 10, 20, 2.4, 5);                      // бічний зуб (left; mirrored below)
-  arc(17.5, 19.5, 9.2, 4.8, 88, 180, B1);          // its sweep into the обруч
-  for (let y = B0; y <= B1; y++) for (let x = 10; x <= 37; x++) set(x, y);   // обруч
-  for (let y = B1 + 1; y <= 37; y++) for (let x = 21; x <= 26; x++) set(x, y);
-  for (let y = 38; y <= 40; y++) for (let x = 19; x <= 28; x++) set(x, y);   // the flare
-  for (let y = 41; y <= 44; y++) {
-    const hw = 4.5 * (1 - (y - 41) / 4.2);
-    for (let x = Math.ceil(CX - hw); x <= Math.floor(CX + hw); x++) set(x, y);
+// ---------------------------------------------------------------------------
+// Tracing a PNG
+// ---------------------------------------------------------------------------
+// The tryzub is NOT drawn here. Drawing one by hand produced something that was
+// recognisably a trident and recognisably not the герб — the proportions of the real
+// emblem are not something you land by tuning arc radii. So the actual artwork goes in
+// tools/assets/ and this traces it, which means any future logo takes the same path
+// instead of another evening of parametric guessing.
+//
+// Minimal decoder: 8-bit, non-interlaced, any colour type. That is what the asset is, and
+// a general PNG library is not worth a dependency for one file.
+function decodePNG(buf) {
+  if (buf.readUInt32BE(0) !== 0x89504E47) throw new Error("not a png");
+  let p = 8, w = 0, h = 0, bd = 0, ct = 0, il = 0, idat = [], plte = null, trns = null;
+  while (p < buf.length) {
+    const len = buf.readUInt32BE(p), type = buf.toString("ascii", p + 4, p + 8);
+    const data = buf.slice(p + 8, p + 8 + len);
+    if (type === "IHDR") { w = data.readUInt32BE(0); h = data.readUInt32BE(4); bd = data[8]; ct = data[9]; il = data[12]; }
+    else if (type === "IDAT") idat.push(data);
+    else if (type === "PLTE") plte = data;
+    else if (type === "tRNS") trns = data;
+    else if (type === "IEND") break;
+    p += 12 + len;
   }
-  for (let y = 0; y < H; y++) for (let x = 0; x < 24; x++) if (g[y][x]) g[y][47 - x] = 1;
+  if (il) throw new Error("interlaced png unsupported");
+  if (bd !== 8) throw new Error("bit depth " + bd + " unsupported");
+  const ch = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[ct];
+  if (!ch) throw new Error("colour type " + ct);
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = w * ch, out = Buffer.alloc(h * stride);
+  let q = 0;
+  for (let y = 0; y < h; y++) {
+    const f = raw[q++], line = raw.slice(q, q + stride); q += stride;
+    const cur = out.slice(y * stride, (y + 1) * stride);
+    const prev = y ? out.slice((y - 1) * stride, y * stride) : null;
+    for (let i = 0; i < stride; i++) {
+      const A = i >= ch ? cur[i - ch] : 0, B = prev ? prev[i] : 0;
+      const C = (prev && i >= ch) ? prev[i - ch] : 0;
+      let v = line[i];
+      if (f === 1) v += A; else if (f === 2) v += B; else if (f === 3) v += (A + B) >> 1;
+      else if (f === 4) {
+        const pp = A + B - C, pa = Math.abs(pp - A), pb = Math.abs(pp - B), pc = Math.abs(pp - C);
+        v += (pa <= pb && pa <= pc) ? A : (pb <= pc ? B : C);
+      }
+      cur[i] = v & 0xFF;
+    }
+  }
+  const lum = new Float32Array(w * h), alpha = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    let r, gg, b, al = 255;
+    if (ct === 0) { r = gg = b = out[i]; }
+    else if (ct === 2) { r = out[i*3]; gg = out[i*3+1]; b = out[i*3+2]; }
+    else if (ct === 3) { const ix = out[i]; r = plte[ix*3]; gg = plte[ix*3+1]; b = plte[ix*3+2]; if (trns && ix < trns.length) al = trns[ix]; }
+    else if (ct === 4) { r = gg = b = out[i*2]; al = out[i*2+1]; }
+    else { r = out[i*4]; gg = out[i*4+1]; b = out[i*4+2]; al = out[i*4+3]; }
+    lum[i] = 0.299*r + 0.587*gg + 0.114*b; alpha[i] = al;
+  }
+  return { w, h, lum, alpha };
+}
+
+// Crop to the artwork, fit it into 48x48 keeping the aspect, and threshold on how much of
+// each destination cell the ink covers. COVERAGE, not nearest-neighbour: at this scale one
+// destination pixel is ~15 source pixels across, and point-sampling an outline drawing
+// drops whole strokes depending on where the grid lands. 0.30 keeps the strokes one pixel
+// wide and the enclosed shapes open; lower fills the gaps in, higher breaks the outline.
+function traceImage(file, coverage) {
+  const img = decodePNG(fs.readFileSync(file));
+  const ink = (x, y) => { const i = y*img.w + x; return img.alpha[i] > 128 && img.lum[i] < 140; };
+  let x0 = img.w, y0 = img.h, x1 = -1, y1 = -1;
+  for (let y = 0; y < img.h; y++) for (let x = 0; x < img.w; x++) if (ink(x, y)) {
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  const cw = x1 - x0 + 1, chh = y1 - y0 + 1;
+  const scale = Math.min(W / cw, H / chh);
+  const dw = Math.round(cw * scale), dh = Math.round(chh * scale);
+  const ox = Math.floor((W - dw) / 2), oy = Math.floor((H - dh) / 2);
+  const g = blank();
+  for (let dy = 0; dy < dh; dy++) for (let dx = 0; dx < dw; dx++) {
+    const sx0 = x0 + Math.floor(dx * cw / dw), sx1 = Math.max(x0 + Math.floor((dx+1) * cw / dw), sx0 + 1);
+    const sy0 = y0 + Math.floor(dy * chh / dh), sy1 = Math.max(y0 + Math.floor((dy+1) * chh / dh), sy0 + 1);
+    let n = 0, t = 0;
+    for (let sy = sy0; sy < sy1; sy++) for (let sx = sx0; sx < sx1; sx++) { t++; if (ink(sx, sy)) n++; }
+    if (t && n / t >= coverage) g[oy + dy][ox + dx] = 1;
+  }
   return g;
 }
+
+const tryzub = () => traceImage(path.join(__dirname, "assets", "tryzub.png"), 0.30);
 
 // ---------------------------------------------------------------------------
 // A 5x7 font, and the three "instrument" images built from it
