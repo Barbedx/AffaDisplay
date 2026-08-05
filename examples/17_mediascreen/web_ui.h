@@ -62,6 +62,7 @@ small{color:var(--dim)}
     <button onclick="fetch('/api/scene?on=1').then(poll)">resume sending</button>
     <button onclick="fetch('/api/scene?on=0').then(poll)">stop sending</button>
     <button onclick="sc('blank')">blank the pane</button>
+    <button class="pri" onclick="fetch('/api/opening').then(poll)">replay OEM opening</button>
   </div>
   <p><small>
     The first seven are drawn on the device from a frame counter; the rest are the generated
@@ -335,7 +336,8 @@ async function poll(){
     document.getElementById('st').innerHTML=
       'phase <span class="k">'+s.phase+'</span> &middot; '+
       (s.live?'<span class="g">link up</span>':'<span class="r">LINK DOWN</span>')+
-      ' &middot; <span class="k">'+s.scene+'</span>'+(s.paneon?'':' <span class="w">(pane off)</span>')+
+      ' &middot; '+(s.opened?'':'<span class="r">NOT OPENED</span> &middot; ')+
+      '<span class="k">'+s.scene+'</span>'+(s.paneon?'':' <span class="w">(pane off)</span>')+
       ' &middot; '+(s.playing?'<span class="g">&#9654; playing</span>':'&#9646;&#9646; paused')+
       ' &middot; heap '+s.heap;
     document.getElementById('bud').innerHTML=

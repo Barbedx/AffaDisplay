@@ -143,6 +143,31 @@ uint8_t  g_menuBuf[affa::CarminatDisplay::menuScreenBytes(affa::carminat::kMenuM
 volatile bool  g_menuBusy = false;
 affa::TxTicket g_menuTicket = affa::kNoTicket;
 
+// ---------------------------------------------------------------------------
+// THE OPENING — why the pane stayed blank until this existed
+// ---------------------------------------------------------------------------
+// 16_navlab only ever put a bitmap on the glass AFTER replaying the OEM's opening, and this
+// example shipped without it: it sent text and images into a panel that had never been told
+// to show the nav pane, so the title marqueed happily and the pane stayed exactly as it was.
+//
+// The captured order, and all of it matters:
+//
+//   52 09 00   display ON. The three "display off" traces send 52 00 00 and NOTHING follows
+//              them — no text, no bitmap. This is the gate.
+//   54 01      unexplained, always sent
+//   54 03      closes the full window. A 0x77 text sent while the full window is up freezes
+//              the main screen, so this is what makes the windowed layout current.
+//   text       then the radio's own line
+//   0x1F1      and only then the image
+//
+// Runs once on reaching Ready and again on any resync, because a panel that has taken the
+// session away has forgotten all of it.
+struct Opening {
+  bool     done   = false;
+  uint8_t  step   = 0;
+  uint32_t nextMs = 0;
+} g_open;
+
 bool     g_paneOn        = true;
 // Send the next frame even if it is identical to the last one. Set by a scene change or a
 // resume, because "show me this" must reach the glass whether or not the pixels differ.
@@ -292,9 +317,36 @@ void onDone(affa::TxTicket t, affa::Result r, void*) {
   else { ++g_framesFail; logmsg("frame FAILED (%d)", static_cast<int>(r)); }
 }
 
+void openingPoll() {
+  if (g_open.done || !g_carminat) return;
+  if (g_base->phase() != affa::Phase::Ready) return;
+  if (static_cast<int32_t>(::millis() - g_open.nextMs) < 0) return;
+
+  switch (g_open.step) {
+    case 0: (void)g_panel->setPower(true);        logmsg("opening 1/3: display ON"); break;
+    case 1: { const uint8_t p[3] = {0x02, 0x54, 0x01};
+              (void)g_base->enqueue(affa::carminat::kIdSetText, p, sizeof(p));
+              logmsg("opening 2/3: 54 01"); break; }
+    case 2: { const uint8_t p[3] = {0x02, 0x54, 0x03};
+              (void)g_base->enqueue(affa::carminat::kIdSetText, p, sizeof(p));
+              logmsg("opening 3/3: 54 03 (close full window)"); break; }
+    default:
+      g_open.done  = true;
+      g_forceFrame = true;             // and push the first image into a panel now ready for it
+      logmsg("opening complete - pane should accept images");
+      return;
+  }
+  ++g_open.step;
+  g_open.nextMs = ::millis() + 250;
+}
+
 void onSyncChanged(affa::SyncState s, void*) {
   logmsg("sync 0x%02X%s", static_cast<unsigned>(s),
          affa::hasFlag(s, affa::SyncState::Failed) ? " FAILED" : "");
+  // A lost session means the panel has forgotten the opening. Replay it.
+  if (affa::hasFlag(s, affa::SyncState::Failed)) {
+    g_open.done = false; g_open.step = 0; g_open.nextMs = 0;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +433,7 @@ void routes() {
     j += ",\"avgms\":";    j += (g_framesOk ? g_txMsAccum / g_framesOk : 0);
     j += ",\"heap\":";     j += (uint32_t)ESP.getFreeHeap();
     j += ",\"nav\":";      j += g_carminat ? "true" : "false";
+    j += ",\"opened\":";   j += g_open.done ? "true" : "false";
     j += "}";
     PsychicResponse res(r);
     res.setContentType("application/json");
@@ -406,6 +459,13 @@ void routes() {
     String m(w);
     m += (res == affa::Result::Ok) ? " ok" : " refused";
     return r->reply(res == affa::Result::Ok ? 200 : 409, "text/plain", m.c_str());
+  });
+
+  // Replay the opening on demand — the first thing to try when the pane will not draw.
+  g_server.on("/api/opening", HTTP_GET, [](PsychicRequest* r) {
+    g_open.done = false; g_open.step = 0; g_open.nextMs = ::millis();
+    logmsg("opening: replay requested");
+    return r->reply(200, "text/plain", "replaying the OEM opening");
   });
 
   g_server.on("/api/scene", HTTP_GET, [](PsychicRequest* r) {
@@ -583,6 +643,7 @@ void setup() {
 void loop() {
   g_base->poll();
   ElegantOTA.loop();
+  openingPoll();          // BEFORE anything is drawn; the pane will not accept images without it
 
   const uint32_t now = millis();
 
