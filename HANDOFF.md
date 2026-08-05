@@ -19,6 +19,11 @@ Two things landed, and the second is the bigger one:
 Read this file first, then the refactor plan, then `docs/BENCH-VERIFIED.md` for what has
 actually been seen on glass as opposed to what the code believes.
 
+**THE ONE THING STILL OWED IS A LONG SOAK**, and it has been owed all day. Four attempts,
+every one cut short by reflashing the board underneath it — best uninterrupted run 31.7
+minutes, zero drops in all of them. Flash `ex09_golden`, walk away, read the third line of
+the console when you come back. Everything else here is finished or honestly labelled.
+
 **0.5.0 is a BREAKING release.** `SyncProfile` lost six fields; a downstream profile that
 set any of them will not compile, which is deliberate — every one of them encoded a fact the
 captures have since settled, and silently ignoring them would be worse. See
@@ -80,10 +85,9 @@ wire-log download, WiFi setup and OTA all work from the web console.
 | protocol truth | `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`, derived from `docs/captures/*.csv` |
 | what is proven | `docs/BENCH-VERIFIED.md` — and it is careful about what is *not* |
 
-**Whatever is on the board right now is probably not `09_golden`.** The day ended with
-`12_ulclock` flashed — the clock probe, which cycles 23 candidate frames and will look like
-nonsense on the glass until you know what it is. Check before assuming, and reflash before
-starting a soak.
+**THE BOARD HAS `15_iphone` ON IT**, which advertises over BLE and shows a status screen.
+It is not `09_golden` and it is not soaking. Check before assuming; reflash before starting
+anything.
 
 The C3 SuperMini at `192.168.100.85` **cannot receive** — its CANRX reads permanently dominant.
 Diagnosis is in memory and in the ground-truth doc; do not debug firmware against it.
@@ -138,8 +142,8 @@ http://192.168.100.97/          ->   phase / drops / reason on the third line
 http://192.168.100.97/deregistered.txt        the frames from BEFORE the first drop
 ```
 
-Three soaks were attempted and **all three were cut short by reflashing the board underneath
-them** — 31.7, 20.8 and 15.5 minutes, zero drops in every one. Against a build that lost
+Four soaks were attempted and **every one was cut short by reflashing the board underneath
+it** — 31.7, 20.8, 15.5 and 5.6 minutes, zero drops in all of them. Against a build that lost
 fourteen sessions in 96 minutes that is encouraging and *nothing more*: half an hour clean is
 only about 1 % surprising if the rate were unchanged, the observed intervals ran from 15 s to
 1409 s so even that number is generous, and **nothing in the refactor has a mechanism that
@@ -184,7 +188,35 @@ If you do want to push further, the cheap next step is a **`70` probe sweep over
 function ids** — the panel answers `<id>|0x400 74` for each function it accepts, so it will
 *tell you* its table instead of being guessed at.
 
-### 4. Then the two open items below
+### 4. The iPhone example, if you want to finish it
+
+`examples/15_iphone` **works up to the point where a phone joins, and no further.** Proven on
+hardware: NimBLE, WiFi, an HTTP server and a live CAN session with the panel at `Phase::Ready`
+all at once — which was the question it was written to answer. Not proven: it has never
+paired, so the whole CTS read path is untested code.
+
+**Do this before touching the code again:** scan with **nRF Connect** or LightBlue and look at
+the raw advertising packet. That separates *iOS is filtering us* from *the packet is wrong*,
+and those have completely different fixes. Three flashes went by guessing between them.
+
+Three bugs were found and fixed on the way, and every one of them was already solved in
+MegaOpen — the files were open and the hardware still had to say it three times:
+
+| symptom | cause |
+|---|---|
+| `abort()` in `coex_core_enable` | `WiFi.setSleep(false)`. **One radio**: the coexistence scheduler takes its slices out of WiFi's modem-sleep windows, so disabling modem sleep leaves it nothing to give BLE and it refuses to start. Sleep ON is a precondition, not a compromise |
+| connects, then silence for ever | nobody called `secureConnection(async=true)`. iOS will not bond unasked, and without a bond it withholds the Current Time Service. Async is mandatory — the sync form waits `BLE_NPL_TIME_FOREVER` inside a host callback |
+| never appears in Settings | a generic BLE peripheral **is not listed by iOS at all** — only HID, audio and recognised profiles — *and* the advertisement had no flags byte. Hence the HID keyboard (the price of admission, not a feature) plus an explicit `setFlags(0x06)` |
+
+Also: use `server->getClient(handle)` for a phone already connected to you, never
+`NimBLEDevice::createClient()`, which tries to open a second outbound link.
+
+**AMS is not in it.** Track titles need entity-update subscriptions, an attribute list
+written to the phone and truncation handling. The seam is `pushToPanel()` — hand it a title
+instead of a clock and the display half needs no changes. Port from MegaOpen's
+`src/apple_media_service.cpp`.
+
+### 5. Then the two open items below
 
 Neither blocks anything. The half-open-session hole needs a rule no capture provides; the
 ~7-minute drop now reports itself.
