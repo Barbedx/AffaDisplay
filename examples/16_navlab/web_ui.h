@@ -57,6 +57,10 @@ small{color:var(--dim)}
       <option value="clock">clock</option>
       <option value="temp">temperature</option>
       <option value="volts">volts</option>
+      <option value="dash">dashboard - 48 chars</option>
+      <option value="gauges">gauges + bars</option>
+      <option value="combo">icons + values</option>
+      <option value="fontsheet">font sheet</option>
       <option value="checker">checker (orientation probe)</option>
     </select>
     <button onclick="loadPreset()">load</button>
@@ -175,9 +179,37 @@ small{color:var(--dim)}
     <button onclick="scr('infohide')">hide info</button>
   </div>
   <p><small>
-    Put the bitmap up first, then walk these. The question is not whether they render &mdash;
-    it is what each one does to the nav pane: does the bitmap survive a menu, does the full
-    window cover it, does a popup leave it alone.
+    <span class="g">Confirmed:</span> the info menu shows <b>with</b> the bitmap on one
+    screen, and the image can be changed underneath an open popup and is seen to change.
+    The nav pane is a real independent layer, not a screen mode.
+  </small></p>
+
+  <h2 style="margin-top:16px">How wide is the field?</h2>
+  <div class="row">
+    <select id="rw">
+      <option value="infomenu">info menu</option>
+      <option value="menu">menu</option>
+      <option value="text">setText</option>
+      <option value="fullscreen">fullscreen</option>
+      <option value="confirm">confirm box</option>
+      <option value="infopopup">info popup</option>
+      <option value="popup">popup</option>
+    </select>
+    <small>n</small><input id="rn" type="number" value="40" min="1" max="40" style="width:58px">
+    <button class="pri" onclick="get('/api/ruler?w='+rw.value+'&n='+rn.value)">RULER</button>
+  </div>
+  <div class="row">
+    <small>grow</small><input id="lf" type="number" value="1" style="width:52px">
+    <small>to</small><input id="lt" type="number" value="32" style="width:52px">
+    <small>ms</small><input id="lm" type="number" value="1200" style="width:64px">
+    <button class="warn" onclick="get('/api/lensweep?w='+rw.value+'&from='+lf.value+'&to='+lt.value+'&ms='+lm.value)">start</button>
+    <button onclick="get('/api/lensweep?stop=1')">stop</button>
+  </div>
+  <pre style="font-size:10px">----+----1----+----2----+----3----+----4</pre>
+  <p><small>
+    The ruler puts a digit at every tenth position, so <b>the last character still on the
+    glass is the answer</b> &mdash; one send, no bisection. Use grow instead when a screen
+    truncates silently: watch for the step that changes nothing.
   </small></p>
 </section>
 

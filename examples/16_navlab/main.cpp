@@ -1,18 +1,20 @@
 // 16_navlab — a bench for the one channel nobody has ever written to: Carminat `0x1F1`.
 //
 // ############################################################################
-// # STATUS: UNPROVEN ON GLASS. Nothing below has been sent to a real panel.  #
+// # STATUS: IT RENDERS. Confirmed on the bench panel 2026-08-05.             #
 // #                                                                          #
-// # What IS solid is the input: docs/captures/"aknowledge on on display.csv" #
-// # holds the OEM head unit's complete 0x1F1 transfer — 44 frames, sequence  #
-// # 21..2F 20..2F 20..2B, zero gaps, 302 declared bytes. It decodes cleanly   #
-// # as a 14-byte header plus a 48x48 monochrome bitmap, and the bitmap draws  #
-// # the idle navigation globe. That decode is why this example exists.        #
+// # The 302 bytes go out and the bitmap appears in the nav pane. Geometry     #
+// # (48x48), row order (top-down) and bit order (MSB-first) are all right.    #
+// # A transfer takes 47-54 ms — twice the OEM's 105 ms — 6/6 Ok, zero errors. #
 // #                                                                          #
-// # What is NOT known: whether the panel accepts that message from US, what   #
-// # the four unexplained header bytes do, and whether the seven-byte string   #
-// # slot at offset 4 reaches the glass. Those are questions for the panel,    #
-// # not for a reader, and this example is the instrument for asking them.     #
+// # AND IT COEXISTS. The info menu shows WITH the bitmap on one screen, and   #
+// # the image can be changed underneath an open popup and is seen to change.  #
+// # So the nav pane is a real independent layer, not a screen mode.           #
+// #                                                                          #
+// # CONFIRMED NOT WORKING: bytes 4-10 as text. ASCII in that slot puts        #
+// # nothing on the glass, so it is either not a string field or needs one of  #
+// # the four unknown bytes set first. That is the sharpest question left.     #
+// # Still open: whether bytes 12/13 are honoured as real geometry.            #
 // ############################################################################
 //
 // THE POINT OF A LAB IS THAT YOU CHANGE ONE THING. Everything the OEM sent is reproduced
@@ -410,6 +412,53 @@ void replayPoll() {
 }
 
 // ---------------------------------------------------------------------------
+// Screens, and how wide their fields are
+// ---------------------------------------------------------------------------
+// A COLUMN RULER, the oldest trick there is: a digit every tenth position, so whatever
+// survives truncation reads its own length off the glass. Beats a bisection search, and
+// beats counting a row of identical characters at 48 px.
+const char kRuler[] = "----+----1----+----2----+----3----+----4";
+
+affa::Result sendScreen(const String& w, const String& a, const String& b, const String& c) {
+  affa::Result res = affa::Result::NotSupported;
+  if      (w == "menu")       res = g_display.showMenu(a.c_str(), b.c_str(), c.c_str());
+  else if (w == "infomenu")   res = g_display.showInfoMenu(a.c_str(), b.c_str(), c.c_str());
+  else if (w == "fullscreen") res = g_display.showFullscreenText(a.c_str(), b.c_str(), c.c_str());
+  else if (w == "fshide")     res = g_display.hideFullscreenText();
+  else if (w == "popup")      res = g_display.showPopupText(a.c_str());
+  else if (w == "pophide")    res = g_display.hidePopup();
+  else if (w == "confirm")    res = g_display.showConfirmBox(a.c_str(), b.c_str(), c.c_str());
+  else if (w == "infopopup")  res = g_display.showInfoPopup(a.c_str(), b.c_str(), c.c_str());
+  else if (w == "infohide")   res = g_display.hideInfoPopup();
+  else if (w == "text")       res = g_display.setText(a.c_str());
+  else if (w == "hi0")        res = g_display.highlightItem(0);
+  else if (w == "hi1")        res = g_display.highlightItem(1);
+  logmsg("screen %s(%u) -> %d", w.c_str(), a.length(), static_cast<int>(res));
+  return res;
+}
+
+struct LenSweep {
+  bool     active = false;
+  String   what;
+  uint16_t cur = 1, to = 32;
+  uint32_t nextMs = 0, periodMs = 1200;
+} g_len;
+
+void lenPoll() {
+  if (!g_len.active) return;
+  if (static_cast<int32_t>(::millis() - g_len.nextMs) < 0) return;
+  if (g_len.cur > g_len.to) {
+    g_len.active = false;
+    logmsg("lensweep: done at %u", g_len.to);
+    return;
+  }
+  const String s = String(kRuler).substring(0, g_len.cur);
+  (void)sendScreen(g_len.what, s, s, s);
+  ++g_len.cur;
+  g_len.nextMs = ::millis() + g_len.periodMs;
+}
+
+// ---------------------------------------------------------------------------
 // Library callbacks — these run on the LIBRARY'S task, not on loop()
 // ---------------------------------------------------------------------------
 void onTap(const affa::Frame& f, affa::Direction d, void*) {
@@ -593,29 +642,49 @@ void routes() {
   // is not whether they render — they do — but what each does to the nav pane: does the
   // bitmap survive a menu, does the full window cover it, does a popup leave it alone.
   g_server.on("/api/screen", HTTP_GET, [](PsychicRequest* r) {
-    const String w  = r->hasParam("w") ? r->getParam("w")->value() : String();
-    const String a  = r->hasParam("a") ? r->getParam("a")->value() : String("AFFA");
-    const String b  = r->hasParam("b") ? r->getParam("b")->value() : String("ROW ONE");
-    const String c  = r->hasParam("c") ? r->getParam("c")->value() : String("ROW TWO");
-    affa::Result res = affa::Result::NotSupported;
-
-    if      (w == "menu")       res = g_display.showMenu(a.c_str(), b.c_str(), c.c_str());
-    else if (w == "infomenu")   res = g_display.showInfoMenu(a.c_str(), b.c_str(), c.c_str());
-    else if (w == "fullscreen") res = g_display.showFullscreenText(a.c_str(), b.c_str(), c.c_str());
-    else if (w == "fshide")     res = g_display.hideFullscreenText();
-    else if (w == "popup")      res = g_display.showPopupText(a.c_str());
-    else if (w == "pophide")    res = g_display.hidePopup();
-    else if (w == "confirm")    res = g_display.showConfirmBox(a.c_str(), b.c_str(), c.c_str());
-    else if (w == "infopopup")  res = g_display.showInfoPopup(a.c_str(), b.c_str(), c.c_str());
-    else if (w == "infohide")   res = g_display.hideInfoPopup();
-    else if (w == "hi0")        res = g_display.highlightItem(0);
-    else if (w == "hi1")        res = g_display.highlightItem(1);
-    else return r->reply(400, "text/plain", "unknown screen");
-
-    logmsg("screen %s -> %d", w.c_str(), static_cast<int>(res));
+    const String w = r->hasParam("w") ? r->getParam("w")->value() : String();
+    const String a = r->hasParam("a") ? r->getParam("a")->value() : String("AFFA");
+    const String b = r->hasParam("b") ? r->getParam("b")->value() : String("ROW ONE");
+    const String c = r->hasParam("c") ? r->getParam("c")->value() : String("ROW TWO");
+    if (w.length() == 0) return r->reply(400, "text/plain", "unknown screen");
+    const affa::Result res = sendScreen(w, a, b, c);
     String m(w);
     m += (res == affa::Result::Ok) ? " queued" : " refused";
     return r->reply(res == affa::Result::Ok ? 200 : 409, "text/plain", m.c_str());
+  });
+
+  // HOW WIDE IS THE FIELD, in one send. A column ruler puts a digit at every tenth
+  // position, so the last character still on the glass IS the answer — no bisection, no
+  // rebuild, and it works the same on every screen this panel has.
+  g_server.on("/api/ruler", HTTP_GET, [](PsychicRequest* r) {
+    const String w = r->hasParam("w") ? r->getParam("w")->value() : String("infomenu");
+    long n = r->hasParam("n") ? strtol(r->getParam("n")->value().c_str(), nullptr, 10) : 40;
+    if (n < 1) n = 1;
+    if (n > static_cast<long>(strlen(kRuler))) n = strlen(kRuler);
+    const String s = String(kRuler).substring(0, n);
+    const affa::Result res = sendScreen(w, s, s, s);
+    logmsg("ruler %s n=%ld -> %d", w.c_str(), n, static_cast<int>(res));
+    return r->reply(res == affa::Result::Ok ? 200 : 409, "text/plain",
+                    res == affa::Result::Ok ? "ruler sent - now count on the glass"
+                                            : "refused");
+  });
+
+  // And the slow version, for a screen that truncates silently rather than visibly: grow
+  // the string one character per step and watch for the send that changes nothing.
+  g_server.on("/api/lensweep", HTTP_GET, [](PsychicRequest* r) {
+    if (r->hasParam("stop")) { g_len.active = false; return r->reply(200, "text/plain", "stopped"); }
+    const auto num = [&](const char* k, long d) -> long {
+      return r->hasParam(k) ? strtol(r->getParam(k)->value().c_str(), nullptr, 10) : d;
+    };
+    g_len.what     = r->hasParam("w") ? r->getParam("w")->value() : String("infomenu");
+    g_len.cur      = static_cast<uint16_t>(num("from", 1));
+    g_len.to       = static_cast<uint16_t>(num("to", 32));
+    g_len.periodMs = static_cast<uint32_t>(num("ms", 1200));
+    g_len.nextMs   = ::millis();
+    g_len.active   = true;
+    logmsg("lensweep %s %u..%u every %u ms", g_len.what.c_str(), g_len.cur, g_len.to,
+           g_len.periodMs);
+    return r->reply(200, "text/plain", "growing the string");
   });
 
   g_server.on("/api/time", HTTP_GET, [](PsychicRequest* r) {
@@ -825,6 +894,7 @@ void loop() {
   ElegantOTA.loop();
   sweepPoll();
   replayPoll();
+  lenPoll();
   // YIELD. Without this loop() spins at full rate, the IDLE task never runs, lwIP never
   // reclaims closed sockets and the console stops answering part-way through a long sweep —
   // which reads exactly like a crashed board. 1 ms is one FreeRTOS tick and costs nothing

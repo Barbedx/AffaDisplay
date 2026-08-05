@@ -181,8 +181,49 @@ const FONT = {
   'C': ['.###.', '#...#', '#....', '#....', '#....', '#...#', '.###.'],
   'V': ['#...#', '#...#', '#...#', '#...#', '#...#', '.#.#.', '..#..'],
   '°': ['.##..', '#..#.', '#..#.', '.##..', '.....', '.....', '.....'],
+  'A': ['.###.', '#...#', '#...#', '#####', '#...#', '#...#', '#...#'],
+  'B': ['####.', '#...#', '####.', '#...#', '#...#', '#...#', '####.'],
+  'D': ['####.', '#...#', '#...#', '#...#', '#...#', '#...#', '####.'],
+  'E': ['#####', '#....', '####.', '#....', '#....', '#....', '#####'],
+  'F': ['#####', '#....', '####.', '#....', '#....', '#....', '#....'],
+  'G': ['.###.', '#...#', '#....', '#.###', '#...#', '#...#', '.###.'],
+  'H': ['#...#', '#...#', '#...#', '#####', '#...#', '#...#', '#...#'],
+  'I': ['.###.', '..#..', '..#..', '..#..', '..#..', '..#..', '.###.'],
+  'J': ['....#', '....#', '....#', '....#', '#...#', '#...#', '.###.'],
+  'K': ['#...#', '#..#.', '#.#..', '##...', '#.#..', '#..#.', '#...#'],
+  'L': ['#....', '#....', '#....', '#....', '#....', '#....', '#####'],
+  'M': ['#...#', '##.##', '#.#.#', '#.#.#', '#...#', '#...#', '#...#'],
+  'N': ['#...#', '##..#', '#.#.#', '#..##', '#...#', '#...#', '#...#'],
+  'O': ['.###.', '#...#', '#...#', '#...#', '#...#', '#...#', '.###.'],
+  'P': ['####.', '#...#', '#...#', '####.', '#....', '#....', '#....'],
+  'Q': ['.###.', '#...#', '#...#', '#...#', '#.#.#', '#..#.', '.##.#'],
+  'R': ['####.', '#...#', '#...#', '####.', '#.#..', '#..#.', '#...#'],
+  'S': ['.###.', '#...#', '#....', '.###.', '....#', '#...#', '.###.'],
+  'T': ['#####', '..#..', '..#..', '..#..', '..#..', '..#..', '..#..'],
+  'U': ['#...#', '#...#', '#...#', '#...#', '#...#', '#...#', '.###.'],
+  'W': ['#...#', '#...#', '#...#', '#.#.#', '#.#.#', '##.##', '#...#'],
+  'X': ['#...#', '#...#', '.#.#.', '..#..', '.#.#.', '#...#', '#...#'],
+  'Y': ['#...#', '#...#', '.#.#.', '..#..', '..#..', '..#..', '..#..'],
+  'Z': ['#####', '....#', '...#.', '..#..', '.#...', '#....', '#####'],
+  '/': ['....#', '....#', '...#.', '..#..', '.#...', '#....', '#....'],
+  '%': ['##..#', '##..#', '...#.', '..#..', '.#...', '#..##', '#..##'],
+  '+': ['.....', '..#..', '..#..', '#####', '..#..', '..#..', '.....'],
   ' ': ['.....', '.....', '.....', '.....', '.....', '.....', '.....'],
 };
+
+// Left-aligned 5x7 text at an explicit origin. 8 characters is exactly 48 px wide
+// (8*6-1 = 47), and 6 rows of 8 px is exactly 48 tall — so a 48x48 pane holds 48 characters
+// on a 6x8 grid with nothing wasted. That is the density ceiling for this font.
+function textAt(g, s, x0, y0) {
+  for (let i = 0; i < s.length; i++) {
+    const glyph = FONT[s[i]] || FONT[' '];
+    for (let r = 0; r < 7; r++) for (let c = 0; c < 5; c++)
+      if (glyph[r][c] === '#') {
+        const x = x0 + i * 6 + c, y = y0 + r;
+        if (x >= 0 && x < W && y >= 0 && y < H) g[y][x] = 1;
+      }
+  }
+}
 
 // Centred single line of 5x7 text with a one-pixel gap; unknown characters become spaces.
 function text(g, s, y0) {
@@ -283,6 +324,70 @@ function tryzubClock(hhmm) {
   return g;
 }
 
+
+// ---------------------------------------------------------------------------
+// The dense screens — how much actually fits in 48x48
+// ---------------------------------------------------------------------------
+// 8 characters across (8*6-1 = 47) by 6 rows down (6*8 = 48). FORTY-EIGHT CHARACTERS with
+// nothing wasted, and the clock proved the 5x7 digits stay legible on the glass. These
+// exist to show the ceiling rather than to be pretty.
+
+// Six rows of eight — the maximum this font will carry.
+function dash() {
+  const g = blank();
+  const rows = ['SPD  128', 'RPM 3250', 'TMP 23.5', 'BAT 12.4', 'FUE 47.2', 'ODO12045'];
+  rows.forEach((r, i) => textAt(g, r, 0, i * 8));
+  return g;
+}
+
+// Labels plus proportional bars: the same pane carrying values that are not text at all.
+// A bar reads at a glance where a number has to be parsed, and mixing them is what a real
+// instrument pane does.
+function gauges() {
+  const g = blank();
+  const rows = [['FUEL', 0.72], ['TEMP', 0.45], ['OIL', 0.88], ['BATT', 0.61]];
+  rows.forEach(([label, frac], i) => {
+    const y = i * 9;
+    textAt(g, label, 0, y);
+    const x0 = 25, x1 = 47;                       // bar track
+    for (let x = x0; x <= x1; x++) { g[y][x] = 1; g[y + 6][x] = 1; }
+    g[y + 1][x0] = g[y + 2][x0] = g[y + 3][x0] = g[y + 4][x0] = g[y + 5][x0] = 1;
+    g[y + 1][x1] = g[y + 2][x1] = g[y + 3][x1] = g[y + 4][x1] = g[y + 5][x1] = 1;
+    const fill = Math.round((x1 - x0 - 2) * frac);
+    for (let x = x0 + 1; x <= x0 + fill; x++) for (let yy = y + 2; yy <= y + 4; yy++) g[yy][x] = 1;
+  });
+  textAt(g, '  12.4V ', 0, 38);
+  return g;
+}
+
+// Icons beside values — the layout an instrument cluster actually uses, and the one that
+// says most about how fine a detail the pane resolves.
+function combo() {
+  const g = blank();
+  // clock
+  disc(g, 7, 7, 6, 1.4);
+  line(g, 7, 7, 7, 3, 1); line(g, 7, 7, 10, 8, 1);
+  textAt(g, '10:56', 16, 4);
+  // thermometer
+  box(g, 5, 18, 9, 27, false); box(g, 6, 21, 8, 28, true); disc(g, 7, 29, 3, 1.4);
+  textAt(g, '23.5', 16, 20);
+  textAt(g, 'C', 40, 20);
+  // battery
+  box(g, 2, 36, 13, 44, false); box(g, 14, 38, 15, 42, true);
+  for (let i = 0; i < 3; i++) box(g, 4 + i * 3, 38, 5 + i * 3, 42, true);
+  textAt(g, '12.4V', 18, 37);
+  return g;
+}
+
+// Every glyph this font has, so what the panel does to fine detail can be read directly
+// rather than inferred from one label that happened to work.
+function fontsheet() {
+  const g = blank();
+  const rows = ['ABCDEFGH', 'IJKLMNOP', 'QRSTUWXY', 'Z0123456', '789.:-+/', '%     '];
+  rows.forEach((r, i) => textAt(g, r, 0, i * 8));
+  return g;
+}
+
 // A 6x6 checkerboard — not decoration. It is the ORIENTATION PROBE: it is the only image
 // here whose top-left corner is distinguishable from its bottom-right, so it is what tells
 // you whether the panel reads rows top-down and bits MSB-first the way this file assumes.
@@ -320,6 +425,10 @@ const images = [
   ['kBmpClock',       pack(clockFace('10:56')),      'clock face + digits'],
   ['kBmpTemp',        pack(thermo('23.5°C')),        'thermometer + temperature'],
   ['kBmpVolts',       pack(battery('12.4 V')),       'battery + accumulator voltage'],
+  ['kBmpDash',        pack(dash()),                  '6 rows x 8 chars — the density ceiling'],
+  ['kBmpGauges',      pack(gauges()),                'labels + proportional bars'],
+  ['kBmpCombo',       pack(combo()),                 'icons beside values'],
+  ['kBmpFontSheet',   pack(fontsheet()),             'every glyph, for reading fine detail'],
   ['kBmpChecker',     pack(checker()),               'orientation probe'],
 ];
 
