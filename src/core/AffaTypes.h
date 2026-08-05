@@ -200,6 +200,7 @@ enum class Feature : uint8_t {
   Fullscreen,   // showFullscreenText / hideFullscreenText
   ConfirmBox,   // showConfirmBox
   InfoPopup,    // showInfoPopup / hideInfoPopup
+  NavBitmap,    // showNavBitmap / navTick — the Carminat 48x48 pane on 0x1F1
   KeyTx,        // this panel family has a key-transmit id, so pressKey(..., Wire) can
                 // put a frame on the bus
   RadioText,    // AFFA_ENABLE_ISOTP_RX is on, so inbound text is reassembled and

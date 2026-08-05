@@ -114,6 +114,25 @@ class CarminatDisplay final : public AffaDisplayBase {
                                      const char* l3) override;
   [[nodiscard]] Result hideInfoPopup() override;
 
+#if AFFA_ENABLE_NAV
+  // The 48x48 navigation pane on 0x1F1. `bitmap` is carminat::kNavBitmapBytes (288) of
+  // row-major, MSB-first, 6-bytes-per-row monochrome — bit 7 of byte 0 is the top-left
+  // pixel. tools/gen_navicons.js in the repo builds them.
+  //
+  // BORROWED, NOT COPIED: the bytes must stay valid and unchanged until the ticket
+  // completes. A `const uint8_t[288]` in flash is the intended case and costs no RAM.
+  //
+  // The pane is a LAYER. It survives a menu, an info menu draws alongside it, and it can be
+  // replaced underneath an open popup — so this is a widget you set once and update, not a
+  // screen you switch to. [BENCH 2026-08-05]
+  [[nodiscard]] Result showNavBitmap(const uint8_t* bitmap);
+
+  // `25 00 00 00` / `25 00 03 00` — the OEM alternates these at 820 ms while the nav screen
+  // is up, with nothing else on the bus. Almost certainly the blink of a flashing element.
+  // Four bytes, verbatim from capture; what it actually does is NOT confirmed on glass.
+  [[nodiscard]] Result navTick(bool phase);
+#endif
+
   // The offset-taking form of showInfoPopup, exposed because the three row slots and the
   // format prefix are the only part of this screen still being reverse-engineered. The
   // defaults reproduce the OEM settings list byte for byte. Sends ONE MESSAGE PER ROW —

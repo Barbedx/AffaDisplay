@@ -98,14 +98,15 @@ small{color:var(--dim)}
   <h2>Header &mdash; the 14 bytes in front of the bitmap</h2>
   <div class="hdr" id="hdr"></div>
   <div class="row" style="margin-top:10px">
-    <small>bytes 4&ndash;10 as text</small>
-    <input id="hstr" size="8" maxlength="7" value="ABCDEF">
+    <small>caption, bytes 3&ndash;9</small>
+    <input id="hstr" size="8" maxlength="7" value="%ABCDEF">
     <button onclick="strToHdr()">write</button>
     <button onclick="resetHdr()">OEM reset</button>
   </div>
   <p><small>
     <span class="g">green</span> = understood (0x30 0x30 = 48&times;48).
-    <span class="w">amber</span> = the seven-byte string slot.
+    <span class="w">amber</span> = the seven-byte caption slot, <b>[3..9]</b> with [10] the
+    terminator &mdash; the capture's 0x25 is '%', the first character.
     The rest are unknown &mdash; that is what the sweep is for.
   </small></p>
 
@@ -350,13 +351,16 @@ function drawText(){
 }
 
 // ---- header --------------------------------------------------------------
-const LBL=['cmd','?','?','?','s0','s1','s2','s3','s4','s5','NUL','fmt','W=48','H=48'];
+// [3..9] is the caption slot — SEVEN bytes starting at 3, with [10] the terminator. The
+// capture's 0x25 is '%', the string's first character, not a separate field. Getting this
+// span wrong is what made the first caption test look like a negative result.
+const LBL=['cmd','type','?','c0','c1','c2','c3','c4','c5','c6','NUL','?','W','H'];
 let hdr=new Uint8Array(14);
 function buildHdrUi(){
   const el=document.getElementById('hdr'); el.innerHTML='';
   for(let i=0;i<hdr.length;i++){
     const d=document.createElement('div');
-    const cls = (i>=12) ? 'known' : (i>=4&&i<=10) ? 'str' : '';
+    const cls = (i>=12) ? 'known' : (i>=3&&i<=10) ? 'str' : '';
     d.innerHTML='<label>'+i+' '+LBL[i]+'</label>'+
       '<input class="'+cls+'" id="h'+i+'" maxlength="2" value="'+
       hdr[i].toString(16).toUpperCase().padStart(2,'0')+'">';
@@ -370,7 +374,7 @@ function buildHdrUi(){
 }
 function strToHdr(){
   const s=document.getElementById('hstr').value;
-  for(let i=0;i<6;i++) hdr[4+i]= i<s.length ? s.charCodeAt(i)&0x7F : 0x20;
+  for(let i=0;i<7;i++) hdr[3+i]= i<s.length ? s.charCodeAt(i)&0x7F : 0x20;
   hdr[10]=0;
   buildHdrUi(); preview();
 }

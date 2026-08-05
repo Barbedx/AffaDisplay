@@ -110,6 +110,17 @@
 #  define AFFA_ENABLE_INFOPOPUP 1
 #endif
 
+// The Carminat navigation pane: showNavBitmap() and navTick(). 48x48 monochrome on 0x1F1,
+// decoded from the OEM's own transfer and confirmed rendering on the bench 2026-08-05.
+//
+// It is an INDEPENDENT LAYER, not a screen mode — the info menu draws with it and it can be
+// replaced under an open popup — which is what makes it worth an API rather than a one-off.
+// Costs one 16-byte stack frame per call and nothing at rest: the image stays in the
+// caller's flash (see enqueueSplit).
+#ifndef AFFA_ENABLE_NAV
+#  define AFFA_ENABLE_NAV 1
+#endif
+
 // AffaText.cpp and its mapping table (~1.2 kB). 0 IS DANGEROUS: toAscii becomes a bounded
 // copy that passes bytes through unchanged, and any UTF-8 reaching the wire renders as
 // garbage on the panel — a visual failure, not a compile error.

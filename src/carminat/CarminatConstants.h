@@ -184,6 +184,42 @@ inline constexpr uint8_t kCmdClose   = 0x54;  // hidePopup / hideFullscreenText 
 // Screen modes, byte 3 of a 0x21 payload.
 inline constexpr uint8_t kScreenWindowed   = 0x01;  // the two-row menu window [CAP]
 inline constexpr uint8_t kScreenFullscreen = 0x05;  // whole glass             [OEM]
+// The navigation pane, on kIdNav rather than kIdSetText — and the reason the 0x1F1 header
+// opens `21 0B`: it is the SAME kCmdScreen with its own screen type. [OEM][BENCH]
+inline constexpr uint8_t kScreenNav        = 0x0B;
+
+// ---------------------------------------------------------------------------
+// The navigation bitmap
+// ---------------------------------------------------------------------------
+// 48x48 monochrome, row-major, 6 bytes per row, MSB-first: bit 7 of byte 0 is the top-left
+// pixel. Decoded from the OEM head unit's own 302-byte 0x1F1 transfer and CONFIRMED ON THE
+// BENCH PANEL 2026-08-05 — it renders, and it renders the right way up.
+//
+// IT IS AN INDEPENDENT LAYER, not a screen mode. The info menu draws WITH it on one screen,
+// and the bitmap can be replaced underneath an open popup and is seen to change. That is
+// what makes it worth an API: it is a persistent widget under whatever else is drawn.
+inline constexpr uint16_t kNavWidth       = 48;
+inline constexpr uint16_t kNavHeight      = 48;
+inline constexpr uint16_t kNavStride      = 6;                       // ceil(48/8)
+inline constexpr uint16_t kNavBitmapBytes = kNavStride * kNavHeight; // 288
+
+// The OEM's 14 header bytes, VERBATIM, because verbatim is what is proven to render.
+//
+//   21    kCmdScreen
+//   0B    kScreenNav
+//   00 25 unknown; possibly one 16-bit field
+//   41..46 00  a seven-byte slot holding "ABCDEF\0" in the capture. CONFIRMED NOT TO BE
+//              PLAIN TEXT: ASCII written here puts nothing on the glass. Left as captured
+//              rather than zeroed, because what renders is what was captured and no
+//              variation of it has been tested.
+//   01    unknown; format or bit depth
+//   30 30 48, 48 — the geometry, and the two bytes that agree with kNavBitmapBytes
+inline constexpr uint8_t kNavHeader[14] = {
+  kCmdScreen, kScreenNav, 0x00, 0x25,
+  0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x00,
+  0x01,
+  static_cast<uint8_t>(kNavWidth), static_cast<uint8_t>(kNavHeight)
+};
 
 // setText / showPopupText header bytes.
 inline constexpr uint8_t kIconsNone   = 0x55;  // NoNews|NoTraffic|NoAfRds|NoMode [CAP]

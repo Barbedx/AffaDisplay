@@ -11,10 +11,11 @@
 // # the image can be changed underneath an open popup and is seen to change.  #
 // # So the nav pane is a real independent layer, not a screen mode.           #
 // #                                                                          #
-// # CONFIRMED NOT WORKING: bytes 4-10 as text. ASCII in that slot puts        #
-// # nothing on the glass, so it is either not a string field or needs one of  #
-// # the four unknown bytes set first. That is the sharpest question left.     #
-// # Still open: whether bytes 12/13 are honoured as real geometry.            #
+// # The caption slot is [3..9], SEVEN bytes, with [10] the terminator — the   #
+// # capture's 0x25 is '%', the string's first character. An earlier test here  #
+// # wrote [4..10] and reported a false negative; whether the caption renders   #
+// # is OPEN. navi start.csv also moves [11] 0x01 -> 0x12, and its two images   #
+// # are 478 ms apart with different pixels: the OEM ANIMATES this channel.     #
 // ############################################################################
 //
 // THE POINT OF A LAB IS THAT YOU CHANGE ONE THING. Everything the OEM sent is reproduced
@@ -31,17 +32,18 @@
 // THE 302 BYTES, AS FAR AS THEY ARE UNDERSTOOD
 // ---------------------------------------------------------------------------
 //
-//   21 0B 00 25 | 41 42 43 44 45 46 00 | 01 | 30 30 | <288 bytes of bitmap>
-//   ^^ ^^ ^^ ^^   "A  B  C  D  E  F" \0   ^^   ^^ ^^
-//   |  |  |  |    a seven-byte string     |    48, 48 — the bitmap geometry, and the only
-//   |  |  |  |    slot, at a placeholder  |    two header bytes with better than a guess
-//   |  |  |  |    because the captured    |    behind them: 48*48/8 is exactly the 288
-//   |  |  |  |    car had no nav CD       |    bytes that follow.
-//   |  |  |  |                            +--- 0x01. Format? Bit depth? Unknown.
-//   |  |  |  +--- 0x25. Unknown.
-//   |  |  +------ 0x00. Unknown; with the byte before it, possibly one 16-bit field.
-//   |  +--------- 0x0B. Unknown.
-//   +------------ 0x21. Command, by analogy with 0x151 where byte 0 is 0x52/0x54/0x77.
+//   21 0B 00 | 25 41 42 43 44 45 46 | 00 | 01 | 30 30 | <288 bytes of bitmap>
+//   ^^ ^^ ^^   "%  A  B  C  D  E  F"   ^^   ^^   ^^ ^^
+//   |  |  |     the CAPTION slot:      |    |    48, 48 — the geometry, and the only two
+//   |  |  |     SEVEN bytes at [3..9], |    |    header bytes with better than a guess
+//   |  |  |     blank on the route-    |    |    behind them: 48*48/8 is exactly the 288
+//   |  |  |     calc screen            |    |    bytes that follow.
+//   |  |  |                            |    +--- moves 0x01 -> 0x12 between captures, so
+//   |  |  |                            |         not a fixed format byte.
+//   |  |  |                            +--- NUL terminator for the caption.
+//   |  |  +--- 0x00. Unknown.
+//   |  +------ kScreenNav. The screen TYPE — 0x01 windowed, 0x05 fullscreen, 0x0B nav.
+//   +--------- kCmdScreen 0x21, the same command the menu and fullscreen screens use.
 //
 // The bitmap is row-major, 6 bytes per row, MSB-first: bit 7 of byte 0 is the top-left
 // pixel. That orientation is INFERRED from the globe rendering right way up and from the
@@ -500,6 +502,10 @@ const Preset kPresets[] = {
   { "clock",       navlab::kBmpClock },
   { "temp",        navlab::kBmpTemp },
   { "volts",       navlab::kBmpVolts },
+  { "dash",        navlab::kBmpDash },
+  { "gauges",      navlab::kBmpGauges },
+  { "combo",       navlab::kBmpCombo },
+  { "fontsheet",   navlab::kBmpFontSheet },
   { "checker",     navlab::kBmpChecker },
 };
 constexpr int kPresetCount = sizeof(kPresets) / sizeof(kPresets[0]);

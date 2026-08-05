@@ -1178,10 +1178,23 @@ it. None blocks the port; each blocks a *confident* change to the bytes involved
     302 bytes and the image appears in the nav pane. Geometry, row order and bit order are
     therefore not inferences any more — they are right.
 
-    **Confirmed NOT to work: bytes 4–10 as text.** ASCII written into that slot puts nothing
-    on the glass. So `"ABCDEF\0"` is either not a string field at all, or it needs one of the
-    four unknown bytes set before the panel will draw it. That is now the sharpest open
-    question and it is what the sweep exists for.
+    **RETRACTED: "bytes 4–10 as text does not work".** That test wrote the wrong bytes. The
+    field is **`[3..9]`**, not `[4..10]` — `navi start.csv` diffs the boot globe against the
+    route-calc screen and the varying span is seven bytes starting at 3:
+
+    ```
+    boot globe   21 0B 00 25 41 42 43 44 45 46 00 01 30 30    "%ABCDEF"
+    route calc   21 0B 00 00 00 00 00 00 00 00 00 12 30 30    blank
+    ```
+
+    `0x25` is `'%'` — the first character of the string, not a separate unknown field, with
+    `[10]` as the terminator. `16_navlab` was writing `[4..10]`, so it left `'%'` in place and
+    shifted every character one position: the negative result says nothing. **Whether the
+    caption slot renders is OPEN, not answered.**
+
+    `[11]` also moves, `0x01` → `0x12`, so it is not a fixed format byte either. And the two
+    `navi start` images are **478 ms apart with different pixels** — the OEM *animates* this
+    channel, which nothing in the repo had assumed.
 
     Also open: whether bytes 12/13 are a real geometry field or whether the pane is a fixed
     48×48 window that ignores them. `16_navlab` sends any width/height with the byte count

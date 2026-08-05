@@ -149,7 +149,7 @@ uint8_t AffaDisplayBase::insertIndexFor(Priority p) const {
 
 void AffaDisplayBase::pushJob(uint16_t funcId, const uint8_t* d, uint16_t len, JobKind kind,
                               TxTicket t, const TxOptions& opt, uint8_t at,
-                              const uint8_t* ext) {
+                              const uint8_t* ext, uint16_t prefixLen) {
   if (_qCount >= AFFA_TX_QUEUE_DEPTH) return;      // callers check capacity first
   if (at > _qCount) at = _qCount;
   for (uint8_t i = _qCount; i > at; --i) _queue[i] = _queue[i - 1];
@@ -175,7 +175,8 @@ void AffaDisplayBase::pushJob(uint16_t funcId, const uint8_t* d, uint16_t len, J
   // A borrowed payload is never copied — that is the entire point — and `data` is left as
   // it was. Only the copying path may touch it, and only enqueue() reaches here with
   // len <= AFFA_MAX_PAYLOAD already enforced.
-  if (!ext) std::memcpy(j.data, d, len);
+  j.prefixLen  = ext ? prefixLen : len;
+  if (j.prefixLen) std::memcpy(j.data, d, j.prefixLen);
 }
 
 void AffaDisplayBase::removeJob(uint8_t index) {
@@ -253,6 +254,11 @@ TxTicket AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t 
     TxJob& j = _queue[ci];
     std::memcpy(j.data, data, len);
     j.len      = len;
+    // A coalesced job is always fully inline. Restoring both is defensive — a borrowed job
+    // refuses a RenderSlot and so can never be found by findCoalescable() — but the failure
+    // it would prevent is a stale pointer framing a screen that no longer exists.
+    j.ext       = nullptr;
+    j.prefixLen = len;
     j.ticket   = t;
     j.coalesce = opt.coalesce;
     j.reassertAfterSession = opt.reassertAfterSession;
@@ -325,7 +331,52 @@ TxTicket AffaDisplayBase::enqueueExternal(uint16_t funcId, const uint8_t* data, 
   if (needReg) (void)queueRegistrations();
 
   const TxTicket t = nextTicket();
-  pushJob(funcId, nullptr, len, JobKind::Payload, t, opt, insertIndexFor(opt.priority), data);
+  pushJob(funcId, nullptr, len, JobKind::Payload, t, opt, insertIndexFor(opt.priority), data,
+          /*prefixLen=*/0);
+  _lastEnqueued = t;
+  _lastResult   = Result::Ok;
+  return t;
+}
+
+TxTicket AffaDisplayBase::enqueueSplit(uint16_t funcId, const uint8_t* prefix, uint8_t prefixLen,
+                                       const uint8_t* body, uint16_t bodyLen, TxOptions opt) {
+  _lastEnqueued = kNoTicket;
+
+  const uint32_t total = static_cast<uint32_t>(prefixLen) + bodyLen;
+  if (!prefix || !body || prefixLen == 0 || bodyLen == 0) {
+    _lastResult = Result::BadArgument;
+    return kNoTicket;
+  }
+  // The prefix is copied into TxJob::data, so it is bounded by that buffer and not by the
+  // external ceiling — a caller that got this wrong would silently overrun a queue slot.
+  if (prefixLen > AFFA_MAX_PAYLOAD || total > AFFA_MAX_EXTERNAL_PAYLOAD) {
+    _lastResult = Result::TooLong;
+    return kNoTicket;
+  }
+  if (!knownFunc(funcId))          { _lastResult = Result::UnknownFunc; return kNoTicket; }
+  if (opt.slot != RenderSlot::None || opt.reassertAfterSession) {
+    _lastResult = Result::BadArgument;
+    return kNoTicket;
+  }
+  opt.coalesce = false;
+
+  if (AFFA_TX_HOLD_MS == 0 && !linkReady()) {
+    _lastResult = _link.isLive() ? Result::NoSync : Result::LinkDown;
+    return kNoTicket;
+  }
+
+  const bool needReg = !_passive && linkReady() &&
+                       !hasFlag(_sync, SyncState::FuncsReg) && !registrationQueued();
+  const uint8_t newSlots = static_cast<uint8_t>(1 + (needReg ? _funcCount : 0));
+  if (_qCount + newSlots > AFFA_TX_QUEUE_DEPTH) {
+    _lastResult = Result::QueueFull;
+    return kNoTicket;
+  }
+  if (needReg) (void)queueRegistrations();
+
+  const TxTicket t = nextTicket();
+  pushJob(funcId, prefix, static_cast<uint16_t>(total), JobKind::Payload, t, opt,
+          insertIndexFor(opt.priority), body, prefixLen);
   _lastEnqueued = t;
   _lastResult   = Result::Ok;
   return t;
@@ -485,11 +536,15 @@ void AffaDisplayBase::pumpTx() {
   // Build against a local cursor. `job.sent` is protocol state, not a staging cursor: a
   // locally full controller has not accepted any bytes, so it stays unchanged until the
   // link accepts this frame.
-  // The bytes are either inline or borrowed; nothing else in the FSM cares which.
-  const uint8_t* const src = job.ext ? job.ext : job.data;
+  // Inline prefix first, then the borrowed body. For every job that is not a split send one
+  // of the two halves is empty, so this is the ordinary path with one predictable branch —
+  // not a special case bolted on beside it.
   uint16_t proposedSent = job.sent;
-  while (i < kPacketLength && proposedSent < job.len)
-    f.data[i++] = src[proposedSent++];
+  while (i < kPacketLength && proposedSent < job.len) {
+    f.data[i++] = (proposedSent < job.prefixLen) ? job.data[proposedSent]
+                                                 : job.ext[proposedSent - job.prefixLen];
+    ++proposedSent;
+  }
   const bool more = (proposedSent < job.len);
   const uint8_t filler = packetFiller();
   while (i < kPacketLength) f.data[i++] = filler;

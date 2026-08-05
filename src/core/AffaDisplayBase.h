@@ -214,6 +214,20 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   [[nodiscard]] TxTicket enqueueExternal(uint16_t funcId, const uint8_t* data, uint16_t len,
                                          TxOptions opt = TxOptions{});
 
+  // A SHORT HEADER THE CALLER BUILT, THEN A LONG BODY THE CALLER OWNS — sent as one ISO-TP
+  // message. `prefix` is COPIED (so a stack buffer is fine); `body` is BORROWED and must
+  // stay valid and unchanged until the ticket completes.
+  //
+  // This is what a bitmap screen actually looks like: a handful of header bytes that differ
+  // per call, in front of hundreds of image bytes that live in flash and never change.
+  // Copying the pair would need a buffer as large as the whole message; borrowing the pair
+  // would force the caller to keep the header alive too. Splitting costs neither.
+  //
+  // Same refusals as enqueueExternal(): no RenderSlot, no reassertAfterSession.
+  [[nodiscard]] TxTicket enqueueSplit(uint16_t funcId, const uint8_t* prefix, uint8_t prefixLen,
+                                      const uint8_t* body, uint16_t bodyLen,
+                                      TxOptions opt = TxOptions{});
+
   // ---- preemption ----------------------------------------------------------
   // Drop every job QUEUED AND NOT YET STARTED. The job on the wire is untouched, and so are
   // pending Registration jobs — a payload arriving before its function is registered is
@@ -367,6 +381,11 @@ class AffaDisplayBase : public IDisplay, public IPanel {
     // struct rather than 304 in every one of AFFA_TX_QUEUE_DEPTH slots. Non-null means
     // `data` is unused and the bytes are the caller's to keep alive until onComplete.
     const uint8_t* ext    = nullptr;
+    // Bytes [0, prefixLen) come from `data`, bytes [prefixLen, len) from `ext`. Ordinary
+    // jobs set prefixLen == len and ext == nullptr; enqueueExternal() sets prefixLen == 0.
+    // enqueueSplit() uses both, which is how a 16-byte header built on the caller's stack
+    // is prepended to a 288-byte image in flash WITHOUT either being copied whole.
+    uint16_t   prefixLen  = 0;
     uint16_t   len        = 0;
     uint16_t   sent       = 0;          // bytes already accepted by the link
     uint8_t    frameIndex = 0;          // ISO-TP continuation counter `num`
@@ -452,7 +471,8 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   uint8_t dropUnstartedReasserts();
   // `ext` non-null borrows the buffer instead of copying it into TxJob::data.
   void pushJob(uint16_t funcId, const uint8_t* d, uint16_t len, JobKind kind, TxTicket t,
-               const TxOptions& opt, uint8_t at, const uint8_t* ext = nullptr);
+               const TxOptions& opt, uint8_t at, const uint8_t* ext = nullptr,
+               uint16_t prefixLen = 0);
   void removeJob(uint8_t index);
   void creditAck(bool done);
   // Ends the head job: retries it if the failure was transient and it has attempts left,

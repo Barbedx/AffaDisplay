@@ -68,6 +68,7 @@ bool CarminatDisplay::supports(Feature f) const {
     case Feature::Fullscreen:  return AFFA_ENABLE_FULLSCREEN != 0;
     case Feature::ConfirmBox:  return AFFA_ENABLE_CONFIRMBOX != 0;
     case Feature::InfoPopup:   return AFFA_ENABLE_INFOPOPUP != 0;
+    case Feature::NavBitmap:   return AFFA_ENABLE_NAV != 0;
     case Feature::KeyTx:       return true;                        // 0x1C1
     case Feature::RadioText:   return AFFA_ENABLE_ISOTP_RX != 0;
   }
@@ -374,6 +375,42 @@ Result CarminatDisplay::hidePopup() { return Result::NotSupported; }
 // way round until that bench session; if you are holding a comment that says a fullscreen
 // owns the glass until closed, it is the old one.
 //
+#if AFFA_ENABLE_NAV
+// The navigation pane. `21 0B` is kCmdScreen with its own screen type, on kIdNav instead of
+// kIdSetText — the same command family as the menu and the fullscreen screen, which is why
+// the header opens the way it does.
+//
+// THE HEADER IS COPIED, THE IMAGE IS BORROWED. That split is the whole reason this costs no
+// RAM at rest: 16 bytes of stack per call, and 288 bytes that stay in the caller's flash.
+// See AffaDisplayBase::enqueueSplit.
+Result CarminatDisplay::showNavBitmap(const uint8_t* bitmap) {
+  if (!bitmap) return Result::BadArgument;
+
+  uint8_t prefix[2 + sizeof(kNavHeader)];
+  constexpr uint16_t kDeclared = sizeof(kNavHeader) + kNavBitmapBytes;   // 302
+  static_assert(kDeclared == 302, "the OEM declares 302 bytes on 0x1F1");
+  prefix[0] = static_cast<uint8_t>(kPciFirstFrame | (kDeclared >> 8));   // 0x11
+  prefix[1] = static_cast<uint8_t>(kDeclared & 0xFF);                    // 0x2E
+  std::memcpy(prefix + 2, kNavHeader, sizeof(kNavHeader));
+
+  TxOptions opt;                    // RenderSlot::None: enqueueSplit refuses anything else,
+  opt.coalesce = false;             // and a borrowed image must never be replaced in place
+  return (enqueueSplit(kIdNav, prefix, static_cast<uint8_t>(sizeof(prefix)),
+                       bitmap, kNavBitmapBytes, opt) == kNoTicket)
+             ? lastResult()
+             : Result::Ok;
+}
+
+// `25 00 00 00` / `25 00 03 00`. The OEM alternates these at 820 ms while the nav screen is
+// up — `nav still.csv` is twenty of them and nothing else on the bus — which reads as the
+// blink of a flashing element. Four bytes, verbatim. NOT CONFIRMED ON GLASS: what it
+// actually does is still a guess, and on this panel an ACK proves nothing.
+Result CarminatDisplay::navTick(bool phase) {
+  const uint8_t p[5] = { 0x04, 0x25, 0x00, static_cast<uint8_t>(phase ? 0x03 : 0x00), 0x00 };
+  return submit(kIdSetText, p, sizeof(p), RenderSlot::None, /*coalesce=*/false);
+}
+#endif  // AFFA_ENABLE_NAV
+
 // The most strongly corroborated builder in the library: the OEM head unit's own "Please
 // insert navigation CD" screen is in the capture with matching header, frame count and
 // 0x0D separators. Declared 0x60 = 96 is correct here and all 14 frames go out.

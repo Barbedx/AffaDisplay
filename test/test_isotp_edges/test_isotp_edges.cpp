@@ -415,6 +415,75 @@ void test_external_still_has_a_ceiling(void) {
   ASSERT_RESULT(TooLong, r.d.lastResult());
 }
 
+
+// ---------------------------------------------------------------------------
+// enqueueSplit() — a copied header in front of a borrowed body
+// ---------------------------------------------------------------------------
+
+void test_split_frames_prefix_then_body_as_one_message(void) {
+  Rig r;
+  r.up();
+
+  static uint8_t prefix[16];
+  static uint8_t body[288];
+  prefix[0] = 0x11; prefix[1] = 0x2E;
+  for (uint8_t i = 2; i < sizeof(prefix); ++i) prefix[i] = static_cast<uint8_t>(0xA0 + i);
+  for (uint16_t i = 0; i < sizeof(body); ++i)  body[i]  = static_cast<uint8_t>(i);
+
+  const TxTicket t = r.d.enqueueSplit(0x1F1, prefix, sizeof(prefix), body, sizeof(body));
+  TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
+  pumpUntilIdle(r.d);
+  ASSERT_RESULT(Ok, r.d.lastResult());
+
+  // Reassemble what actually went out and compare against prefix||body.
+  static uint8_t got[320];
+  uint16_t n = 0;
+  Frame f;
+  int frames = 0;
+  while (r.link.takeSent(f)) {
+    const int off = (frames == 0) ? 0 : 1;          // continuations carry a PCI byte
+    for (int i = off; i < 8 && n < sizeof(prefix) + sizeof(body); ++i) got[n++] = f.data[i];
+    ++frames;
+  }
+  TEST_ASSERT_EQUAL_INT_MESSAGE(44, frames, "16 + 288 = 304 bytes is 1 + 43 frames");
+  TEST_ASSERT_EQUAL_UINT16(sizeof(prefix) + sizeof(body), n);
+  TEST_ASSERT_EQUAL_HEX8_ARRAY_MESSAGE(prefix, got, sizeof(prefix),
+                                       "the copied header leads");
+  TEST_ASSERT_EQUAL_HEX8_ARRAY_MESSAGE(body, got + sizeof(prefix), sizeof(body),
+                                       "the borrowed body follows, unbroken across the seam");
+}
+
+void test_split_borrows_the_body_but_copies_the_prefix(void) {
+  Rig r;
+  r.up();
+  static uint8_t prefix[8] = {0x11, 0x00, 1, 2, 3, 4, 5, 6};
+  static uint8_t body[16];
+  for (uint8_t i = 0; i < sizeof(body); ++i) body[i] = 0xAA;
+
+  const TxTicket t = r.d.enqueueSplit(0x151, prefix, sizeof(prefix), body, sizeof(body));
+  TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
+  prefix[2] = 0x99;      // copied: must NOT be seen
+  body[0]   = 0x5A;      // borrowed: MUST be seen
+  pumpUntilIdle(r.d);
+
+  Frame f;
+  TEST_ASSERT_TRUE(r.link.takeSent(f));
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x01, f.data[2], "the prefix was copied at enqueue time");
+  TEST_ASSERT_TRUE(r.link.takeSent(f));
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x5A, f.data[1], "the body is read from caller storage");
+}
+
+void test_split_rejects_a_render_slot(void) {
+  Rig r;
+  r.up();
+  static uint8_t prefix[4] = {0}, body[8] = {0};
+  TxOptions o;
+  o.slot = RenderSlot::Text;
+  TEST_ASSERT_EQUAL_UINT16(kNoTicket,
+                           r.d.enqueueSplit(0x151, prefix, sizeof(prefix), body, sizeof(body), o));
+  ASSERT_RESULT(BadArgument, r.d.lastResult());
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_a_12_bit_first_frame_opens_a_message);
@@ -432,5 +501,8 @@ int main(int, char**) {
   RUN_TEST(test_external_payload_is_borrowed_not_copied);
   RUN_TEST(test_external_refuses_coalescing_and_reassert);
   RUN_TEST(test_external_still_has_a_ceiling);
+  RUN_TEST(test_split_frames_prefix_then_body_as_one_message);
+  RUN_TEST(test_split_borrows_the_body_but_copies_the_prefix);
+  RUN_TEST(test_split_rejects_a_render_slot);
   return UNITY_END();
 }
