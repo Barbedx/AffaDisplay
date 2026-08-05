@@ -71,8 +71,12 @@ small{color:var(--dim)}
   <p><small>
     <b>stop sending</b> halts the frame pump. <span class="w">It does not clear the glass</span>
     &mdash; the last image stays there, because no command to erase this pane is known. To
-    empty it, send <b>blank</b>: 288 zero bytes, which is the only way we have found.
+    empty it, send <b>blank</b>: 288 zero bytes, the only way we have found.
     <b>display OFF</b> is a different thing again &mdash; that is the backlight.
+    <br><br>Choosing any scene <b>resumes sending and pushes one frame immediately</b>, so a
+    still image reaches the glass at once. Identical frames are then <b>not resent</b> &mdash;
+    a static scene costs one transfer and then nothing, which is why <b>duty</b> falls to zero
+    on a logo and sits near 25% on the spectrum.
   </small></p>
 </section>
 
@@ -120,9 +124,15 @@ small{color:var(--dim)}
   </div>
   <div class="row">
     <button onclick="call('text')">setText</button>
-    <button onclick="call('time')">setTime</button>
     <button onclick="call('power_on')">power ON</button>
     <button onclick="call('power_off')">power OFF</button>
+  </div>
+  <div class="row">
+    <small>time HHMM</small>
+    <input id="tmv" value="1056" size="5" maxlength="4" style="width:64px">
+    <button class="pri" onclick="callA('time',tmv.value)">setTime</button>
+    <button onclick="useNow()">use browser clock</button>
+    <label style="margin-left:4px"><input type="checkbox" id="tks" onchange="tick()"> keep it ticking</label>
   </div>
   <div class="row">
     <button onclick="call('menu')">showMenu</button>
@@ -282,6 +292,28 @@ function apply(){
        '&track='+tk.value+'&tracks='+tc.value+'&total='+tt.value);
 }
 function sc(n){fetch('/api/scene?n='+n).then(poll);}
+// setTime wants exactly four digits; anything else is a silent no-op on the panel, so it is
+// rejected here where it can be seen instead.
+function callA(w,a){
+  if(w==='time'&&!/^d{4}$/.test(a)){alert('HHMM — four digits');return;}
+  const q=new URLSearchParams({w,a,b:cb.value,c:cc.value,n:cn.value,i:ci.value});
+  fetch('/api/call?'+q).then(async r=>{
+    const t=await r.text();
+    document.getElementById('bud').insertAdjacentHTML('afterbegin',
+      '<span class="'+(r.ok?'g':'r')+'">'+t+'</span>
+');
+  }).then(poll);
+}
+function hhmm(){const d=new Date();
+  return String(d.getHours()).padStart(2,'0')+String(d.getMinutes()).padStart(2,'0');}
+function useNow(){tmv.value=hhmm();callA('time',tmv.value);}
+// The panel has no clock of its own on this family — the radio owns it, so it only stays
+// right if something keeps sending it. Once a minute is enough and costs one short frame.
+let tkTimer=null;
+function tick(){
+  if(tkTimer){clearInterval(tkTimer);tkTimer=null;}
+  if(tks.checked){useNow();tkTimer=setInterval(useNow,60000);}
+}
 function call(w){
   const q=new URLSearchParams({w,a:ca.value,b:cb.value,c:cc.value,n:cn.value,i:ci.value});
   fetch('/api/call?'+q).then(async r=>{

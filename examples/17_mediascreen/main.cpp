@@ -144,6 +144,10 @@ volatile bool  g_menuBusy = false;
 affa::TxTicket g_menuTicket = affa::kNoTicket;
 
 bool     g_paneOn        = true;
+// Send the next frame even if it is identical to the last one. Set by a scene change or a
+// resume, because "show me this" must reach the glass whether or not the pixels differ.
+bool     g_forceFrame    = true;
+bool     g_everSent      = false;
 uint32_t g_framePeriodMs = 250;
 uint32_t g_nextFrameMs   = 0;
 uint32_t g_nextSecondMs  = 0;
@@ -262,7 +266,16 @@ void pushFrame() {
   uint8_t* const buf = g_frame[g_drawInto];
   renderScene(buf);
 
+  // DO NOT RESEND AN IDENTICAL IMAGE. A frame is 44 CAN frames at BlockSize 1; repainting a
+  // static logo four times a second spends a quarter of the link redrawing pixels that have
+  // not moved. The other buffer holds exactly what went out last time, so the comparison is
+  // free — and it is what turns a still scene into one transfer followed by silence.
+  if (!g_forceFrame && g_everSent &&
+      memcmp(buf, g_frame[g_drawInto ^ 1], media::kBytes) == 0) return;
+
   if (g_carminat->showNavBitmap(buf) != affa::Result::Ok) { ++g_framesFail; return; }
+  g_forceFrame = false;
+  g_everSent   = true;
   g_navTicket    = g_base->lastEnqueued();
   g_navBusy      = true;
   g_frameStartMs = ::millis();
@@ -399,14 +412,21 @@ void routes() {
     const String n = r->hasParam("n") ? r->getParam("n")->value() : String();
     for (int i = 0; i < static_cast<int>(Scene::kCount); ++i)
       if (n == kSceneName[i]) {
-        g_scene = static_cast<Scene>(i);
+        g_scene      = static_cast<Scene>(i);
         g_sceneFrame = 0;
+        // CHOOSING A SCENE MEANS SHOWING IT. Selecting one while the pump was stopped used
+        // to change a variable and nothing else — the previous image stayed frozen on the
+        // glass with no way to shift it, which is exactly how "blank" appeared not to work.
+        g_paneOn     = true;
+        g_forceFrame = true;
+        pushFrame();                    // now, not up to a frame period from now
         logmsg("scene %s", kSceneName[i]);
         return r->reply(200, "text/plain", kSceneName[i]);
       }
     if (r->hasParam("on")) {
       g_paneOn = r->getParam("on")->value() != "0";
-      return r->reply(200, "text/plain", g_paneOn ? "pane on" : "pane off");
+      if (g_paneOn) { g_forceFrame = true; pushFrame(); }
+      return r->reply(200, "text/plain", g_paneOn ? "sending" : "stopped (glass keeps the last image)");
     }
     return r->reply(400, "text/plain", "unknown scene");
   });
