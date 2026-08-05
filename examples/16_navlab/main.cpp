@@ -414,6 +414,31 @@ void replayPoll() {
 }
 
 // ---------------------------------------------------------------------------
+// Presets
+// ---------------------------------------------------------------------------
+struct Preset { const char* name; const uint8_t* bytes; };
+const Preset kPresets[] = {
+  { "globe",       navlab::kBmpGlobe },
+  { "renault",     navlab::kBmpRenault },
+  { "tryzub",      navlab::kBmpTryzub },
+  { "tryzubclock", navlab::kBmpTryzubClock },
+  { "clock",       navlab::kBmpClock },
+  { "temp",        navlab::kBmpTemp },
+  { "volts",       navlab::kBmpVolts },
+  { "dash",        navlab::kBmpDash },
+  { "gauges",      navlab::kBmpGauges },
+  { "combo",       navlab::kBmpCombo },
+  { "fontsheet",   navlab::kBmpFontSheet },
+  { "checker",     navlab::kBmpChecker },
+};
+constexpr int kPresetCount = sizeof(kPresets) / sizeof(kPresets[0]);
+
+const uint8_t* presetByName(const String& n) {
+  for (int i = 0; i < kPresetCount; ++i) if (n == kPresets[i].name) return kPresets[i].bytes;
+  return nullptr;
+}
+
+// ---------------------------------------------------------------------------
 // Screens, and how wide their fields are
 // ---------------------------------------------------------------------------
 // A COLUMN RULER, the oldest trick there is: a digit every tenth position, so whatever
@@ -439,12 +464,99 @@ affa::Result sendScreen(const String& w, const String& a, const String& b, const
   return res;
 }
 
+// The N-item menu screen is built into a buffer WE own and the library borrows until the
+// ticket completes, exactly like the nav bitmap. 10 items is 308 bytes.
+uint8_t  g_menuBuf[affa::CarminatDisplay::menuScreenBytes(affa::carminat::kMenuMaxItems)];
+volatile bool  g_menuBusy = false;
+affa::TxTicket g_menuTicket = affa::kNoTicket;
+
+// Item-count brute force: the corpus proves 2, 4 and 6 render. Six is the most ever
+// CAPTURED, not a known ceiling, and the only way to find the real one is to walk past it
+// and watch which send stops drawing.
+struct MenuSweep {
+  bool     active = false;
+  uint8_t  cur = 1, to = 10;
+  uint32_t nextMs = 0, periodMs = 2000;
+} g_msweep;
+
+// The OEM sends two 0x1F1 images 478 ms apart with different pixels, so a nav LOOP is legal
+// on this channel. Cycling the presets at that cadence is the cheapest way to find out
+// whether the panel keeps up or tears.
+struct NavAnim {
+  bool     active = false;
+  uint8_t  idx = 0;
+  uint32_t nextMs = 0, periodMs = 478;
+} g_anim;
+
 struct LenSweep {
   bool     active = false;
   String   what;
   uint16_t cur = 1, to = 32;
   uint32_t nextMs = 0, periodMs = 1200;
 } g_len;
+
+const char* sendMenuN(const String& title, const String& csv, uint8_t first, uint8_t sel,
+                      uint8_t scroll) {
+  if (g_menuBusy) return "busy: the menu buffer is still lent out";
+  // Split "A|B|C" in place; the pointers must stay valid across the call, so the storage is
+  // static rather than a temporary that dies before showMenuN() reads it.
+  static char store[512];
+  static const char* items[affa::carminat::kMenuMaxItems];
+  snprintf(store, sizeof(store), "%s", csv.c_str());
+  uint8_t n = 0;
+  char* cur = store;
+  while (n < affa::carminat::kMenuMaxItems && cur && *cur) {
+    items[n++] = cur;
+    char* bar = strchr(cur, '|');
+    if (!bar) break;
+    *bar = 0;
+    cur = bar + 1;
+  }
+  if (n == 0) return "no items";
+
+  const affa::Result r = g_display.showMenuN(g_menuBuf, sizeof(g_menuBuf), title.c_str(),
+                                             items, n, first, sel, scroll);
+  if (r != affa::Result::Ok) { logmsg("showMenuN(%u) -> %d", n, static_cast<int>(r)); return "refused"; }
+  g_menuTicket = g_display.lastEnqueued();
+  g_menuBusy   = true;
+  logmsg("showMenuN %u items, %u bytes", n,
+         affa::CarminatDisplay::menuScreenBytes(n));
+  return nullptr;
+}
+
+void menuSweepPoll() {
+  if (!g_msweep.active) return;
+  if (static_cast<int32_t>(::millis() - g_msweep.nextMs) < 0) return;
+  if (g_menuBusy) return;
+  if (g_msweep.cur > g_msweep.to) {
+    g_msweep.active = false;
+    logmsg("menusweep: done at %u items", g_msweep.to);
+    return;
+  }
+  String csv;
+  for (uint8_t i = 0; i < g_msweep.cur; ++i) {
+    if (i) csv += '|';
+    csv += "ITEM ";
+    csv += static_cast<int>(i + 1);
+  }
+  String title("N=");
+  title += static_cast<int>(g_msweep.cur);
+  logmsg("menusweep: %u items", g_msweep.cur);
+  if (sendMenuN(title, csv, 0, 0, 0)) return;    // busy or refused: retry next tick
+  ++g_msweep.cur;
+  g_msweep.nextMs = ::millis() + g_msweep.periodMs;
+}
+
+void animPoll() {
+  if (!g_anim.active) return;
+  if (static_cast<int32_t>(::millis() - g_anim.nextMs) < 0) return;
+  if (g_navBusy) return;
+  memcpy(g_bmp, kPresets[g_anim.idx].bytes, navlab::kBitmapBytes);
+  g_bmpLen = navlab::kBitmapBytes;
+  g_anim.idx = static_cast<uint8_t>((g_anim.idx + 1) % kPresetCount);
+  if (sendNav()) return;
+  g_anim.nextMs = ::millis() + g_anim.periodMs;
+}
 
 void lenPoll() {
   if (!g_len.active) return;
@@ -474,6 +586,7 @@ void onTap(const affa::Frame& f, affa::Direction d, void*) {
 }
 
 void onDone(affa::TxTicket t, affa::Result r, void*) {
+  if (t == g_menuTicket) { g_menuBusy = false; g_menuTicket = affa::kNoTicket; }
   if (t != g_navTicket) return;
   // CLEAR THE FLAG FIRST. Everything after this line may be preempted, and a lab that
   // latches "busy" on an unexpected result is a lab that needs a reboot to continue.
@@ -490,30 +603,6 @@ void onSyncChanged(affa::SyncState s, void*) {
          affa::hasFlag(s, affa::SyncState::Failed) ? " (FAILED)" : "");
 }
 
-// ---------------------------------------------------------------------------
-// Presets
-// ---------------------------------------------------------------------------
-struct Preset { const char* name; const uint8_t* bytes; };
-const Preset kPresets[] = {
-  { "globe",       navlab::kBmpGlobe },
-  { "renault",     navlab::kBmpRenault },
-  { "tryzub",      navlab::kBmpTryzub },
-  { "tryzubclock", navlab::kBmpTryzubClock },
-  { "clock",       navlab::kBmpClock },
-  { "temp",        navlab::kBmpTemp },
-  { "volts",       navlab::kBmpVolts },
-  { "dash",        navlab::kBmpDash },
-  { "gauges",      navlab::kBmpGauges },
-  { "combo",       navlab::kBmpCombo },
-  { "fontsheet",   navlab::kBmpFontSheet },
-  { "checker",     navlab::kBmpChecker },
-};
-constexpr int kPresetCount = sizeof(kPresets) / sizeof(kPresets[0]);
-
-const uint8_t* presetByName(const String& n) {
-  for (int i = 0; i < kPresetCount; ++i) if (n == kPresets[i].name) return kPresets[i].bytes;
-  return nullptr;
-}
 
 #include "web_ui.h"     // kIndexHtml, kept out of the way of the logic
 
@@ -756,6 +845,56 @@ void routes() {
     return r->reply(err ? 409 : 200, "text/plain", err ? err : "sent");
   });
 
+  // The N-item list screen. showMenu() draws two rows; the corpus proves the panel takes
+  // at least six, and this is how many it will actually take.
+  g_server.on("/api/menun", HTTP_GET, [](PsychicRequest* r) {
+    const auto num = [&](const char* k, long d) -> long {
+      return r->hasParam(k) ? strtol(r->getParam(k)->value().c_str(), nullptr, 0) : d;
+    };
+    const String title = r->hasParam("t") ? r->getParam("t")->value() : String("NAVIGATION");
+    const String csv   = r->hasParam("i") ? r->getParam("i")->value()
+                                          : String("DESTINATION|ROUTE|MAP|TRAFFIC|SETTINGS|BACK");
+    const char* err = sendMenuN(title, csv, static_cast<uint8_t>(num("first", 0)),
+                                static_cast<uint8_t>(num("sel", 0)),
+                                static_cast<uint8_t>(num("scroll", 0)));
+    return r->reply(err ? 409 : 200, "text/plain", err ? err : "menu queued");
+  });
+
+  // HOW MANY ITEMS DOES IT ACTUALLY TAKE? Six is the most ever captured. Walk past it.
+  g_server.on("/api/menusweep", HTTP_GET, [](PsychicRequest* r) {
+    if (r->hasParam("stop")) { g_msweep.active = false; return r->reply(200, "text/plain", "stopped"); }
+    const auto num = [&](const char* k, long d) -> long {
+      return r->hasParam(k) ? strtol(r->getParam(k)->value().c_str(), nullptr, 0) : d;
+    };
+    g_msweep.cur      = static_cast<uint8_t>(num("from", 1));
+    g_msweep.to       = static_cast<uint8_t>(num("to", affa::carminat::kMenuMaxItems));
+    g_msweep.periodMs = static_cast<uint32_t>(num("ms", 2000));
+    g_msweep.nextMs   = ::millis();
+    g_msweep.active   = true;
+    logmsg("menusweep %u..%u every %u ms", g_msweep.cur, g_msweep.to, g_msweep.periodMs);
+    return r->reply(200, "text/plain", "sweeping item counts");
+  });
+
+  // The nav loop. The OEM's own two images are 478 ms apart, so that is the default.
+  g_server.on("/api/anim", HTTP_GET, [](PsychicRequest* r) {
+    const bool on = !r->hasParam("on") || r->getParam("on")->value() != "0";
+    if (r->hasParam("ms"))
+      g_anim.periodMs = strtoul(r->getParam("ms")->value().c_str(), nullptr, 10);
+    g_anim.active = on;
+    g_anim.nextMs = ::millis();
+    logmsg("anim %s every %u ms", on ? "ON" : "off", g_anim.periodMs);
+    return r->reply(200, "text/plain", on ? "cycling presets" : "stopped");
+  });
+
+  // The 4-byte nav tick the OEM alternates at 820 ms with nothing else on the bus.
+  g_server.on("/api/navtick", HTTP_GET, [](PsychicRequest* r) {
+    const bool phase = r->hasParam("p") && r->getParam("p")->value() == "1";
+    const affa::Result res = g_display.navTick(phase);
+    logmsg("navTick(%d) -> %d", phase ? 1 : 0, static_cast<int>(res));
+    return r->reply(res == affa::Result::Ok ? 200 : 409, "text/plain",
+                    res == affa::Result::Ok ? "tick sent" : "refused");
+  });
+
   g_server.on("/api/sweep", HTTP_GET, [](PsychicRequest* r) {
     if (r->hasParam("stop")) { sweepStop("console"); return r->reply(200, "text/plain", "stopped"); }
     const auto num = [&](const char* k, uint32_t dflt) -> uint32_t {
@@ -901,6 +1040,8 @@ void loop() {
   sweepPoll();
   replayPoll();
   lenPoll();
+  menuSweepPoll();
+  animPoll();
   // YIELD. Without this loop() spins at full rate, the IDLE task never runs, lwIP never
   // reclaims closed sockets and the console stops answering part-way through a long sweep —
   // which reads exactly like a crashed board. 1 ms is one FreeRTOS tick and costs nothing

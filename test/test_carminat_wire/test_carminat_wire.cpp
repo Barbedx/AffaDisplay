@@ -520,8 +520,66 @@ void test_first_send_after_a_resync_registers_both_functions_in_order(void) {
 void setUp(void) {}
 void tearDown(void) {}
 
+
+// ---------------------------------------------------------------------------
+// showMenuN — the N-item list screen
+// ---------------------------------------------------------------------------
+// docs/OEM-CSV-CORPUS.md §4: [6] = 0x80 | itemCount and total length = 36 + 27*count, both
+// three-for-three across 2-, 4- and 6-item OEM menus, with the tag bytes measured at
+// 36/63/90/117/144/171.
+
+void test_menuN_length_and_count_byte_match_the_corpus(void) {
+  Rig r;
+  r.up();
+  static uint8_t scratch[CarminatDisplay::menuScreenBytes(10)];
+  const char* items[6] = {"DESTINATION", "ROUTE", "MAP", "TRAFFIC", "SETTINGS", "BACK"};
+
+  for (uint8_t n = 2; n <= 6; n += 2) {
+    drain(r.link);
+    TEST_ASSERT_EQUAL(Result::Ok,
+                      r.d.showMenuN(scratch, sizeof(scratch), "NAVIGATION", items, n));
+    pumpUntilIdle(r.d);
+
+    Frame f;
+    TEST_ASSERT_TRUE(r.link.takeSent(f));
+    const uint16_t declared = static_cast<uint16_t>(((f.data[0] & 0x0F) << 8) | f.data[1]);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(36 + 27 * n, declared, "total length is 36 + 27N");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x21, f.data[2], "kCmdScreen");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x01, f.data[3], "kScreenWindowed");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x80 | n, scratch[2 + 6], "[6] = 0x80 | itemCount");
+  }
+}
+
+void test_menuN_item_tags_land_on_a_stride_of_27(void) {
+  Rig r;
+  r.up();
+  static uint8_t scratch[CarminatDisplay::menuScreenBytes(10)];
+  const char* items[6] = {"A", "B", "C", "D", "E", "F"};
+  TEST_ASSERT_EQUAL(Result::Ok, r.d.showMenuN(scratch, sizeof(scratch), "T", items, 6));
+
+  // Payload offsets 36, 63, 90, 117, 144, 171 reading 00..05 — measured, not inferred.
+  for (uint8_t n = 0; n < 6; ++n) {
+    const uint16_t at = 2 + 36 + 27u * n;
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(n, scratch[at], "item tag");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE('A' + n, scratch[at + 1], "its text starts one byte later");
+  }
+  pumpUntilIdle(r.d);
+}
+
+void test_menuN_refuses_a_scratch_that_is_too_small(void) {
+  Rig r;
+  r.up();
+  static uint8_t small[64];
+  const char* items[4] = {"A", "B", "C", "D"};
+  TEST_ASSERT_EQUAL(Result::TooLong, r.d.showMenuN(small, sizeof(small), "T", items, 4));
+  TEST_ASSERT_EQUAL(Result::BadArgument, r.d.showMenuN(small, sizeof(small), "T", items, 0));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_menuN_length_and_count_byte_match_the_corpus);
+  RUN_TEST(test_menuN_item_tags_land_on_a_stride_of_27);
+  RUN_TEST(test_menuN_refuses_a_scratch_that_is_too_small);
   RUN_TEST(test_setText_is_capture_verbatim);
   RUN_TEST(test_setText_declares_0x0E_for_20_transmitted_bytes);
   RUN_TEST(test_setText_transliterates_before_the_wire);

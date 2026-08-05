@@ -110,6 +110,14 @@
 #  define AFFA_ENABLE_INFOPOPUP 1
 #endif
 
+// showMenuN() — the N-item list screen. showMenu() draws two rows because the library
+// hard-codes 0x82 and 90 bytes; the OEM corpus has 2, 4 and 6 items with [6] = 0x80|count
+// and length 36 + 27*count, so the panel takes at least six. Costs nothing at rest: the
+// screen is built into a buffer the CALLER owns (see showMenuN's contract).
+#ifndef AFFA_ENABLE_BIGMENU
+#  define AFFA_ENABLE_BIGMENU 1
+#endif
+
 // The Carminat navigation pane: showNavBitmap() and navTick(). 48x48 monochrome on 0x1F1,
 // decoded from the OEM's own transfer and confirmed rendering on the bench 2026-08-05.
 //

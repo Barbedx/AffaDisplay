@@ -114,6 +114,30 @@ class CarminatDisplay final : public AffaDisplayBase {
                                      const char* l3) override;
   [[nodiscard]] Result hideInfoPopup() override;
 
+#if AFFA_ENABLE_BIGMENU
+  // Wire bytes an N-item list screen occupies, PCI included. 2 + 36 + 27*count.
+  static constexpr uint16_t menuScreenBytes(uint8_t count) {
+    return static_cast<uint16_t>(2 + carminat::kMenuFixedBytes +
+                                 carminat::kMenuItemStride * count);
+  }
+
+  // The list screen with AS MANY ITEMS AS THE PANEL WILL TAKE — showMenu() above is the
+  // two-row special case this generalises. `items` is `count` NUL-terminated strings, each
+  // truncated to 26 characters.
+  //
+  // `scratch` is BUILT INTO AND THEN BORROWED: it must be at least menuScreenBytes(count)
+  // and must stay valid and unchanged until the ticket completes — lastEnqueued() names
+  // that ticket. It lives with the caller because a six-item screen is 200 bytes and the
+  // library refuses to spend that on every consumer for a screen most will never draw.
+  //
+  // `firstVisible` scrolls a short window over a long list; `selected` is the row tag of the
+  // highlighted item; `scrollMask` is 0x00 none / 0x07 up / 0x0B down / 0x03.
+  [[nodiscard]] Result showMenuN(uint8_t* scratch, uint16_t cap, const char* title,
+                                 const char* const* items, uint8_t count,
+                                 uint8_t firstVisible = 0, uint8_t selected = 0,
+                                 uint8_t scrollMask = 0);
+#endif
+
 #if AFFA_ENABLE_NAV
   // The 48x48 navigation pane on 0x1F1. `bitmap` is carminat::kNavBitmapBytes (288) of
   // row-major, MSB-first, 6-bytes-per-row monochrome — bit 7 of byte 0 is the top-left

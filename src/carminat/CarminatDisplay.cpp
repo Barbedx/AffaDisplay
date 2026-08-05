@@ -375,6 +375,78 @@ Result CarminatDisplay::hidePopup() { return Result::NotSupported; }
 // way round until that bench session; if you are holding a comment that says a fullscreen
 // owns the glass until closed, it is the old one.
 //
+#if AFFA_ENABLE_BIGMENU
+// THE PANEL TAKES AT LEAST SIX ITEMS. showMenu() above hard-codes `0x82` and a 90-byte
+// payload and can therefore only ever draw two — which is a limit of this library, not of
+// the panel. From the 24-file OEM corpus (docs/OEM-CSV-CORPUS.md §4):
+//
+//   [6] = 0x80 | itemCount, three-for-three:  0x82 / 2 items / 90 B
+//                                             0x84 / 4 items / 144 B
+//                                             0x86 / 6 items / 198 B
+//   total length = 36 + 27 * itemCount, exactly, in all three
+//
+// and in the six-item Navigation menu the tag bytes land at 36, 63, 90, 117, 144, 171
+// reading `00 01 02 03 04 05` — a measured stride of 27 with a 26-byte text cell, not an
+// inferred one.
+//
+// THE LAYOUT HERE DIFFERS FROM showMenu() BY ONE BYTE, deliberately. showMenu writes a
+// "row-1 index" at payload offset 62; the corpus shows offset 62 is the LAST BYTE OF ITEM
+// 0's TEXT CELL and that item 1's tag is at 63. The two-row builder gets away with it
+// because the stray byte lands on NUL padding at the end of a short label. Do not copy that
+// shape into this one.
+//
+// kMenuMaxItems is 10, not 6, ON PURPOSE: six is the most ever CAPTURED, not a known
+// ceiling, and finding the real one needs a builder that can exceed it. Anything above six
+// is unverified.
+Result CarminatDisplay::showMenuN(uint8_t* scratch, uint16_t cap, const char* title,
+                                  const char* const* items, uint8_t count,
+                                  uint8_t firstVisible, uint8_t selected,
+                                  uint8_t scrollMask) {
+  if (!scratch || !items || count == 0)  return Result::BadArgument;
+  if (count > kMenuMaxItems)             return Result::BadArgument;
+  const uint16_t need = menuScreenBytes(count);
+  if (cap < need)                        return Result::TooLong;
+
+  std::memset(scratch, 0x00, need);
+  const uint16_t payload = static_cast<uint16_t>(need - 2);      // 36 + 27N
+  scratch[0] = static_cast<uint8_t>(kPciFirstFrame | (payload >> 8));
+  scratch[1] = static_cast<uint8_t>(payload & 0xFF);
+
+  uint8_t* const p = scratch + 2;        // payload offsets below are the corpus's own
+  p[0] = kCmdScreen;                     // 0x21
+  p[1] = kScreenWindowed;                // 0x01
+  p[2] = selected;                       // row tag of the selection
+  p[3] = 0x80;
+  p[4] = 0x00;
+  p[5] = 0x00;
+  p[6] = static_cast<uint8_t>(0x80 | count);
+  p[7] = 0xFF;
+  p[8] = scrollMask;                     // 0x00 none / 0x07 up / 0x0B down / 0x03
+  {
+    const Ascii t(title);
+    for (uint8_t i = 0; i < kMenuHeaderMax && t.buf[i]; ++i)
+      p[9 + i] = static_cast<uint8_t>(t.buf[i]);
+  }
+  p[35] = firstVisible;                  // index of the first visible item
+
+  for (uint8_t n = 0; n < count; ++n) {
+    uint8_t* const cell = p + 36 + 27u * n;
+    cell[0] = n;                         // 00 01 02 ... exactly as captured
+    const Ascii s(items[n]);
+    for (uint8_t i = 0; i < 26 && s.buf[i]; ++i)
+      cell[1 + i] = static_cast<uint8_t>(s.buf[i]);
+  }
+
+  AFFA_LOGT(kTag, "showMenuN %u items, %u bytes", static_cast<unsigned>(count),
+            static_cast<unsigned>(need));
+  // BORROWED, like the nav bitmap: `scratch` is the caller's and must stay valid and
+  // unchanged until the ticket completes. lastEnqueued() names that ticket.
+  TxOptions opt;                         // RenderSlot::None — enqueueExternal refuses a slot
+  return (enqueueExternal(kIdSetText, scratch, need, opt) == kNoTicket) ? lastResult()
+                                                                       : Result::Ok;
+}
+#endif  // AFFA_ENABLE_BIGMENU
+
 #if AFFA_ENABLE_NAV
 // The navigation pane. `21 0B` is kCmdScreen with its own screen type, on kIdNav instead of
 // kIdSetText — the same command family as the menu and the fullscreen screen, which is why

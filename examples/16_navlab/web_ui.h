@@ -185,6 +185,46 @@ small{color:var(--dim)}
     The nav pane is a real independent layer, not a screen mode.
   </small></p>
 
+  <h2 style="margin-top:16px">N-item menu &mdash; the panel takes at least 6</h2>
+  <div class="row">
+    <input id="mt" value="NAVIGATION" size="10">
+    <input id="mi" value="DESTINATION|ROUTE|MAP|TRAFFIC|SETTINGS|BACK" style="flex:1;min-width:200px">
+  </div>
+  <div class="row">
+    <small>first</small><input id="mf" type="number" value="0" style="width:48px">
+    <small>sel</small><input id="ms" type="number" value="0" style="width:48px">
+    <small>scroll</small><select id="msc"><option value="0">none</option><option value="7">up</option><option value="0x0B">down</option><option value="3">both</option></select>
+    <button class="pri" onclick="menuN()">SEND MENU</button>
+  </div>
+  <div class="row">
+    <small>items</small><input id="mwf" type="number" value="1" style="width:48px">
+    <small>to</small><input id="mwt" type="number" value="10" style="width:48px">
+    <small>ms</small><input id="mwm" type="number" value="2000" style="width:64px">
+    <button class="warn" onclick="get('/api/menusweep?from='+mwf.value+'&to='+mwt.value+'&ms='+mwm.value)">sweep count</button>
+    <button onclick="get('/api/menusweep?stop=1')">stop</button>
+  </div>
+  <p><small>
+    <span class="k">[6] = 0x80|count</span>, length <span class="k">36 + 27&times;N</span>,
+    three-for-three across the 2-, 4- and 6-item OEM menus. <b>Six is the most ever captured,
+    not a known ceiling</b> &mdash; sweep past it and watch which send stops drawing.
+  </small></p>
+
+  <h2 style="margin-top:16px">Nav animation &amp; tick</h2>
+  <div class="row">
+    <small>ms</small><input id="am" type="number" value="478" style="width:64px">
+    <button class="pri" onclick="get('/api/anim?on=1&ms='+am.value)">CYCLE PRESETS</button>
+    <button onclick="get('/api/anim?on=0')">stop</button>
+  </div>
+  <div class="row">
+    <button onclick="get('/api/navtick?p=0')">tick 25 00 00 00</button>
+    <button onclick="get('/api/navtick?p=1')">tick 25 00 03 00</button>
+  </div>
+  <p><small>
+    The OEM's two nav images are <b>478 ms apart with different pixels</b>, so a loop is
+    legal on this channel &mdash; that is the default. The tick is the 4-byte pair it
+    alternates at 820 ms with nothing else on the bus; effect unconfirmed.
+  </small></p>
+
   <h2 style="margin-top:16px">How wide is the field?</h2>
   <div class="row">
     <select id="rw">
@@ -433,6 +473,10 @@ async function rawTx(){
   poll();
 }
 
+function menuN(){
+  const q=new URLSearchParams({t:mt.value,i:mi.value,first:mf.value,sel:ms.value,scroll:msc.value});
+  get('/api/menun?'+q);
+}
 function scr(w){
   const q=new URLSearchParams({w,a:sa.value,b:sb.value,c:sc.value});
   get('/api/screen?'+q);

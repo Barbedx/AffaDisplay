@@ -258,6 +258,15 @@ inline constexpr uint8_t kPopupCellsMin  = 8;   // keeps the captured "VOL 28" i
 inline constexpr uint8_t kPopupCellsMax  = 16;
 inline constexpr uint8_t kInfoCells      = 8;
 inline constexpr uint8_t kMenuHeaderMax  = 26;
+
+// The N-item list screen. Stride and cell width are MEASURED, not inferred: the six-item
+// Navigation menu's tag bytes land at 36, 63, 90, 117, 144, 171 reading 00..05. [OEM]
+inline constexpr uint8_t  kMenuItemStride = 27;   // 1 tag byte + 26 text bytes
+inline constexpr uint8_t  kMenuItemTextMax = 26;
+inline constexpr uint8_t  kMenuFixedBytes = 36;   // header block before item 0
+// SIX IS THE MOST EVER CAPTURED, NOT A KNOWN CEILING. The builder allows more so the real
+// limit can be found on glass; anything above six is unverified.
+inline constexpr uint8_t  kMenuMaxItems   = 10;
 inline constexpr uint8_t kConfirmCapMax  = 7;   // 6 is the safe maximum — see the note in
                                                 // CarminatDisplay::showConfirmBox
 inline constexpr uint8_t kClockDigits    = 4;   // "HHMM"
