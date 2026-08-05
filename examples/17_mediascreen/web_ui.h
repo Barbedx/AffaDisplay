@@ -311,13 +311,12 @@ function sc(n){fetch('/api/scene?n='+n).then(poll);}
 // setTime wants exactly four digits; anything else is a silent no-op on the panel, so it is
 // rejected here where it can be seen instead.
 function callA(w,a){
-  if(w==='time'&&!/^d{4}$/.test(a)){alert('HHMM — four digits');return;}
+  if(w==='time'&&!/^[0-9]{4}$/.test(a)){alert('HHMM — four digits');return;}
   const q=new URLSearchParams({w,a,b:cb.value,c:cc.value,n:cn.value,i:ci.value});
   fetch('/api/call?'+q).then(async r=>{
     const t=await r.text();
     document.getElementById('bud').insertAdjacentHTML('afterbegin',
-      '<span class="'+(r.ok?'g':'r')+'">'+t+'</span>
-');
+      '<span class="'+(r.ok?'g':'r')+'">'+t+'</span>\n');
   }).then(poll);
 }
 function hhmm(){const d=new Date();
