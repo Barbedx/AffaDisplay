@@ -259,6 +259,49 @@ const char* sendNav() {
 }
 
 // ---------------------------------------------------------------------------
+// The OEM's text message, verbatim
+// ---------------------------------------------------------------------------
+// From the same capture that carries the globe, 9 ms before it:
+//
+//   151  10 0E 77 09 55 FF 31 01 | 21 20 20 20 31 30 35 36 | 22 20 ...
+//        = 14 bytes: 77 09 55 FF 31 01 "   1056 "
+//
+// Command 0x77 — NOT the 0x76 / 0x7E this library's setText uses — then five header bytes
+// nobody has explained, then EXACTLY EIGHT characters. "   1056 " is the radio showing
+// 105.6 FM. Sent here byte for byte because the point of the lab is to reproduce what the
+// OEM did, not what we would have done.
+const char* sendOemText(const String& t) {
+  uint8_t msg[14] = { 0x77, 0x09, 0x55, 0xFF, 0x31, 0x01,
+                      ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
+  for (int i = 0; i < 8; ++i)
+    if (i < static_cast<int>(t.length())) msg[6 + i] = static_cast<uint8_t>(t[i]);
+  return sendFramed(affa::carminat::kIdSetText, msg, sizeof(msg));
+}
+
+// ---------------------------------------------------------------------------
+// Replay of the whole OEM opening
+// ---------------------------------------------------------------------------
+// THE NAV PANE IS PROBABLY NOT A SCREEN OF ITS OWN. In the capture the globe does not
+// arrive into a blank panel — it arrives 9 ms after a text message, on a display switched
+// on 25 ms earlier, in this order:
+//
+//   52 09 00   display ON        (the "off" captures send 52 00 00 and nothing follows)
+//   54 01                        unexplained, always sent
+//   54 03                        unexplained, always immediately after 54 01
+//   77 ...     text              "   1056 "
+//   0x1F1      the nav bitmap
+//
+// So a bare 0x1F1 into a panel that has been sent nothing may legitimately draw nothing,
+// and that would say nothing about whether the message is right. This replays the sequence
+// in the captured order so the bitmap is judged in the state the OEM put the panel in.
+struct Replay {
+  bool     active = false;
+  uint8_t  step   = 0;
+  uint32_t nextMs = 0;
+  String   text;
+} g_replay;
+
+// ---------------------------------------------------------------------------
 // The header-byte sweep — the reason this is a lab and not a viewer
 // ---------------------------------------------------------------------------
 // One unknown byte, stepped across a range, one send per step, paced far enough apart that
@@ -292,6 +335,49 @@ void sweepPoll() {
   if (err) { sweepStop(err); return; }
   g_sweep.cur += g_sweep.step;
   g_sweep.nextMs = now + g_sweep.periodMs;
+}
+
+void replayPoll() {
+  if (!g_replay.active) return;
+  if (static_cast<int32_t>(::millis() - g_replay.nextMs) < 0) return;
+  if (g_navBusy) return;                   // never step while the buffer is lent out
+
+  switch (g_replay.step) {
+    case 0: {
+      const uint8_t on[3] = { 0x52, 0x09, 0x00 };
+      sendShort(affa::carminat::kIdDisplayCtrl, on, 3);
+      logmsg("replay 1/5: display ON (52 09 00)");
+      break;
+    }
+    case 1: {
+      const uint8_t p[2] = { 0x54, 0x01 };
+      sendShort(affa::carminat::kIdSetText, p, 2);
+      logmsg("replay 2/5: 54 01");
+      break;
+    }
+    case 2: {
+      const uint8_t p[2] = { 0x54, 0x03 };
+      sendShort(affa::carminat::kIdSetText, p, 2);
+      logmsg("replay 3/5: 54 03");
+      break;
+    }
+    case 3:
+      // The ORDINARY library text, the way a radio sets it. The OEM's own 0x77 form is on
+      // /api/oemtext for when the question is specifically about that command byte.
+      (void)g_display.setText(g_replay.text.c_str());
+      logmsg("replay 4/5: setText \"%s\"", g_replay.text.c_str());
+      break;
+    case 4:
+      logmsg("replay 5/5: the nav bitmap");
+      sendNav();
+      break;
+    default:
+      g_replay.active = false;
+      logmsg("replay: done — now read the glass");
+      return;
+  }
+  ++g_replay.step;
+  g_replay.nextMs = ::millis() + 250;
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +523,44 @@ void routes() {
     const uint8_t msg[3] = { 0x52, static_cast<uint8_t>(on ? 0x09 : 0x00), 0x00 };
     const char* err = sendShort(affa::carminat::kIdDisplayCtrl, msg, 3);
     return r->reply(err ? 409 : 200, "text/plain", err ? err : (on ? "display ON" : "display OFF"));
+  });
+
+  // THE ORDINARY TEXT CHANNEL — setText(), exactly as any application would call it, so the
+  // panel is in the normal text mode the nav pane appears alongside. This is the one to use;
+  // /api/oemtext below is for when the question is specifically about the OEM's command byte.
+  g_server.on("/api/text", HTTP_GET, [](PsychicRequest* r) {
+    const String t = r->hasParam("t") ? r->getParam("t")->value() : String("RENAULT");
+    const affa::Result res = g_display.setText(t.c_str());
+    logmsg("setText \"%s\" -> %d", t.c_str(), static_cast<int>(res));
+    return r->reply(res == affa::Result::Ok ? 200 : 409, "text/plain",
+                    res == affa::Result::Ok ? "text queued" : "setText refused");
+  });
+
+  // The radio's own text message from the capture: 77 09 55 FF 31 01 + exactly 8 characters.
+  g_server.on("/api/oemtext", HTTP_GET, [](PsychicRequest* r) {
+    const String t = r->hasParam("t") ? r->getParam("t")->value() : String("   1056 ");
+    const char* err = sendOemText(t);
+    return r->reply(err ? 409 : 200, "text/plain", err ? err : "OEM 0x77 text sent");
+  });
+
+  g_server.on("/api/time", HTTP_GET, [](PsychicRequest* r) {
+    const String t = r->hasParam("t") ? r->getParam("t")->value() : String("1056");
+    const affa::Result res = g_display.setTime(t.c_str());
+    logmsg("setTime \"%s\" -> %d", t.c_str(), static_cast<int>(res));
+    return r->reply(res == affa::Result::Ok ? 200 : 409, "text/plain",
+                    res == affa::Result::Ok ? "time queued" : "setTime refused");
+  });
+
+  // The whole captured opening, in order, so the bitmap is judged in the state the OEM put
+  // the panel in rather than in whatever state it happens to be.
+  g_server.on("/api/replay", HTTP_GET, [](PsychicRequest* r) {
+    if (g_replay.active) return r->reply(409, "text/plain", "a replay is already running");
+    g_replay.text   = r->hasParam("t") ? r->getParam("t")->value() : String("RENAULT");
+    g_replay.step   = 0;
+    g_replay.nextMs = ::millis();
+    g_replay.active = true;
+    logmsg("replay: OEM opening, text \"%s\"", g_replay.text.c_str());
+    return r->reply(200, "text/plain", "replaying the OEM opening");
   });
 
   // Everything else the OEM put on 0x151 during init, as one-click probes.
@@ -625,4 +749,5 @@ void loop() {
   g_display.poll();
   ElegantOTA.loop();
   sweepPoll();
+  replayPoll();
 }

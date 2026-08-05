@@ -103,6 +103,21 @@ small{color:var(--dim)}
     <button onclick="get('/api/power?on=0')">display OFF <small>52 00 00</small></button>
   </div>
   <div class="row">
+    <input id="txtline" value="RENAULT" size="10">
+    <button onclick="get('/api/text?t='+encodeURIComponent(txtline.value))">setText</button>
+    <button onclick="get('/api/oemtext?t='+encodeURIComponent(txtline.value))" title="77 09 55 FF 31 01 + 8 chars, verbatim from the capture">OEM 0x77</button>
+  </div>
+  <div class="row">
+    <button class="pri" onclick="get('/api/replay?t='+encodeURIComponent(txtline.value))">REPLAY OEM OPENING</button>
+  </div>
+  <p><small>
+    Replay sends the captured order: <span class="k">52 09 00</span> &rarr;
+    <span class="k">54 01</span> &rarr; <span class="k">54 03</span> &rarr; setText &rarr;
+    <span class="k">0x1F1</span>, 250 ms apart. In the capture the globe arrives 9 ms after
+    the text &mdash; a bare 0x1F1 into a panel that has been sent nothing may draw nothing,
+    and that would prove nothing about the message.
+  </small></p>
+  <div class="row">
     <button onclick="get('/api/probe?w=5401')">54 01</button>
     <button onclick="get('/api/probe?w=5403')">54 03</button>
     <button onclick="get('/api/probe?w=25')">25 00 00 00</button>
