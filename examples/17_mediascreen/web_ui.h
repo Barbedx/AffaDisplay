@@ -225,7 +225,22 @@ small{color:var(--dim)}
 </section>
 
 <section style="flex:1;min-width:320px">
-  <h2>Log</h2>
+  <h2>Wire &mdash; every frame, both directions</h2>
+  <div class="row">
+    <button onclick="fetch('/api/frames?all=0').then(poll)">hide nav continuations</button>
+    <button onclick="fetch('/api/frames?all=1').then(poll)">show everything</button>
+  </div>
+  <pre id="fr">&nbsp;</pre>
+  <p><small>
+    Coalesced against the newest row, so a marquee shows as <span class="k">x12</span> rather
+    than twelve lines. <b>This is the only thing here that is evidence</b> &mdash; a log line
+    prints whether or not the call was accepted; a frame either went out or it did not.
+    <br><br>Nav <b>continuation</b> frames are hidden by default: an image is 1 + 43 CFs + 43
+    flow controls, and at 4 fps that flushes a 40-slot ring ten times a second. The
+    <b>first</b> frame of each transfer is always kept &mdash; that is where the header is,
+    and the header is usually what is in question.
+  </small></p>
+  <h2 style="margin-top:14px">Log</h2>
   <pre id="log">&nbsp;</pre>
 </section>
 
@@ -347,6 +362,7 @@ async function poll(){
       'duty    <span class="'+(s.duty>60?'r':s.duty>35?'w':'g')+'">'+s.duty+'%</span> of the link\n'+
       'period  '+s.periodms+' ms';
     document.getElementById('log').textContent=await (await fetch('/api/log')).text();
+    document.getElementById('fr').textContent=await (await fetch('/api/frames')).text();
   }catch(e){document.getElementById('st').innerHTML='<span class="r">offline</span>';}
 }
 setInterval(()=>{stepBars();draw();},250);

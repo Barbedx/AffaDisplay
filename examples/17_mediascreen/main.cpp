@@ -239,6 +239,53 @@ void logmsg(const char* fmt, ...) {
 }
 
 // ---------------------------------------------------------------------------
+// The wire tap
+// ---------------------------------------------------------------------------
+// EVERY LOG LINE IN THIS FILE USED TO PRINT WHETHER OR NOT THE CALL WAS ACCEPTED — the
+// opening logged "display ON" from a (void)-cast setPower whose Result was thrown away.
+// That is not evidence, it is a comment with a timestamp.
+//
+// So: the frames themselves. Every frame in both directions, coalesced against the newest
+// row so a marquee does not flood it, readable at /api/frames. If you want to know whether
+// `151 03 52 09 00` went out, this is the only thing in the example that can answer.
+portMUX_TYPE g_frMux = portMUX_INITIALIZER_UNLOCKED;
+constexpr int kFrameRing = 40;
+struct FrameRec { uint16_t id; uint8_t len, dir, d[8]; uint16_t count; uint32_t ms; };
+FrameRec g_fr[kFrameRing];
+uint16_t g_frHead = 0;
+
+// DROP THE CONTINUATION FRAMES BY DEFAULT. A nav image is 1 first frame + 43 CFs + 43 flow
+// controls; at 4 fps that is ~350 frames a second and a 40-slot ring holds a tenth of one
+// image. Everything worth looking at — the opening, the text, the handshake — was being
+// flushed out before it could be read, which is how a tap that logs everything manages to
+// show you nothing.
+//
+// The FIRST frame of every transfer is kept, because that is where the header lives and the
+// header is what is usually in question.
+bool g_tapAll = false;
+
+void onTap(const affa::Frame& f, affa::Direction dir, void*) {
+  const uint8_t d = (dir == affa::Direction::Rx) ? 0 : 1;
+  if (!g_tapAll) {
+    const uint16_t id = static_cast<uint16_t>(f.id);
+    if (id == affa::carminat::kIdNav && f.len && (f.data[0] & 0xF0) == 0x20) return;
+    if (id == (affa::carminat::kIdNav | 0x400)) return;      // its flow control
+  }
+  portENTER_CRITICAL(&g_frMux);
+  FrameRec& last = g_fr[(g_frHead + kFrameRing - 1) % kFrameRing];
+  if (last.count && last.dir == d && last.id == static_cast<uint16_t>(f.id) &&
+      last.len == f.len && memcmp(last.d, f.data, 8) == 0) {
+    ++last.count;
+  } else {
+    FrameRec& r = g_fr[g_frHead];
+    r.id = static_cast<uint16_t>(f.id); r.len = f.len; r.dir = d;
+    memcpy(r.d, f.data, 8); r.count = 1; r.ms = ::millis();
+    g_frHead = (g_frHead + 1) % kFrameRing;
+  }
+  portEXIT_CRITICAL(&g_frMux);
+}
+
+// ---------------------------------------------------------------------------
 // The pane
 // ---------------------------------------------------------------------------
 void renderScene(uint8_t* b) {
@@ -323,13 +370,16 @@ void openingPoll() {
   if (static_cast<int32_t>(::millis() - g_open.nextMs) < 0) return;
 
   switch (g_open.step) {
-    case 0: (void)g_panel->setPower(true);        logmsg("opening 1/3: display ON"); break;
+    case 0: logmsg("opening 1/3: display ON -> result %d",
+                   static_cast<int>(g_panel->setPower(true))); break;
     case 1: { const uint8_t p[3] = {0x02, 0x54, 0x01};
-              (void)g_base->enqueue(affa::carminat::kIdSetText, p, sizeof(p));
-              logmsg("opening 2/3: 54 01"); break; }
+              logmsg("opening 2/3: 54 01 -> ticket %u", static_cast<unsigned>(
+                     g_base->enqueue(affa::carminat::kIdSetText, p, sizeof(p))));
+              break; }
     case 2: { const uint8_t p[3] = {0x02, 0x54, 0x03};
-              (void)g_base->enqueue(affa::carminat::kIdSetText, p, sizeof(p));
-              logmsg("opening 3/3: 54 03 (close full window)"); break; }
+              logmsg("opening 3/3: 54 03 -> ticket %u", static_cast<unsigned>(
+                     g_base->enqueue(affa::carminat::kIdSetText, p, sizeof(p))));
+              break; }
     default:
       g_open.done  = true;
       g_forceFrame = true;             // and push the first image into a panel now ready for it
@@ -535,6 +585,30 @@ void routes() {
     return ESP_OK;
   });
 
+  g_server.on("/api/frames", HTTP_GET, [](PsychicRequest* r) {
+    if (r->hasParam("all")) g_tapAll = r->getParam("all")->value() != "0";
+    static char out[kFrameRing * 72 + 96];
+    size_t at = 0;
+    at += snprintf(out + at, sizeof(out) - at, "%8s  d  id  data%s\n", "ms",
+                   g_tapAll ? "   [ALL]" : "   [nav CFs hidden - ?all=1]");
+    portENTER_CRITICAL(&g_frMux);
+    for (int i = 0; i < kFrameRing; ++i) {
+      const FrameRec& f = g_fr[(g_frHead + i) % kFrameRing];
+      if (!f.count || at + 80 >= sizeof(out)) continue;
+      at += snprintf(out + at, sizeof(out) - at, "%8lu %s %03X ", (unsigned long)f.ms,
+                     f.dir ? "TX" : "rx", f.id);
+      for (int k = 0; k < f.len && k < 8; ++k)
+        at += snprintf(out + at, sizeof(out) - at, "%02X ", f.d[k]);
+      if (f.count > 1) at += snprintf(out + at, sizeof(out) - at, " x%u", f.count);
+      at += snprintf(out + at, sizeof(out) - at, "\n");
+    }
+    portEXIT_CRITICAL(&g_frMux);
+    PsychicResponse res(r);
+    res.setContentType("text/plain");
+    res.setContent(out);
+    return res.send();
+  });
+
   g_server.on("/api/log", HTTP_GET, [](PsychicRequest* r) {
     static char out[kLogLines * 96 + 64];
     size_t at = 0;
@@ -629,6 +703,7 @@ void setup() {
                 g_family == Family::Carminat ? "Carminat" : "UpdateList");
 
   if (!g_link.begin(kRxPin, kTxPin, kBitrate)) Serial.println("[media] CAN begin FAILED");
+  g_base->onFrame(&onTap, nullptr);      // layer 0: everything, both directions
   g_base->onComplete(&onDone, nullptr);
   g_base->onSync(&onSyncChanged, nullptr);
   if (!g_base->begin()) Serial.println("[media] display begin FAILED");
@@ -671,7 +746,18 @@ void loop() {
     g_mqTitle.nextMs = now + g_mqTitle.periodMs;
     char win[kMainWidth + 1];
     g_mqTitle.window(g_p.title, win, kMainWidth);
-    (void)g_panel->setText(win);
+    // DO NOT REPAINT TEXT THAT HAS NOT CHANGED. The timer used to fire unconditionally, so a
+    // title short enough not to scroll — or a marquee switched off — still redrew the main
+    // line every 700 ms for ever. That is a 3-frame ISO-TP transfer on 0x151 interleaved
+    // into the nav pane's 44-frame transfers, permanently, for no new information.
+    //
+    // Same rule as the pane, and for the same reason: a display shows what it was last told,
+    // so telling it again is not free and not idempotent as far as the bus is concerned.
+    static char sent[kMainWidth + 1] = {0};
+    if (strcmp(win, sent) != 0) {
+      (void)g_panel->setText(win);
+      memcpy(sent, win, sizeof(sent));
+    }
   }
 
   // The info-menu rows, scrolling in place. Off by default — three rows repainting on a
