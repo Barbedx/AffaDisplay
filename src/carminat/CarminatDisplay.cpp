@@ -184,6 +184,13 @@ bool CarminatDisplay::routeKeyToMenu(Key k, KeyEdge e) { return _menuCtrl.routeK
 // characters shown". Observed working behaviour; shortening it is an untested change.
 Result CarminatDisplay::setText(const char* text, uint8_t digit) {
   (void)digit;                      // no digit addressing here; it is UpdateList's signature
+  return setTextStyled(text, kIconsNone, kSrcIconNone, kFormatPlain);
+}
+
+// setText with the four documented header bytes exposed. See the declaration for what each
+// one selects; the plain override above is this with the values it always used.
+Result CarminatDisplay::setTextStyled(const char* text, uint8_t icon, uint8_t srcIcon,
+                                      uint8_t fmt) {
   const Ascii t(text);
 
   uint8_t d[8 + kTextCells];
@@ -193,10 +200,10 @@ Result CarminatDisplay::setText(const char* text, uint8_t digit) {
   d[n++] = kCmdText;                // 0x77 windowed. 0x74 is the full-window overlay, and
                                     // sending 0x77 while no window is applied has been
                                     // observed to leave the main screen frozen.
-  d[n++] = kIconsNone;              // 0x55 RDS icon bank: none
+  d[n++] = icon;                    // RDS icon bank: kIconsNone / kIconsAfRds / 0x09
   d[n++] = kIconBank2;              // 0x55 fixed, meaning unknown
-  d[n++] = kSrcIconNone;            // 0xFF: no source label
-  d[n++] = kFormatPlain;            // 0x60: plain ASCII
+  d[n++] = srcIcon;                 // source label: none / MANU / PRESET
+  d[n++] = fmt;                     // radio style (point between digits) or plain ASCII
   d[n++] = kControlByte;            // always 0x01
 
   for (uint8_t i = 0; i < kTextCells; ++i)   // NUL-padded, truncated at 14

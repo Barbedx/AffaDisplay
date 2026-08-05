@@ -230,6 +230,18 @@ inline constexpr uint8_t kFormatPlain = 0x60;  // 0x19-0x3F radio style, 0x59-0x
 inline constexpr uint8_t kControlByte = 0x01;  // always 0x01                     [CAP]
 inline constexpr uint8_t kPopupIcon   = 0x09;  // the OEM volume popup's left icon [CAP]
 
+// The message box's button count, at payload offset 4 — confirmed on four OEM captures with
+// 0, 1 and 2 buttons. showConfirmBox() sends 1 (an OK box); kButtonsYesNo is the two-button
+// form, which also carries two 6-byte labels before the body. [OEM]
+inline constexpr uint8_t kButtonsNone  = 0x00;
+inline constexpr uint8_t kButtonsOk    = 0x01;
+inline constexpr uint8_t kButtonsYesNo = 0x02;
+inline constexpr uint8_t kButtonLabelLen = 6;
+// Selection inside a message box moves with 29 05 <index> — mode 0x05, not the 0x01 the
+// list screen uses. [OEM]
+inline constexpr uint8_t kSelectModeBox  = 0x05;
+inline constexpr uint8_t kSelectModeList = 0x01;
+
 // Row tags. The SAME bytes appear in the highlight frame and at showMenu payload offsets
 // 4, 38 and 65 — they are row identifiers, not magic numbers. [CAP]
 inline constexpr uint8_t kRowTagTop    = 0x7E;

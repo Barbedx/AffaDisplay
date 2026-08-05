@@ -45,6 +45,24 @@ enum class Key : uint16_t {
 // direction bit and half the hold mask.
 enum class KeyEdge : uint8_t { Click = 0, Hold = 1 };
 
+// Names, for anything that shows a key to a person: a serial line, a web console, a test
+// harness. Every consumer that displays keys was writing this switch itself, and a switch
+// that lives beside the enum cannot fall out of step with it.
+inline const char* keyName(Key k) {
+  switch (k) {
+    case Key::Load:     return "Load";
+    case Key::SrcNext:  return "SrcNext";
+    case Key::SrcPrev:  return "SrcPrev";
+    case Key::VolUp:    return "VolUp";
+    case Key::VolDown:  return "VolDown";
+    case Key::Pause:    return "Pause";
+    case Key::RollUp:   return "RollUp";
+    case Key::RollDown: return "RollDown";
+  }
+  return "?";
+}
+inline const char* edgeName(KeyEdge e) { return e == KeyEdge::Hold ? "hold" : "click"; }
+
 // Where an emulated key press is to have its effect. A press on the real system is
 // transmitted by the PANEL and received by us, so "emulate a key" legitimately means two
 // things at once, and an application wants each of them separately at different times.

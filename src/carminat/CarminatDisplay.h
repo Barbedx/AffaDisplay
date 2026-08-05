@@ -91,6 +91,22 @@ class CarminatDisplay final : public AffaDisplayBase {
   // onComplete(). `digit` is ignored on this panel; it exists for the UpdateList
   // signature.
   [[nodiscard]] Result setText(const char* text, uint8_t digit = 255) override;
+
+  // setText WITH THE HEADER EXPOSED. The plain override above hard-codes the four bytes
+  // after the command; they are documented (MeganeCAN's CarminatDisplay.cpp, cross-checked
+  // against the OEM capture in docs/PROTOCOL-NOTES.md §17) and an application that wants an
+  // icon on the main line has no way to ask for one otherwise.
+  //
+  //   icon     carminat::kIconsNone 0x55 / kIconsAfRds 0x45. The capture uses 0x09, which is
+  //            in neither documented list.
+  //   srcIcon  kSrcIconNone 0xFF / 0xDF "MANU" / 0xFD "PRESET"
+  //   fmt      0x19-0x3F radio style: 5 digits + '.' + 1 char. 0x59-0x7F plain ASCII.
+  //            kFormatPlain 0x60 is what the plain override sends.
+  //
+  // Format 0x31 is why the OEM's "   1056 " is 105.6 FM and not the number 1056 — the point
+  // is drawn between the digits by the panel, not by the sender.
+  [[nodiscard]] Result setTextStyled(const char* text, uint8_t icon, uint8_t srcIcon,
+                                     uint8_t fmt);
   [[nodiscard]] Result setTime(const char* hhmm) override;
   [[nodiscard]] Result setPower(bool on) override;
 

@@ -1,404 +1,575 @@
 // web_ui.h — the console for 17_mediascreen.
 //
-// It mirrors the pane rather than describing it: the same 48x48 is drawn in the browser from
-// the same state, so what the glass is doing can be checked without standing over the car.
+// SIX TABS, ONE COMMAND FUNCTION. Everything goes through cmd(op, params) and every press
+// reports its own result in the header, because the previous console had buttons that
+// silently did nothing for a day and no way to tell which.
+//
+// Three rules this file follows, each learned the hard way on this board:
+//   * anything an inline handler calls is a `function` DECLARATION, never a const arrow.
+//     Only the hoisted form is reachable from onclick here; a const that is not reachable
+//     fails silently and takes every control that used it with it.
+//   * no escape sequences produced indirectly. One lost backslash is a SyntaxError, and a
+//     SyntaxError anywhere in the block means the whole script never runs — so every button
+//     on the page dies at once while the HTML still renders perfectly.
+//   * tools/check_web_ui.js parses this file and catches both in about a second. The build
+//     cannot: a console page is a C++ raw string literal, so broken JS compiles and flashes.
 #pragma once
 
 static const char kIndexHtml[] PROGMEM = R"HTML(
 <!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AffaMedia</title>
+<title>AffaDisplay console</title>
 <style>
-:root{--bg:#0f1115;--fg:#e8eaf0;--dim:#868ea3;--line:#262b38;--acc:#5ac8fa;--ok:#4ade80;--warn:#ffb020;--bad:#ff5c5c}
+:root{--bg:#0e1014;--pn:#161a21;--fg:#e9ecf2;--dim:#7f889b;--ln:#242a35;--ac:#5ac8fa;--ok:#4ade80;--wn:#ffb020;--bd:#ff5f5f}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 ui-monospace,Menlo,Consolas,monospace}
-header{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;gap:18px;align-items:baseline;flex-wrap:wrap}
-h1{font-size:14px;margin:0;letter-spacing:.1em}
-#st{color:var(--dim);font-size:12px}
-main{display:flex;gap:18px;padding:16px;flex-wrap:wrap;align-items:flex-start}
-section{border:1px solid var(--line);border-radius:8px;padding:14px;min-width:290px}
-h2{font-size:11px;margin:0 0 12px;color:var(--dim);letter-spacing:.14em;text-transform:uppercase}
-canvas{image-rendering:pixelated;background:#000;border:1px solid var(--line);display:block}
-button{background:#1a1f2b;color:var(--fg);border:1px solid var(--line);border-radius:5px;padding:6px 11px;font:inherit;cursor:pointer}
-button:hover{border-color:var(--acc)}
-button.pri{background:#123a4f;border-color:var(--acc);color:#d6f1ff}
-input{background:#0b0d12;color:var(--fg);border:1px solid var(--line);border-radius:5px;padding:5px 7px;font:inherit}
-.row{display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-bottom:9px}
-pre{background:#080a0e;border:1px solid var(--line);border-radius:5px;padding:9px;margin:0;max-height:280px;overflow:auto;font-size:11px;color:var(--dim)}
-.k{color:var(--acc)}.g{color:var(--ok)}.w{color:var(--warn)}.r{color:var(--bad)}
+header{padding:10px 14px;border-bottom:1px solid var(--ln);display:flex;gap:14px;align-items:center;flex-wrap:wrap;position:sticky;top:0;background:var(--bg);z-index:5}
+h1{font-size:13px;margin:0;letter-spacing:.14em;white-space:nowrap}
+#st{color:var(--dim);font-size:12px;flex:1;min-width:200px}
+#res{font-size:12px;min-width:140px;text-align:right}
+nav{display:flex;gap:2px;padding:0 14px;border-bottom:1px solid var(--ln);flex-wrap:wrap;background:var(--bg)}
+nav button{background:none;border:none;border-bottom:2px solid transparent;color:var(--dim);padding:9px 14px;font:inherit;cursor:pointer}
+nav button.on{color:var(--fg);border-bottom-color:var(--ac)}
+main{padding:14px;display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start}
+section{background:var(--pn);border:1px solid var(--ln);border-radius:8px;padding:13px;min-width:280px}
+h2{font-size:10px;margin:0 0 11px;color:var(--dim);letter-spacing:.16em;text-transform:uppercase}
+button{background:#1c212b;color:var(--fg);border:1px solid var(--ln);border-radius:5px;padding:6px 10px;font:inherit;cursor:pointer}
+button:hover{border-color:var(--ac)}
+button.p{background:#123c52;border-color:var(--ac);color:#d8f2ff}
+button.d{border-color:var(--bd);color:#ffd5d5}
+input,select{background:#0a0c11;color:var(--fg);border:1px solid var(--ln);border-radius:5px;padding:5px 7px;font:inherit}
+.r{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
+label{display:flex;gap:5px;align-items:center;color:var(--dim)}
+canvas{image-rendering:pixelated;background:#000;border:1px solid var(--ln);display:block;cursor:crosshair;touch-action:none}
+pre{background:#07090d;border:1px solid var(--ln);border-radius:5px;padding:8px;margin:0;max-height:340px;overflow:auto;font-size:11px;color:var(--dim);white-space:pre}
 small{color:var(--dim)}
+.k{color:var(--ac)}.g{color:var(--ok)}.w{color:var(--wn)}.b{color:var(--bd)}
+table{border-collapse:collapse;width:100%;font-size:11px}
+td,th{padding:3px 6px;border-bottom:1px solid var(--ln);text-align:left}
+th{color:var(--dim);font-weight:normal}
+.hide{display:none}
 </style></head><body>
 
 <header>
-  <h1>AFFA<span class="k">MEDIA</span></h1>
+  <h1>AFFA<span class="k">DISPLAY</span></h1>
   <div id="st">connecting&hellip;</div>
+  <div id="res">&nbsp;</div>
+  <button class="d" onclick="cmd('panic')">PANIC</button>
 </header>
 
-<main>
+<nav>
+  <button id="t-bitmap" class="on" onclick="tab('bitmap')">Bitmap</button>
+  <button id="t-text"   onclick="tab('text')">Text</button>
+  <button id="t-menus"  onclick="tab('menus')">Menus</button>
+  <button id="t-keys"   onclick="tab('keys')">Keys</button>
+  <button id="t-wire"   onclick="tab('wire')">Wire</button>
+  <button id="t-set"    onclick="tab('set')">Settings</button>
+</nav>
 
-<section>
-  <h2>Scene</h2>
-  <div class="row">
-    <button onclick="sc('spectrum')">spectrum</button>
-    <button onclick="sc('vu')">VU</button>
-    <button onclick="sc('wave')">wave</button>
-    <button onclick="sc('clock')">clock</button>
-    <button onclick="sc('stars')">stars</button>
-    <button onclick="sc('bounce')">bounce</button>
-    <button onclick="sc('rings')">rings</button>
-  </div>
-  <div class="row">
-    <button onclick="sc('globe')">globe</button>
-    <button onclick="sc('tryzub')">tryzub</button>
-    <button onclick="sc('tryzubclock')">tryzub+clock</button>
-    <button onclick="sc('renault')">renault</button>
-    <button onclick="sc('dash')">dash</button>
-    <button onclick="sc('gauges')">gauges</button>
-    <button onclick="sc('combo')">combo</button>
-    <button onclick="sc('fontsheet')">font</button>
-    <button onclick="sc('checker')">checker</button>
-  </div>
-  <div class="row">
-    <button onclick="fetch('/api/scene?on=1').then(poll)">resume sending</button>
-    <button onclick="fetch('/api/scene?on=0').then(poll)">stop sending</button>
-    <button onclick="sc('blank')">blank the pane</button>
-    <button class="pri" onclick="fetch('/api/opening').then(poll)">replay OEM opening</button>
-  </div>
-  <p><small>
-    The first seven are drawn on the device from a frame counter; the rest are the generated
-    48&times;48 set, shared with <span class="k">16_navlab</span>. Same channel either way
-    &mdash; which is the contrast worth showing.
-  </small></p>
-  <p><small>
-    <b>stop sending</b> halts the frame pump. <span class="w">It does not clear the glass</span>
-    &mdash; the last image stays there, because no command to erase this pane is known. To
-    empty it, send <b>blank</b>: 288 zero bytes, the only way we have found.
-    <b>display OFF</b> is a different thing again &mdash; that is the backlight.
-    <br><br>Choosing any scene <b>resumes sending and pushes one frame immediately</b>, so a
-    still image reaches the glass at once. Identical frames are then <b>not resent</b> &mdash;
-    a static scene costs one transfer and then nothing, which is why <b>duty</b> falls to zero
-    on a logo and sits near 25% on the spectrum.
-  </small></p>
-</section>
+<main id="p-bitmap">
+  <section>
+    <h2>Editor &mdash; 48 &times; 48</h2>
+    <canvas id="cv" width="48" height="48" style="width:288px;height:288px"></canvas>
+    <div class="r" style="margin-top:9px">
+      <button onclick="draw(1)">pen</button>
+      <button onclick="draw(0)">eraser</button>
+      <button onclick="inv()">invert</button>
+      <button onclick="clr()">clear</button>
+      <small id="pen">pen</small>
+    </div>
+    <div class="r">
+      <small>shift</small>
+      <button onclick="sh(0,-1)">&uarr;</button><button onclick="sh(0,1)">&darr;</button>
+      <button onclick="sh(-1,0)">&larr;</button><button onclick="sh(1,0)">&rarr;</button>
+    </div>
+    <div class="r">
+      <input id="btx" size="8" value="AFFA"><input id="bsz" type="number" value="20" style="width:56px">
+      <button onclick="drawText()">render text</button>
+    </div>
+    <div class="r"><button class="p" onclick="sendBmp()">SEND TO PANEL</button></div>
+  </section>
 
-<section>
-  <h2>The pane &mdash; mirrored from the same state</h2>
-  <canvas id="cv" width="48" height="48" style="width:288px;height:288px"></canvas>
-  <p><small>
-    The browser redraws this from <span class="k">/api/state</span>, so the spectrum will not
-    match the glass frame for frame &mdash; the clock, the progress bar and the transport
-    glyph will.
-  </small></p>
-</section>
+  <section>
+    <h2>Images</h2>
+    <div class="r">
+      <button onclick="load('globe')">globe</button>
+      <button onclick="load('tryzub')">tryzub</button>
+      <button onclick="load('tryzubclock')">tryzub+clock</button>
+      <button onclick="load('renault')">renault</button>
+    </div>
+    <div class="r">
+      <button onclick="load('dash')">dash</button>
+      <button onclick="load('gauges')">gauges</button>
+      <button onclick="load('combo')">combo</button>
+      <button onclick="load('fontsheet')">font</button>
+      <button onclick="load('checker')">checker</button>
+    </div>
+    <p><small>Loads into the editor. <b>SEND TO PANEL</b> is what puts it on the glass.</small></p>
 
-<section>
-  <h2>Now playing</h2>
-  <div class="row"><small>title</small><input id="ti" size="24" value=""></div>
-  <div class="row"><small>artist</small><input id="ar" size="18" value=""></div>
-  <div class="row">
-    <small>track</small><input id="tk" type="number" style="width:56px">
-    <small>of</small><input id="tc" type="number" style="width:56px">
-    <small>len s</small><input id="tt" type="number" style="width:66px">
-  </div>
-  <div class="row">
-    <button class="pri" style="border-color:var(--bad);color:#ffd9d9" onclick="location='/api/panic'">STOP EVERYTHING</button>
-  </div>
-  <p><small>
-    <b>STOP EVERYTHING</b> is a plain link, not a fetch and not a handler that depends on any
-    other script working: marquee off, pane off, a short static line. It exists because when
-    the console broke, nothing on this page could stop a scrolling title.
-  </small></p>
-  <div class="row">
-    <button class="pri" onclick="apply()">apply</button>
-    <button onclick="send('play=1')">&#9654; play</button>
-    <button onclick="send('play=0')">&#9646;&#9646; pause</button>
-    <button onclick="send('elapsed=0')">&#9664;&#9664; restart</button>
-  </div>
-  <div class="row">
-    <button onclick="call('power_on')" title="151 03 52 09 00">display ON</button>
-    <button onclick="call('power_off')" title="151 03 52 00 00">display OFF</button>
-  </div>
-  <p><small>
-    <b>display ON/OFF</b> is the panel's backlight — <span class="k">52 09 00</span> /
-    <span class="k">52 00 00</span>. Nothing draws at all while it is off. Not the same thing
-    as <b>pane</b> above, which only stops us sending images.
-  </small></p>
-</section>
+    <h2 style="margin-top:15px">Animations &mdash; drawn on the device</h2>
+    <div class="r">
+      <button onclick="scene('spectrum')">spectrum</button>
+      <button onclick="scene('vu')">VU needle</button>
+      <button onclick="scene('wave')">waveform</button>
+      <button onclick="scene('clock')">clock</button>
+    </div>
+    <div class="r">
+      <button onclick="scene('stars')">starfield</button>
+      <button onclick="scene('bounce')">bounce</button>
+      <button onclick="scene('rings')">rings</button>
+    </div>
+    <div class="r">
+      <small>frame ms</small><input id="per" type="number" value="250" style="width:70px">
+      <button onclick="setPeriod()">set</button>
+      <button onclick="cmd('pane',{on:0})">stop pane</button>
+      <button onclick="scene('blank')">blank</button>
+    </div>
+    <p><small>
+      An image is 44 CAN frames at ISO-TP BlockSize 1 &mdash; 47&ndash;64 ms measured. 250 ms
+      is about 23% of the link; 120 ms is the floor. Identical frames are never resent, so a
+      still image costs one transfer and then nothing. <b>stop pane</b> does not clear the
+      glass &mdash; no command to erase this pane is known; <b>blank</b> sends 288 zero bytes.
+    </small></p>
+  </section>
+</main>
 
-<section>
-  <h2>Every render call</h2>
-  <div class="row">
-    <input id="ca" value="AFFA" size="9"><input id="cb" value="ROW ONE" size="9"><input id="cc" value="ROW TWO" size="9">
-    <small>n</small><input id="cn" type="number" value="0" style="width:52px">
-  </div>
-  <div class="row">
-    <button onclick="call('text')">setText</button>
-    <button onclick="call('power_on')">power ON</button>
-    <button onclick="call('power_off')">power OFF</button>
-  </div>
-  <div class="row">
-    <small>time HHMM</small>
-    <input id="tmv" value="1056" size="5" maxlength="4" style="width:64px">
-    <button class="pri" onclick="callA('time',tmv.value)">setTime</button>
-    <button onclick="useNow()">use browser clock</button>
-    <label style="margin-left:4px"><input type="checkbox" id="tks" onchange="tick()"> keep it ticking</label>
-  </div>
-  <div class="row">
-    <button onclick="call('menu')">showMenu</button>
-    <button onclick="call('menun')">showMenuN</button>
-    <button onclick="call('hilite')">highlightItem n</button>
-    <button onclick="call('select')">selectMenuItem n</button>
-  </div>
-  <div class="row">
-    <button onclick="call('infomenu')">showInfoMenu</button>
-    <button onclick="call('infopopup')">showInfoPopup</button>
-    <button onclick="call('infohide')">hideInfoPopup</button>
-  </div>
-  <div class="row">
-    <button onclick="call('popup')">showPopupText</button>
-    <button onclick="call('pophide')">hidePopup</button>
-    <button onclick="call('fullscreen')">showFullscreen</button>
-    <button onclick="call('fshide')">hideFullscreen</button>
-  </div>
-  <div class="row">
-    <button onclick="call('confirm')">showConfirmBox</button>
-    <button onclick="call('navtick')">navTick n</button>
-    <button class="pri" onclick="call('main')">give the main line back</button>
-  </div>
-  <div class="row">
-    <small>auto-return after</small>
-    <input id="hd" type="number" value="0" style="width:70px" onchange="send('hold='+hd.value)">
-    <small>ms &mdash; 0 = never</small>
-  </div>
-  <p><small>
-    <b>A screen takes the main line and the marquee shuts up.</b> Otherwise the next marquee
-    tick repaints over your menu a fraction of a second after it opens &mdash; which is not
-    the library misbehaving: <span class="k">setText</span> and <span class="k">showMenu</span>
-    are both screens on <span class="k">0x151</span> and the panel shows whichever was drawn
-    last. Deciding which one matters is the application's job, and this is it.
-    The hide calls give the line back; <b>auto-return</b> is off by default, because a menu
-    that closes itself while you are reading it is the bug this exists to fix.
-  </small></p>
-  <div class="row"><small>menuN items</small><input id="ci" value="DESTINATION|ROUTE|MAP|TRAFFIC|SETTINGS|BACK" style="flex:1;min-width:200px"></div>
-  <p><small>
-    <b>showMenuN</b> tracks all six items but the glass is a <b>two-row viewport</b> &mdash;
-    send it once, then move the selection with <b>selectMenuItem</b> (eight bytes) and the
-    panel scrolls itself.
-  </small></p>
-</section>
+<main id="p-text" class="hide">
+  <section>
+    <h2>Main line &mdash; 8 characters</h2>
+    <div class="r"><input id="mt" size="26" placeholder="text"></div>
+    <div class="r">
+      <label><input type="checkbox" id="msc"> scroll it</label>
+      <small>ms</small><input id="mms" type="number" value="700" style="width:66px">
+      <button class="p" onclick="sendText()">SET TEXT</button>
+    </div>
+    <div class="r">
+      <small>icon</small>
+      <select id="mic"><option value="0x55">none 55</option><option value="0x45">AF-RDS 45</option><option value="0x09">capture 09</option></select>
+      <small>source</small>
+      <select id="msr"><option value="0xFF">none FF</option><option value="0xDF">MANU DF</option><option value="0xFD">PRESET FD</option></select>
+    </div>
+    <div class="r">
+      <small>format</small>
+      <select id="mfm"><option value="0x60">plain ASCII 60</option><option value="0x31">radio 5+point+1  31</option><option value="0x19">radio +tick 19</option></select>
+    </div>
+    <p><small>
+      The field is <b>8 characters</b>, measured with a column ruler rather than assumed.
+      Longer than that has to scroll or be cut. Format <span class="k">0x31</span> is radio
+      style &mdash; the panel draws a point between the digits, which is why the OEM's
+      <span class="k">"   1056 "</span> reads as 105.6 FM and not as the number 1056.
+    </small></p>
+  </section>
 
-<section>
-  <h2>Running text</h2>
-  <div class="row">
-    <label><input type="checkbox" id="mt" onchange="send('mqtitle='+(mt.checked?1:0))"> marquee the title</label>
-    <small>ms</small><input id="mtm" type="number" value="700" style="width:64px" onchange="send('titlems='+mtm.value)">
-  </div>
-  <div class="row">
-    <label><input type="checkbox" id="mr" onchange="send('mqrows='+(mr.checked?1:0))"> marquee info rows</label>
-    <label><input type="checkbox" id="rl" onchange="send('rowslive='+(rl.checked?1:0))"> keep repainting</label>
-    <small>ms</small><input id="mrm" type="number" value="700" style="width:64px" onchange="send('rowms='+mrm.value)">
-  </div>
-  <div class="row"><input id="r0" size="20" value="DESTINATION MEMORY"><button onclick="send('row0='+encodeURIComponent(r0.value))">row 0</button></div>
-  <div class="row"><input id="r1" size="20" value="TRAFFIC INFORMATION"><button onclick="send('row1='+encodeURIComponent(r1.value))">row 1</button></div>
-  <div class="row"><input id="r2" size="20" value="SYSTEM SETTINGS"><button onclick="send('row2='+encodeURIComponent(r2.value))">row 2</button></div>
-  <p><small>
-    The main line shows <b>8 characters</b> and an info-menu row shows <b>8</b> &mdash;
-    measured with the ruler, not assumed. Anything longer has to scroll, which is what this
-    is. <span class="w">Three rows repainting on a timer is a lot of traffic next to one main
-    line</span>, so it is off by default.
-  </small></p>
-</section>
+  <section>
+    <h2>Clock</h2>
+    <div class="r">
+      <input id="hh" size="4" maxlength="4" value="1056" style="width:70px">
+      <button class="p" onclick="setTimeNow()">setTime</button>
+      <button onclick="useNow()">browser clock</button>
+    </div>
+    <p><small>On this family the radio owns the clock; it only stays right if something keeps
+      sending it.</small></p>
 
-<section>
-  <h2>Panel family &mdash; a BOOT choice</h2>
-  <div class="row">
-    <span id="fam"><small>&nbsp;</small></span>
-    <button onclick="if(confirm('Reboot into Carminat?'))location='/api/family?f=carminat'">Carminat</button>
-    <button onclick="if(confirm('Reboot into UpdateList?'))location='/api/family?f=updatelist'">UpdateList</button>
-  </div>
-  <p><small>
-    Carminat syncs on <span class="k">0x3AF</span>, UpdateList on <span class="k">0x3DF</span>,
-    and the handshake, the ids and the text encoding all differ. There is no honest runtime
-    switch, so the choice is stored in NVS and applied on the next boot. The nav pane and the
-    N-item menu are <b>Carminat only</b>.
-  </small></p>
-</section>
+    <h2 style="margin-top:15px">Power</h2>
+    <div class="r">
+      <button onclick="cmd('power',{on:1})">display ON</button>
+      <button onclick="cmd('power',{on:0})">display OFF</button>
+      <button onclick="cmd('opening')">replay OEM opening</button>
+    </div>
+    <p><small><span class="k">52 09 00</span> / <span class="k">52 00 00</span>. Nothing draws
+      at all while off. The opening is what makes the panel accept a nav image.</small></p>
 
-<section>
-  <h2>Bus budget</h2>
-  <div class="row">
-    <small>frame ms</small><input id="pm" type="number" value="250" style="width:70px">
-    <small>title ms</small><input id="tm" type="number" value="700" style="width:70px">
-    <button onclick="send('period='+pm.value+'&titlems='+tm.value)">set</button>
-  </div>
-  <div class="row">
-    <button onclick="pm.value=120;send('period=120')">120 &mdash; hard</button>
-    <button onclick="pm.value=250;send('period=250')">250 &mdash; default</button>
-    <button onclick="pm.value=478;send('period=478')">478 &mdash; OEM</button>
-    <button onclick="pm.value=1000;send('period=1000')">1000 &mdash; idle</button>
-  </div>
-  <pre id="bud">&nbsp;</pre>
-  <p><small>
-    One image is 304 wire bytes = 44 CAN frames, and the panel runs ISO-TP
-    <span class="k">BlockSize 1</span>, so every consecutive frame costs a round trip &mdash;
-    47&ndash;54 ms measured. <b>duty</b> is how much of the link the images are actually
-    taking; <b>drops</b> counts frames skipped because the previous one was still in flight,
-    which is the honest signal that the period is too short.
-  </small></p>
-</section>
+    <h2 style="margin-top:15px">Popup overlay</h2>
+    <div class="r">
+      <input id="pt" size="10" value="VOL 28">
+      <button class="p" onclick="sendPopup()">show</button>
+      <button onclick="cmd('pophide')">hide</button>
+    </div>
+    <div class="r">
+      <small>icon</small>
+      <select id="pic"><option value="0x09">volume 09</option><option value="0x55">none 55</option><option value="0x45">AF-RDS 45</option></select>
+      <small>fmt</small>
+      <select id="pfm"><option value="0x60">plain 60</option><option value="0x31">radio 31</option></select>
+    </div>
+    <p><small>The one true overlay: the screen underneath keeps redrawing and reappears when
+      it is hidden. Its lifetime is the application's &mdash; nothing auto-closes it.</small></p>
 
-<section style="flex:1;min-width:320px">
-  <h2>Wire &mdash; every frame, both directions</h2>
-  <div class="row">
-    <button onclick="fetch('/api/frames?all=0').then(poll)">hide nav continuations</button>
-    <button onclick="fetch('/api/frames?all=1').then(poll)">show everything</button>
-  </div>
-  <pre id="fr">&nbsp;</pre>
-  <p><small>
-    Coalesced against the newest row, so a marquee shows as <span class="k">x12</span> rather
-    than twelve lines. <b>This is the only thing here that is evidence</b> &mdash; a log line
-    prints whether or not the call was accepted; a frame either went out or it did not.
-    <br><br>Nav <b>continuation</b> frames are hidden by default: an image is 1 + 43 CFs + 43
-    flow controls, and at 4 fps that flushes a 40-slot ring ten times a second. The
-    <b>first</b> frame of each transfer is always kept &mdash; that is where the header is,
-    and the header is usually what is in question.
-  </small></p>
-  <h2 style="margin-top:14px">Log</h2>
-  <pre id="log">&nbsp;</pre>
-</section>
+    <h2 style="margin-top:15px">Fullscreen</h2>
+    <div class="r">
+      <button class="p" onclick="randomFull()">random full-width</button>
+      <button onclick="cmd('fshide')">hide</button>
+    </div>
+  </section>
+</main>
 
+<main id="p-menus" class="hide">
+  <section>
+    <h2>Two-row menu</h2>
+    <div class="r">
+      <input id="mh" size="9" value="MENU"><input id="ma" size="9" value="ROW ONE"><input id="mb" size="9" value="ROW TWO">
+    </div>
+    <div class="r">
+      <small>scroll mask</small>
+      <select id="msk"><option value="0">none</option><option value="7">up</option><option value="11">down</option><option value="3">both</option></select>
+      <button class="p" onclick="sendMenu()">showMenu</button>
+    </div>
+    <div class="r">
+      <button onclick="cmd('hilite',{n:0})">highlight row 0</button>
+      <button onclick="cmd('hilite',{n:1})">highlight row 1</button>
+    </div>
+
+    <h2 style="margin-top:15px">N-item list</h2>
+    <div class="r"><input id="nh" size="10" value="NAVIGATION"></div>
+    <div class="r"><input id="ni" style="flex:1;min-width:220px" value="DESTINATION|ROUTE|MAP|TRAFFIC|SETTINGS|BACK"></div>
+    <div class="r">
+      <button class="p" onclick="sendMenuN()">showMenuN</button>
+      <small>index</small><input id="nsel" type="number" value="0" style="width:52px">
+      <button onclick="selectItem()">selectMenuItem</button>
+    </div>
+    <p><small>
+      The panel <b>tracks six items and draws two</b> &mdash; the glass is a two-row viewport.
+      Send the list once, then move the selection with <b>selectMenuItem</b> (eight bytes
+      instead of two hundred) and the panel scrolls itself.
+    </small></p>
+  </section>
+
+  <section>
+    <h2>Info menu &mdash; three rows, 8 chars each</h2>
+    <div class="r"><input id="r0" size="18"><label><input type="checkbox" id="s0"> scroll</label></div>
+    <div class="r"><input id="r1" size="18"><label><input type="checkbox" id="s1"> scroll</label></div>
+    <div class="r"><input id="r2" size="18"><label><input type="checkbox" id="s2"> scroll</label></div>
+    <div class="r">
+      <button class="p" onclick="sendRows()">showInfoMenu</button>
+      <label><input type="checkbox" id="rlive" onchange="sendRows()"> keep repainting</label>
+    </div>
+    <p><small>
+      This is the screen that <b>coexists with the bitmap</b> &mdash; both on the glass at
+      once. Repainting three rows on a timer is a lot of traffic next to one main line, so it
+      is opt-in.
+    </small></p>
+
+    <h2 style="margin-top:15px">Info popup</h2>
+    <div class="r">
+      <button class="p" onclick="cmd('infopopup',{a:'LINE ONE',b:'LINE TWO',c:'LINE THREE'})">show</button>
+      <button onclick="cmd('infohide')">hide</button>
+    </div>
+
+    <h2 style="margin-top:15px">Message box</h2>
+    <div class="r">
+      <input id="ch" size="9" value="CONFIRM"><input id="ca" size="12" value="DELETE ENTRY?">
+    </div>
+    <div class="r">
+      <button class="p" onclick="sendConfirm()">showConfirmBox</button>
+      <button onclick="cmd('boxsel',{n:0})">select 0</button>
+      <button onclick="cmd('boxsel',{n:1})">select 1</button>
+    </div>
+    <p><small>
+      <span class="w">showConfirmBox is a ONE-button OK box.</span> It emits
+      <span class="k">21 05 00 00 01 49</span> and byte 4 is the button count, confirmed on
+      four OEM captures with 0, 1 and 2 buttons. The real Yes/No form is
+      <span class="k">21 05 01 00 02 49</span> with two 6-byte labels, and the library has no
+      builder for it yet. The select buttons send <span class="k">29 05 &lt;n&gt;</span>,
+      which is how a box moves its selection &mdash; on a one-button box only index 0 exists,
+      so index 1 doing nothing is the expected answer, not a fault.
+    </small></p>
+  </section>
+</main>
+
+<main id="p-keys" class="hide">
+  <section style="flex:1;min-width:340px">
+    <h2>Press a key on the stalk</h2>
+    <div class="r">
+      <button onclick="cmd('keysclear')">clear</button>
+      <small id="kc">0 seen</small>
+    </div>
+    <table id="kt"><thead><tr><th>ms</th><th>key</th><th>code</th><th>edge</th></tr></thead><tbody></tbody></table>
+    <p><small>
+      What the library <b>decoded</b>, not what arrived on the wire &mdash; the raw frames are
+      on the Wire tab. The <span class="k">03 89</span> guard is why this shows real keys:
+      <span class="k">0x1C1</span> also carries registration and status frames, and a decoder
+      without the guard reports those as keys 0x640F and 0x3030.
+      <br><br>Nothing here is emulated. If a press does not appear, the panel did not send it
+      or the wiring does not carry it &mdash; the joystick is on the panel, not the radio.
+    </small></p>
+  </section>
+</main>
+
+<main id="p-wire" class="hide">
+  <section style="flex:1;min-width:360px">
+    <h2>Every frame, both directions</h2>
+    <div class="r">
+      <button onclick="cmd('tap',{all:0})">hide nav continuations</button>
+      <button onclick="cmd('tap',{all:1})">show everything</button>
+      <button class="p" onclick="exportWire()">export .tsv</button>
+      <label><input type="checkbox" id="wauto" checked> follow</label>
+    </div>
+    <pre id="fr">&nbsp;</pre>
+    <p><small>
+      Coalesced against the newest row, so a repeat shows as a count. <b>This is the only
+      thing here that is evidence</b> &mdash; a log line prints whether or not the call was
+      accepted; a frame either went out or it did not.
+      <br>Nav continuations are hidden by default: an image is 1 + 43 CFs + 43 flow controls,
+      and at 4 fps that flushes the ring ten times a second. The <b>first</b> frame of each
+      transfer is always kept &mdash; that is where the header is.
+    </small></p>
+  </section>
+  <section style="flex:1;min-width:300px">
+    <h2>Log</h2>
+    <pre id="log">&nbsp;</pre>
+  </section>
+</main>
+
+<main id="p-set" class="hide">
+  <section>
+    <h2>Panel family &mdash; a BOOT choice</h2>
+    <div class="r">
+      <span id="fam"><small>&nbsp;</small></span>
+      <button onclick="famSet('carminat')">Carminat</button>
+      <button onclick="famSet('updatelist')">UpdateList</button>
+    </div>
+    <p><small>
+      Carminat syncs on <span class="k">0x3AF</span>, UpdateList on <span class="k">0x3DF</span>,
+      and the handshake, ids and text encoding all differ. There is no honest runtime switch,
+      so the choice is stored and applied on the next boot. The nav pane and the N-item list
+      are <b>Carminat only</b>.
+    </small></p>
+
+    <h2 style="margin-top:15px">Main line hold</h2>
+    <div class="r">
+      <small>auto-return after</small><input id="hold" type="number" value="0" style="width:80px">
+      <small>ms &mdash; 0 = never</small>
+      <button onclick="setHold()">set</button>
+    </div>
+    <p><small>
+      While a menu or a box is on the glass the scrolling line <b>shuts up</b>, so a repaint
+      cannot close a screen somebody is reading. The library reports which screen was last
+      acknowledged (<span class="k">lastRendered()</span>); deciding what to do about it is
+      the application's job. Auto-return is off by default, because a menu that closes itself
+      while you are reading it is the bug this prevents.
+    </small></p>
+
+    <h2 style="margin-top:15px">Board</h2>
+    <div class="r">
+      <button onclick="location='/update'">OTA update</button>
+      <button class="d" onclick="cmd('reboot')">reboot</button>
+    </div>
+    <pre id="diag">&nbsp;</pre>
+  </section>
 </main>
 
 <script>
-const cv=document.getElementById('cv'), cx=cv.getContext('2d');
-let S={elapsed:0,total:1,track:1,tracks:1,playing:false};
-let bars=[4,9,14,11,7,12,6,3], peak=[0,0,0,0,0,0,0,0], rng=0x1F1A5EED;
-const W=48,H=48;
-let px=new Uint8Array(W*H);
+// ONE COMMAND FUNCTION. Every action goes through it, every press reports its own result.
+// FUNCTION DECLARATIONS THROUGHOUT: only the hoisted form is reachable from the inline
+// onclick handlers above, and a const arrow that is not reachable fails silently.
+function cmd(op, p) {
+  var q = 'op=' + encodeURIComponent(op);
+  if (p) for (var k in p) q += '&' + k + '=' + encodeURIComponent(p[k]);
+  return fetch('/api/cmd?' + q).then(function (r) { return r.json(); }).then(function (j) {
+    say(j.ok, (j.op || op) + ': ' + j.msg);
+    poll();
+    return j;
+  }).catch(function (e) { say(false, String(e)); });
+}
+function el(id) { return document.getElementById(id); }
+function say(ok, m) { var e = el('res'); e.className = ok ? 'g' : 'b'; e.textContent = m; }
 
-const P=(x,y)=>{if(x>=0&&x<W&&y>=0&&y<H)px[y*W+x]=1;};
-const HL=(a,b,y)=>{for(let x=a;x<=b;x++)P(x,y);};
-const VL=(x,a,b)=>{for(let y=a;y<=b;y++)P(x,y);};
-const RC=(x0,y0,x1,y1,f)=>{if(f){for(let y=y0;y<=y1;y++)HL(x0,x1,y);}else{HL(x0,x1,y0);HL(x0,x1,y1);VL(x0,y0,y1);VL(x1,y0,y1);}};
-// Same 5x7 table as media_render.h — the mirror is only useful if the glyphs match.
-const D=[[0x70,0x88,0x98,0xA8,0xC8,0x88,0x70],[0x20,0x60,0x20,0x20,0x20,0x20,0x70],
-[0x70,0x88,0x08,0x10,0x20,0x40,0xF8],[0x70,0x88,0x08,0x30,0x08,0x88,0x70],
-[0x10,0x30,0x50,0x90,0xF8,0x10,0x10],[0xF8,0x80,0xF0,0x08,0x08,0x88,0x70],
-[0x30,0x40,0x80,0xF0,0x88,0x88,0x70],[0xF8,0x08,0x10,0x20,0x40,0x40,0x40],
-[0x70,0x88,0x88,0x70,0x88,0x88,0x70],[0x70,0x88,0x88,0x78,0x08,0x10,0x60]];
-const COL=[0x00,0x20,0x20,0x00,0x20,0x20,0x00], SL=[0x08,0x08,0x10,0x20,0x40,0x80,0x80];
-const G=(g,x,y)=>{for(let r=0;r<7;r++)for(let c=0;c<5;c++)if(g[r]&(0x80>>c))P(x+c,y+r);};
-function T(x,y,s){const m=Math.floor(s/60)%100,sec=s%60;let a=x;
-  if(m>=10){G(D[Math.floor(m/10)],a,y);a+=6;} G(D[m%10],a,y);a+=6; G(COL,a,y);a+=4;
-  G(D[Math.floor(sec/10)],a,y);a+=6; G(D[sec%10],a,y);}
-function TR(x,y,n,t){let a=x;G(D[Math.floor(n/10)%10],a,y);a+=6;G(D[n%10],a,y);a+=6;
-  G(SL,a,y);a+=6;G(D[Math.floor(t/10)%10],a,y);a+=6;G(D[t%10],a,y);}
+var cur = 'bitmap';
+function tab(n) {
+  var all = ['bitmap', 'text', 'menus', 'keys', 'wire', 'set'];
+  for (var i = 0; i < all.length; i++) {
+    el('p-' + all[i]).className = (all[i] === n) ? '' : 'hide';
+    el('t-' + all[i]).className = (all[i] === n) ? 'on' : '';
+  }
+  cur = n;
+  poll();
+}
 
-function stepBars(){
-  const nx=()=>{rng^=rng<<13;rng>>>=0;rng^=rng>>>17;rng^=rng<<5;rng>>>=0;return rng;};
-  for(let i=0;i<8;i++){
-    if(S.playing){
-      const pull=i>0?Math.trunc((bars[i-1]-bars[i])/3):0, kick=(nx()%9)-4;
-      bars[i]=Math.max(1,Math.min(21,bars[i]+pull+kick));
-    } else if(bars[i]>1) bars[i]--;
-    if(bars[i]>peak[i]) peak[i]=bars[i]; else if(peak[i]>0&&(nx()&3)===0) peak[i]--;
+// ---- bitmap editor ---------------------------------------------------------
+var W = 48, H = 48, ST = 6, NB = 288;
+var cv = el('cv'), cx = cv.getContext('2d');
+var px = new Uint8Array(W * H), penVal = 1, drawing = false;
+
+function paint() {
+  var im = cx.createImageData(W, H);
+  for (var i = 0; i < W * H; i++) {
+    var v = px[i] ? 255 : 0;
+    im.data[i * 4] = v; im.data[i * 4 + 1] = v; im.data[i * 4 + 2] = v; im.data[i * 4 + 3] = 255;
+  }
+  cx.putImageData(im, 0, 0);
+}
+function draw(v) { penVal = v; el('pen').textContent = v ? 'pen' : 'eraser'; }
+function inv() { for (var i = 0; i < px.length; i++) px[i] ^= 1; paint(); }
+function clr() { px.fill(0); paint(); }
+function sh(dx, dy) {
+  var n = new Uint8Array(W * H);
+  for (var y = 0; y < H; y++) for (var x = 0; x < W; x++) {
+    var sx = x - dx, sy = y - dy;
+    if (sx >= 0 && sx < W && sy >= 0 && sy < H) n[y * W + x] = px[sy * W + sx];
+  }
+  px = n; paint();
+}
+function put(e) {
+  var r = cv.getBoundingClientRect();
+  var x = Math.floor((e.clientX - r.left) / r.width * W);
+  var y = Math.floor((e.clientY - r.top) / r.height * H);
+  if (x >= 0 && x < W && y >= 0 && y < H && px[y * W + x] !== penVal) {
+    px[y * W + x] = penVal; paint();
   }
 }
-function draw(){
-  px.fill(0);
-  T(0,0,S.elapsed);
-  T(26,0,Math.max(0,S.total-S.elapsed));
-  const base=30;
-  for(let i=0;i<8;i++){
-    const x0=i*6,x1=x0+4,top=base-bars[i];
-    RC(x0,top,x1,base,true);
-    const pk=base-peak[i]-2;
-    if(pk>=9&&pk<top-1) HL(x0,x1,pk);
-  }
-  RC(0,33,47,36,false);
-  if(S.total){const f=Math.floor(46*Math.min(S.elapsed,S.total)/S.total); if(f)RC(1,34,1+f,35,true);}
-  if(S.playing){for(let r=0;r<7;r++){const w=4-(r>3?r-3:3-r);for(let c=0;c<=w;c++)P(1+c,39+r);}}
-  else {RC(1,39,2,45,true);RC(5,39,6,45,true);}
-  TR(18,39,S.track,S.tracks);
-  const im=cx.createImageData(W,H);
-  for(let i=0;i<W*H;i++){const v=px[i]?255:0;im.data[i*4]=v;im.data[i*4+1]=v;im.data[i*4+2]=v;im.data[i*4+3]=255;}
-  cx.putImageData(im,0,0);
+cv.addEventListener('pointerdown', function (e) { drawing = true; cv.setPointerCapture(e.pointerId); put(e); });
+cv.addEventListener('pointermove', function (e) { if (drawing) put(e); });
+cv.addEventListener('pointerup', function () { drawing = false; });
+
+// The browser already has a font renderer, so any string becomes a bitmap without a single
+// glyph crossing the flash.
+function drawText() {
+  var s = el('btx').value || '';
+  var size = +el('bsz').value || 20;
+  var o = document.createElement('canvas'); o.width = W; o.height = H;
+  var c = o.getContext('2d');
+  c.fillStyle = '#000'; c.fillRect(0, 0, W, H);
+  c.fillStyle = '#fff'; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.font = 'bold ' + size + 'px monospace';
+  c.fillText(s, W / 2, H / 2, W);
+  var d = c.getImageData(0, 0, W, H).data;
+  for (var i = 0; i < W * H; i++) px[i] = d[i * 4] > 110 ? 1 : 0;
+  paint();
+}
+function hex(a) {
+  var s = '';
+  for (var i = 0; i < a.length; i++) s += ('0' + a[i].toString(16).toUpperCase()).slice(-2);
+  return s;
+}
+// The OEM packing: row-major, 6 bytes a row, MSB-first.
+function pack() {
+  var b = new Uint8Array(NB);
+  for (var y = 0; y < H; y++) for (var x = 0; x < W; x++)
+    if (px[y * W + x]) b[y * ST + (x >> 3)] |= 0x80 >> (x & 7);
+  return b;
+}
+function load(n) {
+  fetch('/api/img?n=' + n).then(function (r) { return r.text(); }).then(function (t) {
+    for (var y = 0; y < H; y++) for (var x = 0; x < W; x++) {
+      var byteAt = y * ST + (x >> 3);
+      var v = parseInt(t.substr(byteAt * 2, 2), 16);
+      px[y * W + x] = (v >> (7 - (x & 7))) & 1;
+    }
+    paint();
+    say(true, n + ' loaded into the editor');
+  });
+}
+function sendBmp() {
+  fetch('/api/bmp', { method: 'POST', body: hex(pack()) })
+    .then(function (r) { return r.text(); })
+    .then(function (t) { say(true, 'bitmap: ' + t); poll(); });
+}
+function scene(n) { cmd('scene', { n: n }); }
+function setPeriod() { cmd('period', { ms: el('per').value }); }
+
+// ---- text ------------------------------------------------------------------
+function sendText() {
+  cmd('text', { t: el('mt').value, scroll: el('msc').checked ? 1 : 0, ms: el('mms').value,
+                icon: el('mic').value, src: el('msr').value, fmt: el('mfm').value });
+}
+function sendPopup() {
+  cmd('popup', { t: el('pt').value, icon: el('pic').value, fmt: el('pfm').value });
+}
+function setTimeNow() {
+  var v = el('hh').value;
+  if (!/^[0-9][0-9][0-9][0-9]$/.test(v)) { say(false, 'HHMM, four digits'); return; }
+  cmd('time', { t: v });
+}
+function useNow() {
+  var d = new Date();
+  el('hh').value = ('0' + d.getHours()).slice(-2) + ('0' + d.getMinutes()).slice(-2);
+  setTimeNow();
+}
+var WORDS = ['ROUTE CALCULATED', 'NAVIGATION READY', 'TRAFFIC AHEAD', 'DESTINATION REACHED',
+             'NO CD INSERTED', 'SYSTEM UPDATED', 'GPS SIGNAL LOST', 'ARRIVING SHORTLY'];
+function pick() { return WORDS[Math.floor(Math.random() * WORDS.length)]; }
+function randomFull() { cmd('fullscreen', { a: pick(), b: pick(), c: pick() }); }
+
+// ---- menus -----------------------------------------------------------------
+function sendMenu() {
+  cmd('menu', { h: el('mh').value, a: el('ma').value, b: el('mb').value, scroll: el('msk').value });
+}
+function sendMenuN() { cmd('menun', { h: el('nh').value, i: el('ni').value, n: el('nsel').value }); }
+function selectItem() { cmd('select', { n: el('nsel').value }); }
+function sendConfirm() { cmd('confirm', { h: el('ch').value, a: el('ca').value }); }
+function sendRows() {
+  cmd('infomenu', { r0: el('r0').value, r1: el('r1').value, r2: el('r2').value,
+                    s0: el('s0').checked ? 1 : 0, s1: el('s1').checked ? 1 : 0,
+                    s2: el('s2').checked ? 1 : 0, live: el('rlive').checked ? 1 : 0 });
 }
 
-// A FUNCTION DECLARATION, NOT A const ARROW, and that is the whole bug fix. Inline onclick
-// handlers here resolved 'call' and 'sc' — both function declarations, hoisted onto the
-// global object — but never 'send', so every control that used it did nothing at all and
-// said nothing about it: play, pause, restart, both marquee toggles, the frame period, the
-// row text. The page looked alive because the buttons that happened to use the other two
-// worked fine.
-//
-// Anything an inline handler calls is declared with 'function' from here on.
-function send(q){ return fetch('/api/player?'+q).then(poll); }
-function apply(){
-  send('title='+encodeURIComponent(ti.value)+'&artist='+encodeURIComponent(ar.value)+
-       '&track='+tk.value+'&tracks='+tc.value+'&total='+tt.value);
+// ---- settings --------------------------------------------------------------
+function famSet(f) { if (confirm('Reboot into ' + f + '?')) cmd('family', { f: f }); }
+function setHold() { cmd('hold', { ms: el('hold').value }); }
+function exportWire() {
+  fetch('/api/frames').then(function (r) { return r.text(); }).then(function (t) {
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([t], { type: 'text/tab-separated-values' }));
+    a.download = 'affa-wire.tsv';
+    a.click();
+    say(true, 'exported ' + (t.split('\n').length - 1) + ' rows');
+  });
 }
-function sc(n){fetch('/api/scene?n='+n).then(poll);}
-// setTime wants exactly four digits; anything else is a silent no-op on the panel, so it is
-// rejected here where it can be seen instead.
-function callA(w,a){
-  if(w==='time'&&!/^[0-9]{4}$/.test(a)){alert('HHMM — four digits');return;}
-  const q=new URLSearchParams({w,a,b:cb.value,c:cc.value,n:cn.value,i:ci.value});
-  fetch('/api/call?'+q).then(async r=>{
-    const t=await r.text();
-    document.getElementById('bud').insertAdjacentHTML('afterbegin',
-      '<span class="'+(r.ok?'g':'r')+'">'+t+'</span>\n');
-  }).then(poll);
+
+// ---- status ----------------------------------------------------------------
+var first = true;
+function poll() {
+  fetch('/api/state').then(function (r) { return r.json(); }).then(function (s) {
+    if (first) {
+      el('mt').value = s.main; el('msc').checked = s.scroll; el('mms').value = s.mainms;
+      el('per').value = s.period;
+      for (var i = 0; i < 3; i++) { el('r' + i).value = s.rows[i].t; el('s' + i).checked = s.rows[i].s; }
+      el('rlive').checked = s.rowslive;
+      first = false;
+    }
+    el('st').innerHTML =
+      '<span class="k">' + s.phase + '</span> &middot; ' +
+      (s.live ? '<span class="g">link up</span>' : '<span class="b">LINK DOWN</span>') +
+      (s.opened ? '' : ' &middot; <span class="b">NOT OPENED</span>') +
+      ' &middot; ' + s.scene + (s.paneon ? '' : ' <span class="w">(pane off)</span>') +
+      ' &middot; ' + (s.owner === 'main' ? 'line free' : '<span class="w">screen holds the line</span>') +
+      ' &middot; ' + s.ok + '/' + s.frames + ' ok' +
+      (s.fail ? ' <span class="b">' + s.fail + ' fail</span>' : '') +
+      ' &middot; duty ' + s.duty + '%';
+    el('fam').innerHTML = '<small>running <span class="k">' + s.family + '</span>' +
+      (s.nav ? '' : ' &mdash; <span class="w">no nav pane</span>') + '</small>';
+    el('kc').textContent = s.keys + ' seen';
+    el('diag').textContent =
+      'family   ' + s.family + '\nphase    ' + s.phase +
+      '\nqueued   ' + s.queued + '\nlastslot ' + s.slot +
+      '\nframes   ' + s.frames + '  ok ' + s.ok + '  fail ' + s.fail + '  drops ' + s.drops +
+      '\nper img  ' + s.avgms + ' ms\nduty     ' + s.duty + '%' +
+      '\nheap     ' + s.heap + '\nuptime   ' + s.up + ' s';
+  }).catch(function () { el('st').innerHTML = '<span class="b">offline</span>'; });
+
+  if (cur === 'wire') {
+    fetch('/api/frames').then(function (r) { return r.text(); }).then(function (t) {
+      var e = el('fr'); e.textContent = t;
+      if (el('wauto').checked) e.scrollTop = e.scrollHeight;
+    });
+    fetch('/api/log').then(function (r) { return r.text(); }).then(function (t) {
+      el('log').textContent = t;
+    });
+  }
+  if (cur === 'keys') {
+    fetch('/api/keys').then(function (r) { return r.json(); }).then(function (a) {
+      var b = '';
+      for (var i = a.length - 1; i >= 0; i--)
+        b += '<tr><td>' + a[i].ms + '</td><td class="k">' + a[i].name +
+             '</td><td>0x' + ('000' + a[i].code.toString(16).toUpperCase()).slice(-4) +
+             '</td><td>' + a[i].edge + '</td></tr>';
+      document.querySelector('#kt tbody').innerHTML = b ||
+        '<tr><td colspan="4"><small>nothing yet &mdash; press a key on the stalk</small></td></tr>';
+    });
+  }
 }
-function hhmm(){const d=new Date();
-  return String(d.getHours()).padStart(2,'0')+String(d.getMinutes()).padStart(2,'0');}
-function useNow(){tmv.value=hhmm();callA('time',tmv.value);}
-// The panel has no clock of its own on this family — the radio owns it, so it only stays
-// right if something keeps sending it. Once a minute is enough and costs one short frame.
-let tkTimer=null;
-function tick(){
-  if(tkTimer){clearInterval(tkTimer);tkTimer=null;}
-  if(tks.checked){useNow();tkTimer=setInterval(useNow,60000);}
-}
-function call(w){
-  const q=new URLSearchParams({w,a:ca.value,b:cb.value,c:cc.value,n:cn.value,i:ci.value});
-  fetch('/api/call?'+q).then(async r=>{
-    const t=await r.text();
-    const el=document.getElementById('bud');
-    el.insertAdjacentHTML('afterbegin','<span class="'+(r.ok?'g':'r')+'">'+t+'</span>\n');
-  }).then(poll);
-}
-let first=true;
-async function poll(){
-  try{
-    const s=await (await fetch('/api/state')).json();
-    S=s;
-    if(first){ti.value=s.title;ar.value=s.artist;tk.value=s.track;tc.value=s.tracks;
-             tt.value=s.total;pm.value=s.periodms;
-             mt.checked=s.mqtitle;mr.checked=s.mqrows;rl.checked=s.rowslive;first=false;}
-    document.getElementById('fam').innerHTML='<small>running <span class="k">'+s.family+
-      '</span>'+(s.nav?'':' &mdash; <span class="w">no nav pane</span>')+'</small>';
-    document.getElementById('st').innerHTML=
-      'phase <span class="k">'+s.phase+'</span> &middot; '+
-      (s.live?'<span class="g">link up</span>':'<span class="r">LINK DOWN</span>')+
-      ' &middot; '+(s.opened?'':'<span class="r">NOT OPENED</span> &middot; ')+
-      (s.owner==='main'?'':'<span class="w">screen holds the line</span> &middot; ')+
-      '<span class="k">'+s.scene+'</span>'+(s.paneon?'':' <span class="w">(pane off)</span>')+
-      ' &middot; '+(s.playing?'<span class="g">&#9654; playing</span>':'&#9646;&#9646; paused')+
-      ' &middot; heap '+s.heap;
-    document.getElementById('bud').innerHTML=
-      'frames  '+s.frames+'   ok <span class="g">'+s.ok+'</span>   fail <span class="'+(s.fail?'r':'')+'">'+s.fail+'</span>\n'+
-      'drops   <span class="'+(s.drops?'w':'')+'">'+s.drops+'</span>   (previous image still in flight)\n'+
-      'per img '+s.avgms+' ms\n'+
-      'duty    <span class="'+(s.duty>60?'r':s.duty>35?'w':'g')+'">'+s.duty+'%</span> of the link\n'+
-      'period  '+s.periodms+' ms';
-    document.getElementById('log').textContent=await (await fetch('/api/log')).text();
-    document.getElementById('fr').textContent=await (await fetch('/api/frames')).text();
-  }catch(e){document.getElementById('st').innerHTML='<span class="r">offline</span>';}
-}
-setInterval(()=>{stepBars();draw();},250);
-setInterval(poll,1000);
-poll();draw();
+load('tryzub');
+poll();
+setInterval(poll, 1200);
 </script>
 </body></html>
 )HTML";
