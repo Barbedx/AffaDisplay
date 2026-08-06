@@ -34,10 +34,9 @@ void exercise(affa::AffaDisplayBase& d) {
   bite(d.showPopupText("VOL 28"));
   bite(d.hidePopup());
   bite(d.showFullscreenText("a", "b", "c"));
-  bite(d.hideFullscreenText());
   bite(d.showConfirmBox("CAP", "r0", "r1"));
+  bite(d.selectBoxButton(1));
   bite(d.showInfoPopup("AUX", "AUTO", "SPEED"));
-  bite(d.hideInfoPopup());
   bite(d.pressKey(affa::Key::Load, affa::KeyEdge::Click));
   bite(d.pressKey(affa::Key::Load, affa::KeyEdge::Click, affa::KeySource::Wire));
   bite(d.nav(affa::NavCommand::Next));

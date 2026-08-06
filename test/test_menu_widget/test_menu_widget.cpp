@@ -329,9 +329,12 @@ void noArrowsWhenTheListFits(uint8_t rows) {
 // 0x0C — both arrows — needs a window with list above AND below it, so each geometry gets a
 // list long enough to have a middle. Masks hand-written per position.
 void bothArrowsInTheMiddleOfALongList(uint8_t rows) {
-  static const uint8_t kWant2[5] = {0x0B, 0x0B, 0x0C, 0x0C, 0x07};
-  static const uint8_t kWant3[5] = {0x0B, 0x0B, 0x0B, 0x0C, 0x07};
-  static const uint8_t kWant6[8] = {0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C, 0x07};
+  // THE MIDDLE VALUE IS 0x03, NOT 0x0C, SINCE 2026-08-06. 0x0C came from MeganeCAN's
+  // hand-written SCROLL_BOTH and appears in no capture; the OEM sends 0x03 on its 4-item
+  // and 6-item lists. 0x0B (top) and 0x07 (bottom) are unchanged and are captured too.
+  static const uint8_t kWant2[5] = {0x0B, 0x0B, 0x03, 0x03, 0x07};
+  static const uint8_t kWant3[5] = {0x0B, 0x0B, 0x0B, 0x03, 0x07};
+  static const uint8_t kWant6[8] = {0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x03, 0x07};
   const uint8_t* want = (rows == 2) ? kWant2 : (rows == 3) ? kWant3 : kWant6;
   const uint8_t  n    = (rows == 6) ? 8 : 5;
 

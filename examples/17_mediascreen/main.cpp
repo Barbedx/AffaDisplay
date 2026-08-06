@@ -145,6 +145,11 @@ bool     g_rowsLive = false;
 uint8_t g_icon = affa::carminat::kIconsNone;
 uint8_t g_src  = affa::carminat::kSrcIconNone;
 uint8_t g_fmt  = affa::carminat::kFormatPlain;
+// The SECOND icon bank, payload byte 4. It was hard-coded 0x55 inside the builder and
+// unreachable from any caller, which is exactly the shape that hides a symptom: a CD icon
+// that is lit on the glass no matter what the first bank is set to. Exposed so the byte can
+// be swept from the console instead of guessed at. 0x55 is the captured value.
+uint8_t g_fmt2 = affa::carminat::kIconBank2;
 
 uint32_t g_holdMs = 0, g_holdUntil = 0;   // optional auto-return of the main line
 
@@ -235,12 +240,16 @@ void openingPoll() {
   switch (g_open.step) {
     case 0: logmsg("opening 1/3 display ON -> %d", static_cast<int>(g_panel->setPower(true)));
             break;
-    case 1: { const uint8_t p[3] = {0x02, 0x54, 0x01};
+    // THE ONE PLACE THIS CONSOLE STILL WRITES RAW BYTES, and it is here because no builder
+    // exists for `54 01`: the OEM always sends it during the opening and nothing decodes
+    // what it means, so the library has nothing honest to call it. Everything else on this
+    // page goes through a library method.
+    case 1: { const uint8_t p[3] = {0x02, affa::carminat::kCmdClose, 0x01};
               (void)g_base->enqueue(affa::carminat::kIdSetText, p, sizeof(p));
-              logmsg("opening 2/3  54 01"); break; }
-    case 2: { const uint8_t p[3] = {0x02, 0x54, 0x03};
-              (void)g_base->enqueue(affa::carminat::kIdSetText, p, sizeof(p));
-              logmsg("opening 3/3  54 03"); break; }
+              logmsg("opening 2/3  54 01 (raw: no builder)"); break; }
+    // `54 03` DOES have a builder — it is hidePopup(), the panel's only close command.
+    case 2: logmsg("opening 3/3  54 03 -> %d", static_cast<int>(g_panel->hidePopup()));
+            break;
     default: g_open.done = true; g_forceFrame = true;
              logmsg("opening complete"); return;
   }
@@ -320,6 +329,19 @@ void onSyncChanged(affa::SyncState s, void*) {
 // The main line is ours only while nothing else is on the glass. lastRendered() is the
 // library's own record of the last ACKed screen, so unlike a flag this file keeps it cannot
 // drift out of step with what was actually drawn.
+// SCROLLING A ROW IMPLIES REPAINTING IT. The console used to have two switches for one
+// intention: a per-row "scroll" checkbox that only moved a window in RAM, and a separate
+// "keep repainting" checkbox that was the only thing that actually put the moved window on
+// the glass. Ticking scroll alone did nothing visible, which reads as a broken feature
+// rather than as a second switch left off.
+inline bool rowsShouldTick() {
+  if (!g_carminat) return false;
+  if (g_rowsLive) return true;
+  for (const auto& r : g_row)
+    if (r.on) return true;
+  return false;
+}
+
 inline bool mainLineIsOurs() {
   const affa::RenderSlot s = g_base->lastRendered();
   return s == affa::RenderSlot::None || s == affa::RenderSlot::Text ||
@@ -344,6 +366,7 @@ void saveSettings() {
   p.putUChar("scene", static_cast<uint8_t>(g_scene));
   p.putUShort("period", static_cast<uint16_t>(g_periodMs));
   p.putUChar("icon", g_icon); p.putUChar("src", g_src); p.putUChar("fmt", g_fmt);
+  p.putUChar("fmt2", g_fmt2);
   p.putUChar("paneon", g_paneOn ? 1 : 0);
   p.end();
 }
@@ -372,6 +395,7 @@ void loadSettings() {
   g_icon = p.getUChar("icon", affa::carminat::kIconsNone);
   g_src  = p.getUChar("src",  affa::carminat::kSrcIconNone);
   g_fmt  = p.getUChar("fmt",  affa::carminat::kFormatPlain);
+  g_fmt2 = p.getUChar("fmt2", affa::carminat::kIconBank2);
   g_paneOn = p.getUChar("paneon", 1) != 0;
   p.end();
 }
@@ -386,7 +410,7 @@ Cmd fromResult(affa::Result r) {
   return (r == affa::Result::Ok) ? kOk : fail("panel refused it");
 }
 
-const char* sendMenuN(const String& title, const String& csv, uint8_t sel) {
+const char* sendMenuN(const String& title, const String& csv, uint8_t sel, uint8_t scroll) {
   if (!g_carminat) return "Carminat only";
   if (g_menuBusy)  return "busy: the menu buffer is still lent out";
   static char store[400];
@@ -400,8 +424,8 @@ const char* sendMenuN(const String& title, const String& csv, uint8_t sel) {
     *bar = 0; cur = bar + 1;
   }
   if (!n) return "no items";
-  if (g_carminat->showMenuN(g_menuBuf, sizeof(g_menuBuf), title.c_str(), items, n, 0, sel)
-      != affa::Result::Ok) return "refused";
+  if (g_carminat->showMenuN(g_menuBuf, sizeof(g_menuBuf), title.c_str(), items, n, 0, sel,
+                            scroll) != affa::Result::Ok) return "refused";
   g_menuTicket = g_base->lastEnqueued();
   g_menuBusy = true;
   return nullptr;
@@ -428,6 +452,19 @@ Cmd dispatch(PsychicRequest* r) {
   }
 
   // ---- the main line ------------------------------------------------------
+  //
+  // AN EXPLICIT SET TEXT TAKES THE LINE BACK, whatever is on the glass. Until 2026-08-06
+  // this op only updated the variables and returned ok, leaving the actual send to loop()'s
+  // mainLineIsOurs() gate — so after a fullscreen, a menu or a box, SET TEXT reported
+  // SUCCESS AND DID NOTHING, for ever, because the hold defaults to never. Measured on the
+  // bench: `op=fullscreen` then `op=text` -> {"ok":true} with owner still "screen" and
+  // lastRendered() still Fullscreen.
+  //
+  // The repaint gate exists to stop a scroll TICK from repainting over a screen somebody is
+  // reading. It was never meant to stop a person who typed a line and pressed the button,
+  // and a console whose one rule is "every press reports its own result" cannot answer ok
+  // for a frame it never sent. This is also why the panel needs no hideFullscreenText():
+  // the override IS the close.
   if (op == "text") {
     if (r->hasParam("t")) { snprintf(g_main.text, sizeof(g_main.text), "%s", S("t","").c_str());
                             g_main.reset(); }
@@ -437,10 +474,18 @@ Cmd dispatch(PsychicRequest* r) {
     g_icon = static_cast<uint8_t>(N("icon", g_icon));
     g_src  = static_cast<uint8_t>(N("src",  g_src));
     g_fmt  = static_cast<uint8_t>(N("fmt",  g_fmt));
-    g_main.nextMs = ::millis();
-    g_main.sent[0] = 0;                    // force one repaint so the change is visible
+    g_fmt2 = static_cast<uint8_t>(N("fmt2", g_fmt2));
     saveSettings();
-    return kOk;
+
+    // Send it NOW, and adopt the window we sent so the loop does not immediately repaint
+    // the identical bytes. The next scroll tick carries on from here.
+    char w[kMainWidth + 1];
+    g_main.window(w, kMainWidth);
+    (void)g_main.changed(w);
+    g_main.nextMs = ::millis() + g_main.periodMs;
+    g_holdUntil   = 0;
+    return fromResult(g_carminat ? g_carminat->setTextStyled(w, g_icon, g_src, g_fmt, g_fmt2)
+                                 : g_panel->setText(w));
   }
 
   // ---- menus --------------------------------------------------------------
@@ -452,7 +497,8 @@ Cmd dispatch(PsychicRequest* r) {
   if (op == "menun") {
     const char* e = sendMenuN(S("h","NAVIGATION"),
                               S("i","DESTINATION|ROUTE|MAP|TRAFFIC|SETTINGS|BACK"),
-                              static_cast<uint8_t>(N("n",0)));
+                              static_cast<uint8_t>(N("n",0)),
+                              static_cast<uint8_t>(N("scroll", affa::carminat::kScrollBoth)));
     return e ? fail(e) : kOk;
   }
   if (op == "select") {
@@ -477,10 +523,11 @@ Cmd dispatch(PsychicRequest* r) {
     g_row[0].window(w0, kRowWidth); g_row[1].window(w1, kRowWidth); g_row[2].window(w2, kRowWidth);
     return fromResult(g_carminat->showInfoMenu(w0, w1, w2));
   }
-  if (op == "infopopup") return fromResult(g_panel->showInfoPopup(S("a","LINE ONE").c_str(),
-                                                                  S("b","LINE TWO").c_str(),
-                                                                  S("c","LINE THREE").c_str()));
-  if (op == "infohide")  return fromResult(g_panel->hideInfoPopup());
+  // No `infopopup` op. showInfoPopup() IS showInfoMenu() with the OEM's default offsets —
+  // the same three 0x76 messages, not a second screen — so the console had two buttons for
+  // one thing and no way to tell them apart. `infomenu` above is that screen.
+  // No `infohide` either: hideInfoPopup() was setText("RENAULT") dressed as a close
+  // command, and it has been removed from the library.
 
   // ---- overlays and boxes -------------------------------------------------
   if (op == "popup") {
@@ -490,23 +537,35 @@ Cmd dispatch(PsychicRequest* r) {
                                                 static_cast<uint8_t>(N("src",  affa::carminat::kSrcIconNone)),
                                                 static_cast<uint8_t>(N("fmt",  affa::carminat::kFormatPlain))));
   }
+  // hidePopup() is the ONLY close command this panel has, and it is the same 02 54 03 the
+  // removed hideFullscreenText() sent. There is no `fshide`: a fullscreen is replaced by
+  // the next render — SET TEXT on the Text tab is how you close one.
   if (op == "pophide")    return fromResult(g_panel->hidePopup());
   if (op == "fullscreen") return fromResult(g_panel->showFullscreenText(S("a","").c_str(),
                                                                         S("b","").c_str(),
                                                                         S("c","").c_str()));
-  if (op == "fshide")     return fromResult(g_panel->hideFullscreenText());
-  if (op == "confirm")    return fromResult(g_panel->showConfirmBox(S("h","CONFIRM").c_str(),
-                                                                    S("a","DELETE ENTRY?").c_str(),
-                                                                    S("b","").c_str()));
-  // Selection inside a message box is mode 0x05, not the 0x01 a list uses. The two-button
-  // box itself is not built yet — see docs/OEM-CSV-CORPUS.md §4 — so this moves the
-  // selection of whatever box is up and reports honestly that the box is the OK form.
+
+  // The message box, with the button count as a real parameter: 0, 1 or 2. Two is the OEM's
+  // Yes/No form — `21 05 <sel> 00 02 49` plus two 6-byte labels — and it is 119 wire bytes,
+  // so it wraps the ISO-TP counter exactly as the OEM's own capture does.
+  if (op == "confirm") {
+    if (!g_carminat) return fromResult(g_panel->showConfirmBox(S("h","OK").c_str(),
+                                                               S("a","DELETE ENTRY?").c_str(),
+                                                               S("b","").c_str()));
+    const long   nb = N("btn", 1);
+    const String l0 = S("l0", "YES"), l1 = S("l1", "NO");
+    const char*  labels[2] = {l0.c_str(), l1.c_str()};
+    return fromResult(g_carminat->showMessageBox(
+        S("a","DELETE ENTRY?").c_str(), S("b","").c_str(),
+        nb > 0 ? labels : nullptr, static_cast<uint8_t>(nb),
+        static_cast<uint8_t>(N("sel", 0))));
+  }
+  // `03 29 05 <n>` — a library call now, and three bytes rather than the seven this console
+  // used to hand-assemble. The old raw frame was the two-row list's `29 01` shape with the
+  // box mode pasted into it, which addresses the wrong screen.
   if (op == "boxsel") {
     if (!g_carminat) return fail("Carminat only");
-    const uint8_t d[8] = {0x07, affa::carminat::kCmdHilite, affa::carminat::kSelectModeBox,
-                          static_cast<uint8_t>(N("n",0)), 0x80, 0x00, 0x00, 0x00};
-    return fromResult(g_base->enqueue(affa::carminat::kIdSetText, d, sizeof(d)) == affa::kNoTicket
-                          ? g_base->lastResult() : affa::Result::Ok);
+    return fromResult(g_carminat->selectBoxButton(static_cast<uint8_t>(N("n",0))));
   }
 
   // ---- the pane -----------------------------------------------------------
@@ -653,6 +712,7 @@ void routes() {
     j += ",\"icon\":";     j += g_icon;
     j += ",\"src\":";      j += g_src;
     j += ",\"fmt\":";      j += g_fmt;
+    j += ",\"fmt2\":";     j += g_fmt2;
     j += ",\"rowslive\":"; j += g_rowsLive ? "true" : "false";
     j += ",\"rows\":[";
     for (int i = 0; i < 3; ++i) {
@@ -846,14 +906,14 @@ void loop() {
     char w[kMainWidth + 1];
     g_main.window(w, kMainWidth);
     if (g_main.changed(w)) {
-      if (g_carminat) (void)g_carminat->setTextStyled(w, g_icon, g_src, g_fmt);
+      if (g_carminat) (void)g_carminat->setTextStyled(w, g_icon, g_src, g_fmt, g_fmt2);
       else            (void)g_panel->setText(w);
     }
   }
 
   // The info rows, if asked to keep scrolling. Three rows repainting on a timer is a lot of
   // traffic next to one main line, so it is opt-in.
-  if (g_rowsLive && g_carminat && !mainLineIsOurs() &&
+  if (rowsShouldTick() && !mainLineIsOurs() &&
       static_cast<int32_t>(now - g_row[0].nextMs) >= 0) {
     g_row[0].nextMs = now + g_row[0].periodMs;
     char w0[kRowWidth+1], w1[kRowWidth+1], w2[kRowWidth+1];

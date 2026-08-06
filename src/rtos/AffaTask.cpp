@@ -292,10 +292,6 @@ TxRequest AffaTask::showFullscreenText(const char* l1, const char* l2, const cha
   setArg(c.s0, l1); setArg(c.s1, l2); setArg(c.s2, l3);
   return submit(c);
 }
-TxRequest AffaTask::hideFullscreenText() {
-  Command c; c.op = Op::HideFullscreenText;
-  return submit(c);
-}
 TxRequest AffaTask::showConfirmBox(const char* caption, const char* row0, const char* row1) {
   Command c; c.op = Op::ShowConfirmBox;
   setArg(c.s0, caption); setArg(c.s1, row0); setArg(c.s2, row1);
@@ -304,10 +300,6 @@ TxRequest AffaTask::showConfirmBox(const char* caption, const char* row0, const 
 TxRequest AffaTask::showInfoPopup(const char* l1, const char* l2, const char* l3) {
   Command c; c.op = Op::ShowInfoPopup;
   setArg(c.s0, l1); setArg(c.s1, l2); setArg(c.s2, l3);
-  return submit(c);
-}
-TxRequest AffaTask::hideInfoPopup() {
-  Command c; c.op = Op::HideInfoPopup;
   return submit(c);
 }
 TxRequest AffaTask::pressKey(Key k, KeyEdge e, KeySource src) {

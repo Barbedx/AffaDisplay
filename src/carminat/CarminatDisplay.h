@@ -102,11 +102,18 @@ class CarminatDisplay final : public AffaDisplayBase {
   //   srcIcon  kSrcIconNone 0xFF / 0xDF "MANU" / 0xFD "PRESET"
   //   fmt      0x19-0x3F radio style: 5 digits + '.' + 1 char. 0x59-0x7F plain ASCII.
   //            kFormatPlain 0x60 is what the plain override sends.
+  //   iconBank2 payload byte 4. Was hard-coded 0x55 in the builder and unreachable from any
+  //            caller; kIconBank2 keeps that captured value, so the default changes nothing.
+  //            EXPOSED BECAUSE AN UNREACHABLE BYTE HIDES A SYMPTOM — a CD icon that stays
+  //            lit on the glass whatever `icon` is set to has nowhere else to be coming
+  //            from, and a caller could not sweep the byte to find out. What its bits mean
+  //            is still unknown; this makes the question askable, it does not answer it.
   //
   // Format 0x31 is why the OEM's "   1056 " is 105.6 FM and not the number 1056 — the point
   // is drawn between the digits by the panel, not by the sender.
   [[nodiscard]] Result setTextStyled(const char* text, uint8_t icon, uint8_t srcIcon,
-                                     uint8_t fmt);
+                                     uint8_t fmt,
+                                     uint8_t iconBank2 = carminat::kIconBank2);
   [[nodiscard]] Result setTime(const char* hhmm) override;
   [[nodiscard]] Result setPower(bool on) override;
 
@@ -119,16 +126,49 @@ class CarminatDisplay final : public AffaDisplayBase {
                                      uint8_t fmt = carminat::kFormatPlain) override;
   [[nodiscard]] Result hidePopup() override;
 
+  // NO hideFullscreenText(). A fullscreen is not an overlay: the next render replaces it,
+  // measured on a real Carminat. hidePopup() is the only close this panel needs, and it is
+  // the same `02 54 03` the removed method sent. Removed 2026-08-06.
   [[nodiscard]] Result showFullscreenText(const char* l1, const char* l2,
                                           const char* l3) override;
-  [[nodiscard]] Result hideFullscreenText() override;
 
+  // The message box, mode 0x05, with its BUTTONS AS A REAL FIELD. `labels` is
+  // `buttonCount` NUL-terminated strings, each truncated to six bytes — the size of the
+  // field the panel reads them from. buttonCount is 0, 1 or 2: no capture has ever shown a
+  // third, and the declared length is 105 + 6 * buttonCount, so a third would be a guess
+  // about a length as well as about a layout.
+  //
+  // `selected` is which button is preselected, and it is the same index `selectBoxButton()`
+  // moves. With no buttons it is forced to 0xFF, as the OEM sends.
+  //
+  // Everything about the layout is in CarminatConstants.h under "The message box". The
+  // two-button form is 119 wire bytes and wraps the ISO-TP counter to 0x20 — which is what
+  // the OEM's own `CONFIRM SCREEN NO.csv` does, and what the nav pane has done 24 912 times
+  // on this bench.
+  [[nodiscard]] Result showMessageBox(const char* row0, const char* row1,
+                                      const char* const* labels = nullptr,
+                                      uint8_t buttonCount = carminat::kButtonsNone,
+                                      uint8_t selected = 0);
+
+  // A ONE-BUTTON OK BOX, and `caption` IS THE BUTTON'S LABEL — six characters, the size of
+  // the field it lands in. That is what it always was; the name simply never said so, and
+  // a 7th character used to spill into the body's first byte.
   [[nodiscard]] Result showConfirmBox(const char* caption, const char* row0,
                                       const char* row1) override;
 
+  // Move the selection between a message box's buttons: `03 29 05 <index>`. This is NOT
+  // highlightItem(), which is the two-row list's `29 01 <rowtag>` form.
+  [[nodiscard]] Result selectBoxButton(uint8_t index);
+
+  // showInfoPopup IS showInfoMenu with the OEM's default offsets — the same three 0x76
+  // messages, not a second screen. Kept only as the IDisplay spelling; new code should call
+  // showInfoMenu(), which is what the screen actually is.
+  //
+  // NO hideInfoPopup(). It never was a close command: it sent setText("RENAULT"), a guess
+  // at the OEM's idle banner dressed as protocol. No capture shows how these rows are
+  // dismissed, and inventing one is how a guess becomes a fact. Removed 2026-08-06.
   [[nodiscard]] Result showInfoPopup(const char* l1, const char* l2,
                                      const char* l3) override;
-  [[nodiscard]] Result hideInfoPopup() override;
 
 #if AFFA_ENABLE_BIGMENU
   // Wire bytes an N-item list screen occupies, PCI included. 2 + 36 + 27*count.

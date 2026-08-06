@@ -267,9 +267,9 @@ enum class Feature : uint8_t {
   Power,        // setPower
   Menu,         // getMenu / showMenu / highlightItem / nav
   Popup,        // showPopupText / hidePopup
-  Fullscreen,   // showFullscreenText / hideFullscreenText
+  Fullscreen,   // showFullscreenText
   ConfirmBox,   // showConfirmBox
-  InfoPopup,    // showInfoPopup / hideInfoPopup
+  InfoPopup,    // showInfoPopup
   KeyTx,        // this panel family has a key-transmit id, so pressKey(..., Wire)
                 // can put a frame on the bus (§7b.6)
   RadioText,    // the ISO-TP reassembler is compiled in (AFFA_ENABLE_ISOTP_RX), so
@@ -301,9 +301,9 @@ enum class RenderSlot : uint8_t {
   Menu,        // showMenu (the 96-byte screen)
   Highlight,   // highlightItem (the single-frame selection move)
   Popup,       // showPopupText / hidePopup
-  Fullscreen,  // showFullscreenText / hideFullscreenText
+  Fullscreen,  // showFullscreenText
   ConfirmBox,  // showConfirmBox
-  InfoPopup,   // showInfoPopup / hideInfoPopup
+  InfoPopup,   // showInfoPopup
   Control,     // setPower and other non-rendering control payloads
   None,        // raw enqueue(); never coalesced
 };
@@ -562,12 +562,10 @@ struct IDisplay {
   [[nodiscard]] virtual Result hidePopup()                                    = 0;
   [[nodiscard]] virtual Result showFullscreenText(const char* l1, const char* l2,
                                                   const char* l3)             = 0;
-  [[nodiscard]] virtual Result hideFullscreenText()                           = 0;
   [[nodiscard]] virtual Result showConfirmBox(const char* caption, const char* row0,
                                               const char* row1)               = 0;
   [[nodiscard]] virtual Result showInfoPopup(const char* l1, const char* l2,
                                              const char* l3)                  = 0;
-  [[nodiscard]] virtual Result hideInfoPopup()                                = 0;
 };
 
 } // namespace affa
@@ -994,10 +992,8 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   Result showPopupText(const char*, uint8_t = 0x09, uint8_t = 0xFF, uint8_t = 0x60) override;
   Result hidePopup() override;
   Result showFullscreenText(const char*, const char*, const char*) override;
-  Result hideFullscreenText() override;
   Result showConfirmBox(const char*, const char*, const char*) override;
   Result showInfoPopup(const char*, const char*, const char*) override;
-  Result hideInfoPopup() override;
 
  protected:
   // ---- panel hooks ---------------------------------------------------------
@@ -2110,9 +2106,9 @@ directly chooses its own.
 | `showMenu` | `Menu` | the 96-byte screen |
 | `highlightItem` | `Highlight` | deliberately **not** `Menu`: a highlight must not replace a pending full redraw, and vice versa |
 | `showPopupText`, `hidePopup` | `Popup` | |
-| `showFullscreenText`, `hideFullscreenText` | `Fullscreen` | |
+| `showFullscreenText` | `Fullscreen` | |
 | `showConfirmBox` | `ConfirmBox` | |
-| `showInfoPopup`, `hideInfoPopup` | `InfoPopup` | |
+| `showInfoPopup` | `InfoPopup` | |
 | `setPower` | `Control` | |
 | `enqueue(...)` | `None` by default | raw protocol send: never coalesced |
 
@@ -2790,9 +2786,9 @@ the image", which the map file and the flash number report.
 | `AFFA_PANEL_UPDATELIST_MENU` | as above | LCD `setText` channel/location encoding. Forces `AFFA_PANEL_UPDATELIST` on. | as above |
 | `AFFA_ENABLE_MENU` | **0** | `widget/` (`MenuModel`, `IMenuRenderer`, `MenuGeometry`), `CarminatMenuRenderer`, `MenuController`, `IPage` routing, `nav()`, `getMenu()`. The single largest optional block, and **off by default**: the menu is a widget, not protocol. `showMenu()` / `highlightItem()` are unconditional and stay available with this at 0. | 0 (the default): `nav()` returns `NotSupported`, `getMenu()` is not declared, `supports(Feature::Menu)` is false. A menu-driven application stops compiling — which is the point; set it to 1 in your `build_flags`. |
 | `AFFA_ENABLE_POPUP` | 1 | `showPopupText` / `hidePopup` (mode `0x74` overlay). | 0: both return `NotSupported`. |
-| `AFFA_ENABLE_FULLSCREEN` | 1 | `showFullscreenText` / `hideFullscreenText` (`0x21` mode `0x05`). | 0: both return `NotSupported`. |
+| `AFFA_ENABLE_FULLSCREEN` | 1 | `showFullscreenText` (`0x21` mode `0x05`). | 0: both return `NotSupported`. |
 | `AFFA_ENABLE_CONFIRMBOX` | 1 | `showConfirmBox` and its offset builder. | 0: returns `NotSupported`. |
-| `AFFA_ENABLE_INFOPOPUP` | 1 | `showInfoPopup` / `hideInfoPopup` (the 3-row info menu). | 0: returns `NotSupported`. |
+| `AFFA_ENABLE_INFOPOPUP` | 1 | `showInfoPopup` (the 3-row info menu). | 0: returns `NotSupported`. |
 | `AFFA_ENABLE_TRANSLITERATION` | 1 | `AffaText.cpp` and its ~1.2 kB mapping table. | **0 is dangerous.** `toAscii` becomes a bounded copy that passes bytes through unchanged; any UTF-8 that reaches the wire renders as garbage on the panel. Set it to 0 only if you have proved every string is already 7-bit ASCII. Not a compile error — a visual one. |
 | `AFFA_ENABLE_LOG` | 1 | The `AFFA_LOG*` macros and `AffaLog.cpp`. | 0: every macro expands to `do {} while (0)`; **no format strings enter flash**. Side effects written inside a log argument vanish (§2.6). |
 | `AFFA_LOG_LEVEL` | 3 (info) | 0 off … 5 trace. Compile-time: levels above it emit nothing at all. | Too high on a live bus floods the sink; the `0x3AF`/`0x3CF` sync chatter is ~2 frames/s and trace prints all of it. |

@@ -143,10 +143,8 @@ class AffaTask {
                           uint8_t fmt = 0x60);
   TxRequest hidePopup();
   TxRequest showFullscreenText(const char* l1, const char* l2, const char* l3);
-  TxRequest hideFullscreenText();
   TxRequest showConfirmBox(const char* caption, const char* row0, const char* row1);
   TxRequest showInfoPopup(const char* l1, const char* l2, const char* l3);
-  TxRequest hideInfoPopup();
 
   // The Local half fires KeyCb on the owned task, exactly as a key off the wire does.
   TxRequest pressKey(Key k, KeyEdge e, KeySource src = KeySource::Local);

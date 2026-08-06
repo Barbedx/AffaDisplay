@@ -222,23 +222,76 @@ inline constexpr uint8_t kNavHeader[14] = {
 };
 
 // setText / showPopupText header bytes.
-inline constexpr uint8_t kIconsNone   = 0x55;  // NoNews|NoTraffic|NoAfRds|NoMode [CAP]
-inline constexpr uint8_t kIconsAfRds  = 0x45;  // documented, never emitted by us
-inline constexpr uint8_t kIconBank2   = 0x55;  // fixed, meaning unknown          [CAP]
+//
+// THE ICON BYTE IS A BITMASK AND ITS POLARITY IS INVERTED: A SET BIT TURNS AN ICON OFF.
+// That is why "no icons" is 0x55 and not 0x00 — it is NoNews|NoTraffic|NoAfRds|NoMode.
+// [REF] notes/archive_mhroczny/affa3.h:39-51 names every bit; affa3.c:320 builds exactly
+// this 0x55 out of the four NO_ bits.
+//
+// CONFIRMED ON THE WIRE across 13 OEM `0x77` frames: the radio sends 0x05 and 0x09 on FM
+// (bit 4 CLEAR — AF-RDS lit) and 0x15 / 0x55 on MW, LW and AUX (bit 4 SET — AF-RDS dark).
+// The bit tracks the band, which is what an inverted mask predicts. [OEM]
+inline constexpr uint8_t kIconNoNews      = 1u << 0;  // 0x01
+inline constexpr uint8_t kIconNewsArrow   = 1u << 1;  // 0x02
+inline constexpr uint8_t kIconNoTraffic   = 1u << 2;  // 0x04
+inline constexpr uint8_t kIconTrafficArrow= 1u << 3;  // 0x08
+inline constexpr uint8_t kIconNoAfRds     = 1u << 4;  // 0x10
+inline constexpr uint8_t kIconAfRdsArrow  = 1u << 5;  // 0x20
+inline constexpr uint8_t kIconNoMode      = 1u << 6;  // 0x40
+// Bit 7 is UNNAMED IN THE ORIGIN AND CLEAR IN EVERY OBSERVED VALUE (0x05, 0x09, 0x15,
+// 0x55). It is the only bit left for a glyph the origin never named, so it is the first
+// thing to try against an icon that will not go out — but nothing states that, so it is
+// spelled "unknown" rather than given a name it has not earned.
+inline constexpr uint8_t kIconBit7Unknown = 1u << 7;  // 0x80
+
+inline constexpr uint8_t kIconsNone   = 0x55;  // NoNews|NoTraffic|NoAfRds|NoMode [CAP][REF]
+inline constexpr uint8_t kIconsAfRds  = 0x45;  // 0x55 minus NoAfRds — AF-RDS lit  [OEM]
+// NOT A SECOND MASK, AND NOT THE PLACE TO HUNT A STUCK ICON: the OEM radio sends 0x55 here
+// in 13 of 13 captured frames, across FM, MW, LW and AUX, and the origin hard-codes it in
+// both of its senders. It is a genuine constant whose meaning is unknown. [OEM][REF]
+inline constexpr uint8_t kIconBank2   = 0x55;
 inline constexpr uint8_t kSrcIconNone = 0xFF;  // 0xDF "MANU", 0xFD "PRESET"      [CAP]
 inline constexpr uint8_t kFormatPlain = 0x60;  // 0x19-0x3F radio style, 0x59-0x7F ASCII
 inline constexpr uint8_t kControlByte = 0x01;  // always 0x01                     [CAP]
 inline constexpr uint8_t kPopupIcon   = 0x09;  // the OEM volume popup's left icon [CAP]
 
-// The message box's button count, at payload offset 4 — confirmed on four OEM captures with
-// 0, 1 and 2 buttons. showConfirmBox() sends 1 (an OK box); kButtonsYesNo is the two-button
-// form, which also carries two 6-byte labels before the body. [OEM]
+// ---------------------------------------------------------------------------
+// The message box (mode 0x05), fully resolved from five OEM captures
+// ---------------------------------------------------------------------------
+// Content offsets below are into the payload AFTER the two PCI bytes, i.e. content[0] is
+// the 0x21 command. The layout is:
+//
+//   [0] 21  [1] 05  [2] selected button (0xFF when there are none)  [3] 00
+//   [4] BUTTON COUNT  [5] 49  [6..31] zero
+//   [32 ..] buttonCount x 6-byte NUL-padded labels, then the body, 0x0D-separated
+//
+// and the two lengths fall straight out of the count, three-for-three across captures with
+// 0, 1 and 2 buttons:
+//
+//   declared length = 105 + 6 * buttonCount    -> 105 / 111 / 117
+//   body offset     =  32 + 6 * buttonCount    ->  32 /  38 /  44
+//
+// [OEM] `navi start.csv` (0), `AVAILABLE SPACE BIG SCREEN ONE CONFIRM.csv` (1, labelled
+// "OK"), `CONFIRM SCREEN NO.csv` (2, labelled "Yes"/"No"). The body region is always 73
+// bytes, because both offsets move together.
+//
+// The builder placed both fields correctly all along — its offsets were relative to the
+// end of the 6-byte header, so its 0x1A and 0x20 were payload 32 and 38. What it could not
+// do was VARY payload[4]: the count was hard-coded to 1, so the zero-button screen and the
+// two-button Yes/No box were unreachable however the caller spelled the call.
 inline constexpr uint8_t kButtonsNone  = 0x00;
 inline constexpr uint8_t kButtonsOk    = 0x01;
 inline constexpr uint8_t kButtonsYesNo = 0x02;
-inline constexpr uint8_t kButtonLabelLen = 6;
-// Selection inside a message box moves with 29 05 <index> — mode 0x05, not the 0x01 the
-// list screen uses. [OEM]
+inline constexpr uint8_t kButtonsMax   = 2;     // no capture has ever shown a third
+inline constexpr uint8_t kButtonLabelLen  = 6;
+inline constexpr uint8_t kBoxNoSelection  = 0xFF;  // content[2] when buttonCount is 0
+inline constexpr uint8_t kBoxHeaderByte5  = 0x49;  // constant in all five captures
+inline constexpr uint8_t kBoxLabelOffset  = 32;    // content offset of label 0
+inline constexpr uint8_t kBoxBodyBytes    = 73;    // 105 - 32, whatever the button count
+inline constexpr uint8_t kBoxBaseLength   = 105;   // declared length with no buttons
+// Selection inside a message box moves with `03 29 05 <index>` — a THREE-BYTE SINGLE FRAME,
+// mode 0x05, not the 0x01 the list screen uses and not the 7-byte `29 01 <rowtag> 80` form.
+// [OEM] `CONFIRM SCREEN SWITCH TO YES.csv`, answered with a bare 0x74.
 inline constexpr uint8_t kSelectModeBox  = 0x05;
 inline constexpr uint8_t kSelectModeList = 0x01;
 
@@ -287,11 +340,28 @@ inline constexpr uint8_t kClockDigits    = 4;   // "HHMM"
 // in the list by widget::MenuModel::scrollMask(), whose four return values ARE these bytes
 // (which is why CarminatMenuRenderer passes the mask straight through); exposed because
 // showMenu() takes it.
+//
+// kScrollBoth WAS 0x0C UNTIL 2026-08-06, AND 0x0C IS NOT ON THE WIRE. It came from
+// MeganeCAN's hand-written `SCROLL_BOTH = 0x0C` enum and appears in ZERO captures. What the
+// OEM actually sends for a list with both arrows is 0x03, in three independent captures —
+// the 6-item `mENU NAVIGATION` and the 4-item Settings list, twice. MeganeCAN's own
+// hardware fixture carries 0x0B, never 0x0C.
+//
+// The bits then decompose cleanly, which is the reading that makes all seven observed
+// frames consistent: 0x03 is the base "arrows" value and the two high bits SUPPRESS one
+// each — 0x08 the up arrow (0x03|0x08 = 0x0B, captured at the TOP of a list, where up is
+// impossible) and 0x04 the down arrow (0x03|0x04 = 0x07, captured at the BOTTOM). By that
+// reading 0x0C = 0x08|0x04 suppresses both and is the exact OPPOSITE of what it was named.
+// The decomposition is inference; the three 0x03 captures are not.
+//
+// NOTE FOR ANYONE TESTING THIS ON A TWO-ROW showMenu AND SEEING NOTHING: a 2-item window
+// ([6] = 0x82) has no overflow, so the panel draws no arrows whatever this byte says. Every
+// capture that shows an arrow is a 4- or 6-item list. Use showMenuN() to see it work.
 enum ScrollIndicator : uint8_t {
   kScrollNone = 0x00,   // no arrows
-  kScrollUp   = 0x07,   // top arrow only
-  kScrollDown = 0x0B,   // bottom arrow only
-  kScrollBoth = 0x0C,   // both
+  kScrollUp   = 0x07,   // top arrow only    [OEM] bottom of a 2-item window
+  kScrollDown = 0x0B,   // bottom arrow only [OEM] top of a 2-item window
+  kScrollBoth = 0x03,   // both              [OEM] 4-item and 6-item lists
 };
 
 }  // namespace carminat

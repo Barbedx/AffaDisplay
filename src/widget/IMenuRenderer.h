@@ -23,11 +23,14 @@ namespace widget {
 // that may see both spellings: change a value here and that file stops compiling rather
 // than quietly drawing the wrong arrow. A panel whose wire values differ translates in its
 // own adapter; that is what the adapter is for.
+// kScrollBoth WAS 0x0C AND 0x0C IS NOT ON THE WIRE — see the long note in
+// carminat/CarminatConstants.h. It was MeganeCAN's hand-written constant; the OEM sends
+// 0x03 for a list with both arrows, in three captures, and 0x0C appears in none.
 enum Scroll : uint8_t {
   kScrollNone = 0x00,   // no arrows — the whole list fits the window
   kScrollUp   = 0x07,   // top arrow only    — the window is at the END of the list
   kScrollDown = 0x0B,   // bottom arrow only — the window is at the START
-  kScrollBoth = 0x0C,   // both — the window is in the middle
+  kScrollBoth = 0x03,   // both — the window is in the middle
 };
 
 struct IMenuRenderer {

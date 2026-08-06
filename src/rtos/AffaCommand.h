@@ -43,10 +43,8 @@ enum class Op : uint8_t {
   ShowPopupText,
   HidePopup,
   ShowFullscreenText,
-  HideFullscreenText,
   ShowConfirmBox,
   ShowInfoPopup,
-  HideInfoPopup,
   PressKey,
   AbortPending,
   AbortAll,
@@ -98,10 +96,8 @@ inline Result applyCommand(AffaDisplayBase& d, const Command& c, TxTicket& ticke
     case Op::ShowPopupText:      r = d.showPopupText(c.s0, c.a, c.b, c.c); break;
     case Op::HidePopup:          r = d.hidePopup(); break;
     case Op::ShowFullscreenText: r = d.showFullscreenText(c.s0, c.s1, c.s2); break;
-    case Op::HideFullscreenText: r = d.hideFullscreenText(); break;
     case Op::ShowConfirmBox:     r = d.showConfirmBox(c.s0, c.s1, c.s2); break;
     case Op::ShowInfoPopup:      r = d.showInfoPopup(c.s0, c.s1, c.s2); break;
-    case Op::HideInfoPopup:      r = d.hideInfoPopup(); break;
 
     // Not a render: nothing is enqueued, so there is no ticket and never will be. The
     // Local half fires KeyCb synchronously, on this task, from inside this call.

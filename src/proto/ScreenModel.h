@@ -35,7 +35,7 @@ struct ScreenModel {
                               // It is the tag and not the index, because that is what
                               // `07 29 01 <row>` carries and what the panel latches.
   uint8_t scroll     = 0;     // scroll-arrow byte at payload [10]: 0x00 none, 0x07 up,
-                              // 0x0B down, 0x0C both
+                              // 0x0B down, 0x03 both (0x0C was never on the wire)
 
   // The info-settings popup: three 8-character slots. Rows arrive as THREE SEPARATE
   // messages (docs/WIRE-SPEC.md §8.10), so a decoder sees them one at a time and

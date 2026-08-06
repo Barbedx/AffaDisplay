@@ -95,7 +95,7 @@
 #  define AFFA_ENABLE_POPUP 1
 #endif
 
-// showFullscreenText / hideFullscreenText (0x21 mode 0x05). 0: both return NotSupported.
+// showFullscreenText (0x21 mode 0x05). 0: both return NotSupported.
 #ifndef AFFA_ENABLE_FULLSCREEN
 #  define AFFA_ENABLE_FULLSCREEN 1
 #endif
@@ -105,7 +105,7 @@
 #  define AFFA_ENABLE_CONFIRMBOX 1
 #endif
 
-// showInfoPopup / hideInfoPopup (the 3-row info menu). 0: returns NotSupported.
+// showInfoPopup (the 3-row info menu). 0: returns NotSupported.
 #ifndef AFFA_ENABLE_INFOPOPUP
 #  define AFFA_ENABLE_INFOPOPUP 1
 #endif
@@ -387,17 +387,30 @@
 #  define AFFA_RX_STALL_MS 2500
 #endif
 
-// Largest single ISO-TP message, in payload bytes before framing.
+// Largest single ISO-TP message, in payload bytes before framing. It is the size of the
+// inline copy buffer in a TxJob, so it costs RAM per queue slot — it is A BUDGET, and the
+// zero-copy enqueueExternal() path is what carries anything genuinely large.
 //
-// 113 IS A WIRE LIMIT, NOT A BUDGET: 8 bytes in frame 0, 7 per continuation, and the
-// continuation counter is 0x20|(num & 0x0F) — 8 + 15*7 = 113. showConfirmBox sits at
-// exactly 113. Anything longer needs a counter wrap never validated against the panel.
+// 113 WAS CALLED A WIRE LIMIT AND IT NEVER WAS ONE. The old note here read "8 + 15*7 = 113;
+// anything longer needs a counter wrap never validated against the panel". Both halves are
+// wrong:
+//
+//   * the counter wrap is validated, continuously, by this library. The nav pane is a
+//     304-byte transfer whose PCIs run 11 20 21..2F 20 — it wraps every single frame — and
+//     09_golden ran 24 912 of them with `failed 0`. The OEM wraps too, on its own 302-byte
+//     0x1F1 message and on its two-button message box.
+//   * 8 + 15*7 is just where the counter first repeats, which is a numbering fact, not a
+//     ceiling. ISO-TP sequence numbers are meant to wrap.
+//
+// 119 is the two-button message box: 2 PCI + 6 header + 6+6 labels + 105 body = the OEM's
+// own `CONFIRM SCREEN NO.csv`, 117 declared, 17 frames, last CF `0x20`, ACKed by the panel.
+// Raising the ceiling to hold it costs 6 bytes per queue slot.
 // Below 96 the Carminat menu screen returns TooLong. See docs/WIRE-SPEC.md §3.3.
 #ifndef AFFA_MAX_PAYLOAD
-#  define AFFA_MAX_PAYLOAD 113
+#  define AFFA_MAX_PAYLOAD 119
 #endif
-#if AFFA_MAX_PAYLOAD > 113 && !defined(AFFA_UNSAFE_LONG_PAYLOAD)
-#  error "AffaDisplay: AFFA_MAX_PAYLOAD > 113 exceeds the validated transport ceiling (WIRE-SPEC.md §3.3). Define AFFA_UNSAFE_LONG_PAYLOAD to override once you have bench-validated a longer transmit."
+#if AFFA_MAX_PAYLOAD > 119 && !defined(AFFA_UNSAFE_LONG_PAYLOAD)
+#  error "AffaDisplay: AFFA_MAX_PAYLOAD > 119 is past the longest message this library builds (the two-button box). Use enqueueExternal() for a large payload, or define AFFA_UNSAFE_LONG_PAYLOAD."
 #endif
 #if AFFA_MAX_PAYLOAD < 96
 #  warning "AffaDisplay: AFFA_MAX_PAYLOAD < 96 — showMenu will return Result::TooLong."

@@ -48,6 +48,8 @@ table{border-collapse:collapse;width:100%;font-size:11px}
 td,th{padding:3px 6px;border-bottom:1px solid var(--ln);text-align:left}
 th{color:var(--dim);font-weight:normal}
 .hide{display:none}
+.fl{display:inline-flex;gap:4px;flex-wrap:wrap}
+.fl button{padding:2px 7px;font-size:11px}
 </style></head><body>
 
 <header>
@@ -92,19 +94,24 @@ th{color:var(--dim);font-weight:normal}
   <section>
     <h2>Images</h2>
     <div class="r">
-      <button onclick="load('globe')">globe</button>
-      <button onclick="load('tryzub')">tryzub</button>
-      <button onclick="load('tryzubclock')">tryzub+clock</button>
-      <button onclick="load('renault')">renault</button>
+      <button onclick="img('globe')">globe</button>
+      <button onclick="img('tryzub')">tryzub</button>
+      <button onclick="img('tryzubclock')">tryzub+clock</button>
+      <button onclick="img('renault')">renault</button>
     </div>
     <div class="r">
-      <button onclick="load('dash')">dash</button>
-      <button onclick="load('gauges')">gauges</button>
-      <button onclick="load('combo')">combo</button>
-      <button onclick="load('fontsheet')">font</button>
-      <button onclick="load('checker')">checker</button>
+      <button onclick="img('dash')">dash</button>
+      <button onclick="img('gauges')">gauges</button>
+      <button onclick="img('combo')">combo</button>
+      <button onclick="img('fontsheet')">font</button>
+      <button onclick="img('checker')">checker</button>
     </div>
-    <p><small>Loads into the editor. <b>SEND TO PANEL</b> is what puts it on the glass.</small></p>
+    <p><small>
+      Goes <b>straight to the glass</b> and into the editor, same as the animation buttons
+      below &mdash; the image lives in device flash, so this costs one command, not a 288-byte
+      upload. <b>SEND TO PANEL</b> above is for what you have <i>drawn</i>: it posts the
+      editor's own bytes.
+    </small></p>
 
     <h2 style="margin-top:15px">Animations &mdash; drawn on the device</h2>
     <div class="r">
@@ -142,9 +149,11 @@ th{color:var(--dim);font-weight:normal}
       <small>ms</small><input id="mms" type="number" value="700" style="width:66px">
       <button class="p" onclick="sendText()">SET TEXT</button>
     </div>
+    <h2 style="margin-top:15px">Icons &mdash; a bitmask, and A SET BIT MEANS OFF</h2>
+    <div class="r" id="icb"></div>
     <div class="r">
-      <small>icon</small>
-      <select id="mic"><option value="0x55">none 55</option><option value="0x45">AF-RDS 45</option><option value="0x09">capture 09</option></select>
+      <small>icon byte</small><input id="mic" size="4" value="0x55" style="width:64px">
+      <small>bank 2</small><input id="mf2" size="4" value="0x55" style="width:64px">
       <small>source</small>
       <select id="msr"><option value="0xFF">none FF</option><option value="0xDF">MANU DF</option><option value="0xFD">PRESET FD</option></select>
     </div>
@@ -157,6 +166,19 @@ th{color:var(--dim);font-weight:normal}
       Longer than that has to scroll or be cut. Format <span class="k">0x31</span> is radio
       style &mdash; the panel draws a point between the digits, which is why the OEM's
       <span class="k">"   1056 "</span> reads as 105.6 FM and not as the number 1056.
+      <br><br>
+      <b>Chasing an icon that will not go away?</b> The polarity is inverted: every named bit
+      is a <span class="k">NO_</span> bit, so <b>ticking a box turns that icon OFF</b>, and
+      <span class="k">0x55</span> is simply all four off. Confirmed against 13 OEM frames &mdash;
+      the radio sends <span class="k">0x05</span>/<span class="k">0x09</span> on FM and
+      <span class="k">0x15</span>/<span class="k">0x55</span> on MW, LW and AUX, so bit 4
+      tracks the band exactly as an inverted mask predicts.
+      <br><br>
+      <b>bit 7</b> is the one the origin never named and that is <b>clear in every value
+      ever observed</b>. If a glyph is lit that nothing else turns off, it is the only bit
+      left &mdash; try <span class="k">0xD5</span>. <b>bank 2</b> is <i>not</i> a second mask:
+      the OEM sends <span class="k">0x55</span> there in 13 of 13 frames across every source,
+      so it is a constant of unknown meaning. It is editable only so it can be ruled out.
     </small></p>
   </section>
 
@@ -197,8 +219,20 @@ th{color:var(--dim);font-weight:normal}
     <h2 style="margin-top:15px">Fullscreen</h2>
     <div class="r">
       <button class="p" onclick="randomFull()">random full-width</button>
-      <button onclick="cmd('fshide')">hide</button>
+      <button onclick="sendText()">close it with SET TEXT</button>
     </div>
+    <p><small>
+      <b>There is no hide, and there is no longer one in the library either.</b> A fullscreen
+      is not an overlay: the next render replaces it, which is what lets 09_golden animate
+      these at about eight a second with nothing sent in between.
+      <span class="k">hideFullscreenText()</span> emitted the same
+      <span class="k">02 54 03</span> as <span class="k">hidePopup()</span>, so it was a
+      second name for one command and it implied a teardown nobody owes. Removed 2026-08-06.
+      <br><br>Until the same day, SET TEXT could not close one either &mdash; but that was
+      this console's bug, not the panel's: the repaint gate that stops a scroll tick from
+      painting over a screen you are reading was also swallowing the deliberate press. An
+      explicit SET TEXT now takes the line back immediately.
+    </small></p>
   </section>
 </main>
 
@@ -210,9 +244,22 @@ th{color:var(--dim);font-weight:normal}
     </div>
     <div class="r">
       <small>scroll mask</small>
-      <select id="msk"><option value="0">none</option><option value="7">up</option><option value="11">down</option><option value="3">both</option></select>
+      <select id="msk"><option value="0">none 00</option><option value="7">up 07</option><option value="11">down 0B</option><option value="3">both 03</option></select>
       <button class="p" onclick="sendMenu()">showMenu</button>
     </div>
+    <p><small>
+      <b>Every value here draws nothing on a two-row menu, and that is the panel being
+      right.</b> This screen sends <span class="k">[6] = 0x82</span> &mdash; two items in a
+      two-row viewport &mdash; so there is nothing to scroll to and no arrow to draw. Use the
+      <b>N-item list</b> below to see this byte work; every OEM capture with an arrow is a
+      4- or 6-item list.
+      <br><br>The library said <b>both</b> was <span class="k">0x0C</span> until 2026-08-06.
+      That came from the origin's hand-written constant and appears in <b>no capture</b>; the
+      OEM sends <span class="k">0x03</span>. The high bits read as suppressors &mdash;
+      <span class="k">0x03|0x08 = 0x0B</span> at the top of a list, <span class="k">0x03|0x04
+      = 0x07</span> at the bottom &mdash; which would make <span class="k">0x0C</span>
+      "suppress both", the exact opposite of its name.
+    </small></p>
     <div class="r">
       <button onclick="cmd('hilite',{n:0})">highlight row 0</button>
       <button onclick="cmd('hilite',{n:1})">highlight row 1</button>
@@ -225,6 +272,11 @@ th{color:var(--dim);font-weight:normal}
       <button class="p" onclick="sendMenuN()">showMenuN</button>
       <small>index</small><input id="nsel" type="number" value="0" style="width:52px">
       <button onclick="selectItem()">selectMenuItem</button>
+    </div>
+    <div class="r">
+      <small>scroll mask</small>
+      <select id="nsk"><option value="0">none 00</option><option value="7">up 07</option><option value="11">down 0B</option><option value="3" selected>both 03</option></select>
+      <small>&larr; this is the screen where it shows</small>
     </div>
     <p><small>
       The panel <b>tracks six items and draws two</b> &mdash; the glass is a two-row viewport.
@@ -248,33 +300,43 @@ th{color:var(--dim);font-weight:normal}
       is opt-in.
     </small></p>
 
-    <h2 style="margin-top:15px">Info popup</h2>
+    <h2 style="margin-top:15px">Message box &mdash; 0, 1 or 2 buttons</h2>
     <div class="r">
-      <button class="p" onclick="cmd('infopopup',{a:'LINE ONE',b:'LINE TWO',c:'LINE THREE'})">show</button>
-      <button onclick="cmd('infohide')">hide</button>
-    </div>
-
-    <h2 style="margin-top:15px">Message box</h2>
-    <div class="r">
-      <input id="ch" size="9" value="CONFIRM"><input id="ca" size="12" value="DELETE ENTRY?">
+      <input id="ca" size="14" value="DELETE ENTRY?"><input id="cb" size="10" placeholder="second line">
     </div>
     <div class="r">
-      <button class="p" onclick="sendConfirm()">showConfirmBox</button>
-      <button onclick="cmd('fshide')">close box</button>
+      <small>buttons</small>
+      <select id="cbn" onchange="cLabels()">
+        <option value="0">0 &mdash; message only</option>
+        <option value="1" selected>1 &mdash; OK</option>
+        <option value="2">2 &mdash; Yes / No</option>
+      </select>
+      <span id="clb">
+        <input id="cl0" size="6" maxlength="6" value="OK">
+        <input id="cl1" size="6" maxlength="6" value="NO">
+      </span>
+    </div>
+    <div class="r">
+      <button class="p" onclick="sendConfirm()">show box</button>
       <button onclick="cmd('boxsel',{n:0})">select 0</button>
       <button onclick="cmd('boxsel',{n:1})">select 1</button>
     </div>
     <p><small>
-      <span class="w">showConfirmBox is a ONE-button OK box.</span> It emits
-      <span class="k">21 05 00 00 01 49</span> and byte 4 is the button count, confirmed on
-      four OEM captures with 0, 1 and 2 buttons. The real Yes/No form is
-      <span class="k">21 05 01 00 02 49</span> with two 6-byte labels, and the library has no
-      builder for it yet. The select buttons send <span class="k">29 05 &lt;n&gt;</span>,
-      which is how a box moves its selection &mdash; on a one-button box only index 0 exists,
-      so index 1 doing nothing is the expected answer, not a fault.
-      <br><br><b>close box</b> is <span class="k">54 03</span> &mdash; the same command that
-      closes the full window, because the box IS a mode <span class="k">0x05</span> screen.
-      It had no close button at all until somebody was left staring at a delete prompt.
+      The button count is payload byte <span class="k">[4]</span> and it is a real field, not
+      a constant &mdash; it was hard-coded to 1 until 2026-08-06, which is why this only ever
+      drew an OK box. Both lengths follow the count, three-for-three across OEM captures with
+      0, 1 and 2 buttons: <span class="k">declared = 105 + 6&times;buttons</span> and
+      <span class="k">body = 32 + 6&times;buttons</span>. Labels are <b>six bytes,
+      NUL-padded</b> &mdash; the OEM's own box carries <span class="k">"Yes"</span> and
+      <span class="k">"No"</span> in exactly those fields.
+      <br><br>The two-button form is <b>119 wire bytes and wraps the ISO-TP counter</b> from
+      <span class="k">0x2F</span> to <span class="k">0x20</span>. That is what the OEM does
+      and the panel ACKs it &mdash; and it is what the nav pane has done 24 912 times here.
+      <b>select</b> sends <span class="k">03 29 05 &lt;n&gt;</span>, a three-byte single
+      frame; on a one-button box only index 0 exists.
+      <br><br><b>There is no close button, and that is not an omission.</b> A box is replaced
+      by the next render &mdash; draw a menu, or press SET TEXT on the Text tab. Only the
+      popup needs a close command, because only the popup is a true overlay.
     </small></p>
   </section>
 </main>
@@ -307,6 +369,10 @@ th{color:var(--dim);font-weight:normal}
       <button class="p" onclick="exportWire()">export .tsv</button>
       <label><input type="checkbox" id="wauto" checked> follow</label>
     </div>
+    <div class="r"><small>id</small><span id="fid" class="fl"></span>
+      <button onclick="wAll('id',1)">all</button><button onclick="wAll('id',0)">none</button></div>
+    <div class="r"><small>byte&nbsp;0</small><span id="fb0" class="fl"></span>
+      <button onclick="wAll('b0',1)">all</button><button onclick="wAll('b0',0)">none</button></div>
     <pre id="fr">&nbsp;</pre>
     <p><small>
       Coalesced against the newest row, so a repeat shows as a count. <b>This is the only
@@ -336,20 +402,37 @@ th{color:var(--dim);font-weight:normal}
       and the handshake, ids and text encoding all differ. There is no honest runtime switch,
       so the choice is stored and applied on the next boot. The nav pane and the N-item list
       are <b>Carminat only</b>.
+      <br><br><b>This switch did nothing until 2026-08-06.</b> It stored the choice and
+      rebooted correctly &mdash; but the firmware was built with Carminat only, so the
+      UpdateList branch did not exist and boot reset the family every time. The board came
+      back on Carminat and the console reported success. <b>Both families are compiled in
+      now</b>, so the choice survives. The header line above says which one is actually
+      running; trust that, not this button.
     </small></p>
 
-    <h2 style="margin-top:15px">Main line hold</h2>
+    <h2 style="margin-top:15px">Go back to the scrolling line by itself, after</h2>
     <div class="r">
-      <small>auto-return after</small><input id="hold" type="number" value="0" style="width:80px">
-      <small>ms &mdash; 0 = never</small>
+      <small>wait</small><input id="hold" type="number" value="0" style="width:80px">
+      <small>ms, then resume scrolling &mdash; <b>0 = never, stay put</b></small>
       <button onclick="setHold()">set</button>
     </div>
     <p><small>
-      While a menu or a box is on the glass the scrolling line <b>shuts up</b>, so a repaint
-      cannot close a screen somebody is reading. The library reports which screen was last
-      acknowledged (<span class="k">lastRendered()</span>); deciding what to do about it is
-      the application's job. Auto-return is off by default, because a menu that closes itself
-      while you are reading it is the bug this prevents.
+      <b>In one sentence: how long a menu or a box stays up before the scrolling text takes
+      the screen back on its own.</b>
+      <br><br>Here is the problem it exists for. The main line scrolls, which means it
+      repaints every few hundred milliseconds. A repaint replaces whatever is on the glass.
+      So if you open a menu and walk away, the very next scroll tick would wipe it &mdash;
+      a screen closing itself while you are reading it. This console therefore <b>stops the
+      scroll entirely</b> whenever a menu, box or fullscreen is showing, and the line stays
+      quiet until something takes it back.
+      <br><br><b>0 means it waits for ever</b>, which is the default because that is the
+      safe answer: nothing on the glass ever disappears on a timer. Set 5000 and a menu
+      lingers five seconds after you stop touching it, then the text resumes by itself.
+      Either way <b>SET TEXT takes the line back immediately</b> &mdash; you never have to
+      wait for this timer to get your screen back.
+      <br><br>It knows which screen is up from the library's own record of the last
+      acknowledged render (<span class="k">lastRendered()</span>) rather than from a flag
+      this example keeps, so it cannot drift out of step with what was actually drawn.
     </small></p>
 
     <h2 style="margin-top:15px">Board</h2>
@@ -357,6 +440,17 @@ th{color:var(--dim);font-weight:normal}
       <button onclick="location='/update'">OTA update</button>
       <button class="d" onclick="cmd('reboot')">reboot</button>
     </div>
+    <p><small>
+      <b>OTA reflashes this board over WiFi &mdash; no cable.</b> The button opens
+      <span class="k">/update</span>; pick the firmware at
+      <span class="k">.pio/build/ex17_mediascreen/firmware.bin</span> and upload. CAN
+      transmit is gated off while it runs and the board reboots into the new build by itself.
+      <br><br>Two things worth knowing, both of which have cost a cable here before: the OTA
+      route is registered <b>first</b>, because PsychicHttp's URI table silently drops
+      handlers once it is full and <span class="k">/ota/upload</span> is the one you cannot
+      afford to lose; and a board that answers ping and mDNS but refuses HTTP has usually
+      exhausted its socket table rather than crashed &mdash; wait, then retry.
+    </small></p>
     <pre id="diag">&nbsp;</pre>
   </section>
 </main>
@@ -375,6 +469,9 @@ function cmd(op, p) {
   }).catch(function (e) { say(false, String(e)); });
 }
 function el(id) { return document.getElementById(id); }
+// "0xNN" — the form the selects and the byte fields both use, so a value read back from
+// /api/state matches an <option value> exactly and the select actually selects.
+function hx(v) { return '0x' + ('0' + (v & 255).toString(16).toUpperCase()).slice(-2); }
 function say(ok, m) { var e = el('res'); e.className = ok ? 'g' : 'b'; e.textContent = m; }
 
 var cur = 'bitmap';
@@ -452,16 +549,24 @@ function pack() {
   return b;
 }
 function load(n) {
-  fetch('/api/img?n=' + n).then(function (r) { return r.text(); }).then(function (t) {
+  return fetch('/api/img?n=' + n).then(function (r) { return r.text(); }).then(function (t) {
     for (var y = 0; y < H; y++) for (var x = 0; x < W; x++) {
       var byteAt = y * ST + (x >> 3);
       var v = parseInt(t.substr(byteAt * 2, 2), 16);
       px[y * W + x] = (v >> (7 - (x & 7))) & 1;
     }
     paint();
-    say(true, n + ' loaded into the editor');
   });
 }
+// An image button now does what an animation button does: PUTS IT ON THE GLASS. It used to
+// only fill the editor, so the two rows of buttons sat next to each other looking alike and
+// behaving differently, and the image ones appeared to do nothing at all.
+//
+// It sends via `scene`, not by posting the 288 bytes back: every one of these images is
+// already in device flash, so the round trip is one command instead of a 576-character
+// upload of bytes the board is holding anyway. The editor is loaded in parallel, for
+// drawing on top of.
+function img(n) { load(n); cmd('scene', { n: n }); }
 function sendBmp() {
   fetch('/api/bmp', { method: 'POST', body: hex(pack()) })
     .then(function (r) { return r.text(); })
@@ -471,9 +576,32 @@ function scene(n) { cmd('scene', { n: n }); }
 function setPeriod() { cmd('period', { ms: el('per').value }); }
 
 // ---- text ------------------------------------------------------------------
+// The icon byte, as the bits it actually is. Every named bit is a NO_ bit — [REF]
+// affa3.h:39-51 — so the checkbox label is what the tick TURNS OFF. Bit 7 is unnamed in the
+// origin and clear in every observed value, which is why it is offered without a name.
+var ICONBITS = [
+  [0x01, 'no NEWS'], [0x02, 'NEWS arrow'], [0x04, 'no TRAFFIC'], [0x08, 'TRAFFIC arrow'],
+  [0x10, 'no AF-RDS'], [0x20, 'AF-RDS arrow'], [0x40, 'no MODE'], [0x80, 'bit7 unknown']
+];
+function iconByte() { return parseInt(el('mic').value, 16) || 0; }
+function iconChips() {
+  var v = iconByte(), h = '', i;
+  for (i = 0; i < ICONBITS.length; i++)
+    h += '<button class="' + ((v & ICONBITS[i][0]) ? 'p' : '') + '" onclick="iconTog(' +
+         ICONBITS[i][0] + ')">' + ICONBITS[i][1] + '</button> ';
+  el('icb').innerHTML = h;
+}
+function iconTog(bit) {
+  var v = iconByte() ^ bit;
+  el('mic').value = '0x' + ('0' + v.toString(16).toUpperCase()).slice(-2);
+  iconChips();
+  sendText();
+}
 function sendText() {
+  iconChips();
   cmd('text', { t: el('mt').value, scroll: el('msc').checked ? 1 : 0, ms: el('mms').value,
-                icon: el('mic').value, src: el('msr').value, fmt: el('mfm').value });
+                icon: el('mic').value, src: el('msr').value, fmt: el('mfm').value,
+                fmt2: el('mf2').value });
 }
 function sendPopup() {
   cmd('popup', { t: el('pt').value, icon: el('pic').value, fmt: el('pfm').value });
@@ -497,9 +625,22 @@ function randomFull() { cmd('fullscreen', { a: pick(), b: pick(), c: pick() }); 
 function sendMenu() {
   cmd('menu', { h: el('mh').value, a: el('ma').value, b: el('mb').value, scroll: el('msk').value });
 }
-function sendMenuN() { cmd('menun', { h: el('nh').value, i: el('ni').value, n: el('nsel').value }); }
+function sendMenuN() {
+  cmd('menun', { h: el('nh').value, i: el('ni').value, n: el('nsel').value,
+                 scroll: el('nsk').value });
+}
 function selectItem() { cmd('select', { n: el('nsel').value }); }
-function sendConfirm() { cmd('confirm', { h: el('ch').value, a: el('ca').value }); }
+// Only as many label fields as there are buttons, so the form cannot ask for a label the
+// wire has nowhere to put.
+function cLabels() {
+  var n = +el('cbn').value;
+  el('cl0').className = n > 0 ? '' : 'hide';
+  el('cl1').className = n > 1 ? '' : 'hide';
+}
+function sendConfirm() {
+  cmd('confirm', { a: el('ca').value, b: el('cb').value, btn: el('cbn').value,
+                   l0: el('cl0').value, l1: el('cl1').value, sel: 0 });
+}
 function sendRows() {
   cmd('infomenu', { r0: el('r0').value, r1: el('r1').value, r2: el('r2').value,
                     s0: el('s0').checked ? 1 : 0, s1: el('s1').checked ? 1 : 0,
@@ -509,14 +650,85 @@ function sendRows() {
 // ---- settings --------------------------------------------------------------
 function famSet(f) { if (confirm('Reboot into ' + f + '?')) cmd('family', { f: f }); }
 function setHold() { cmd('hold', { ms: el('hold').value }); }
+// ---- wire filter -----------------------------------------------------------
+// THE OPTIONS ARE BUILT FROM WHAT HAS ACTUALLY BEEN SEEN, never from a hard-coded list of
+// ids. Half the point of this tab is catching a frame nobody expected, and a fixed filter
+// list would hide exactly that frame. Anything newly seen enters CHECKED, so the filter can
+// only ever be something you narrowed on purpose — it never silently swallows a new id.
+//
+// Two independent axes, because that is how a question about this bus is actually asked:
+// the id says WHO, and byte 0 says WHAT (0x61 a request, 0x70 a registration, 0x10/0x21 an
+// ISO-TP first/continuation frame). Filtering on both is what separates one screen's
+// transfer from the handshake running underneath it.
+var wSeen = { id: {}, b0: {} }, wRaw = '';
+
+function wKeys(g) {
+  var k = [];
+  for (var v in wSeen[g]) k.push(v);
+  k.sort();
+  return k;
+}
+function wAll(g, on) {
+  var k = wKeys(g);
+  for (var i = 0; i < k.length; i++) wSeen[g][k[i]] = !!on;
+  wChips(); wRender();
+}
+function wTog(g, v) { wSeen[g][v] = !wSeen[g][v]; wChips(); wRender(); }
+function wChips() {
+  var g, i, k, h;
+  var groups = ['id', 'b0'];
+  for (g = 0; g < groups.length; g++) {
+    k = wKeys(groups[g]); h = '';
+    for (i = 0; i < k.length; i++)
+      h += '<button class="' + (wSeen[groups[g]][k[i]] ? 'p' : '') + '" onclick="wTog(\'' +
+           groups[g] + '\',\'' + k[i] + '\')">' + k[i] + '</button> ';
+    el(groups[g] === 'id' ? 'fid' : 'fb0').innerHTML = h ||
+      '<small>nothing seen yet</small>';
+  }
+}
+// Returns the rows that survive the filter, header included.
+function wRows() {
+  var lines = wRaw.split('\n'), out = [], i, c, id, b0;
+  for (i = 0; i < lines.length; i++) {
+    if (!lines[i]) continue;
+    c = lines[i].split('\t');
+    if (c.length < 4 || c[0] === 'ms') { out.push(lines[i]); continue; }
+    id = c[2];
+    b0 = (c[3] || '').trim().split(' ')[0] || '--';
+    if (wSeen.id[id] && wSeen.b0[b0]) out.push(lines[i]);
+  }
+  return out;
+}
+function wRender() {
+  var e = el('fr');
+  e.textContent = wRows().join('\n');
+  if (el('wauto').checked) e.scrollTop = e.scrollHeight;
+}
+// Learn any id / byte-0 the ring is carrying, then redraw. Called on every wire poll.
+function wLearn(t) {
+  var lines = t.split('\n'), i, c, id, b0, fresh = false;
+  wRaw = t;
+  for (i = 0; i < lines.length; i++) {
+    if (!lines[i]) continue;
+    c = lines[i].split('\t');
+    if (c.length < 4 || c[0] === 'ms') continue;
+    id = c[2];
+    b0 = (c[3] || '').trim().split(' ')[0] || '--';
+    if (wSeen.id[id] === undefined) { wSeen.id[id] = true; fresh = true; }
+    if (wSeen.b0[b0] === undefined) { wSeen.b0[b0] = true; fresh = true; }
+  }
+  if (fresh) wChips();
+  wRender();
+}
 function exportWire() {
-  fetch('/api/frames').then(function (r) { return r.text(); }).then(function (t) {
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([t], { type: 'text/tab-separated-values' }));
-    a.download = 'affa-wire.tsv';
-    a.click();
-    say(true, 'exported ' + (t.split('\n').length - 1) + ' rows');
-  });
+  // Exports WHAT YOU ARE LOOKING AT. Exporting the unfiltered ring from a filtered view is
+  // how a .tsv ends up disagreeing with the screenshot taken beside it.
+  var rows = wRows(), t = rows.join('\n') + '\n';
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([t], { type: 'text/tab-separated-values' }));
+  a.download = 'affa-wire.tsv';
+  a.click();
+  say(true, 'exported ' + (rows.length - 1) + ' rows');
 }
 
 // ---- status ----------------------------------------------------------------
@@ -539,6 +751,14 @@ function poll() {
       el('per').value = s.period;
       for (var i = 0; i < 3; i++) { el('r' + i).value = s.rows[i].t; el('s' + i).checked = s.rows[i].s; }
       el('rlive').checked = s.rowslive;
+      // ADOPT THE BOARD'S HEADER BYTES rather than leaving the form on its HTML defaults.
+      // The page used to show "none 55" while the board held something else entirely, so
+      // the first SET TEXT silently reverted whatever was actually on the glass.
+      el('mic').value = hx(s.icon);
+      el('mf2').value = hx(s.fmt2);
+      el('msr').value = hx(s.src);
+      el('mfm').value = hx(s.fmt);
+      iconChips();
       first = false;
     }
     el('st').innerHTML =
@@ -562,8 +782,7 @@ function poll() {
   }).then(function () {
     if (cur !== 'wire') return null;
     return fetch('/api/frames').then(function (r) { return r.text(); }).then(function (t) {
-      var e = el('fr'); e.textContent = t;
-      if (el('wauto').checked) e.scrollTop = e.scrollHeight;
+      wLearn(t);
       return fetch('/api/log').then(function (r) { return r.text(); }).then(function (t2) {
         el('log').textContent = t2;
       });
@@ -584,6 +803,8 @@ function poll() {
   }).then(function () { polling = false; });
 }
 load('tryzub');
+cLabels();
+iconChips();
 poll();
 setInterval(poll, 1500);
 </script>

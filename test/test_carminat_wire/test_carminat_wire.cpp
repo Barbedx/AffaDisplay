@@ -378,16 +378,15 @@ void test_showPopupText_is_capture_verbatim(void) {
   expectFrames(r.link, kPopupVol28, 3, "showPopupText(\"VOL 28\") [CAP-VERBATIM]");
 }
 
-void test_hidePopup_and_hideFullscreenText_are_the_same_three_bytes(void) {
+// hidePopup() IS THE ONLY CLOSE COMMAND THIS PANEL HAS. hideFullscreenText() sent these
+// same three bytes under a second name and was removed on 2026-08-06; a fullscreen is
+// replaced by the next render, not closed.
+void test_hidePopup_is_the_only_close_command(void) {
   Rig r;
   r.up();
   ASSERT_RESULT(Ok, r.d.hidePopup());
   pumpUntilIdle(r.d);
   expectFrames(r.link, kCloseWindow, 1, "hidePopup() [CAP-VERBATIM]");
-
-  ASSERT_RESULT(Ok, r.d.hideFullscreenText());
-  pumpUntilIdle(r.d);
-  expectFrames(r.link, kCloseWindow, 1, "hideFullscreenText() — identical bytes");
 }
 
 void test_showFullscreenText_is_14_frames(void) {
@@ -398,19 +397,22 @@ void test_showFullscreenText_is_14_frames(void) {
   expectFrames(r.link, kFullscreenNavCd, 14, "showFullscreenText");
 }
 
-void test_showConfirmBox_sits_at_the_113_byte_ceiling(void) {
-  // 2 + 6 + 105 = 113 = 8 + 15*7. Sixteen frames, last PCI 0x2F, zero headroom.
+void test_showConfirmBox_is_a_one_button_box(void) {
+  // 2 + 6 + 105 = 113, sixteen frames, last PCI 0x2F. UNCHANGED by the 2026-08-06 rewrite
+  // that made the button count a parameter: `caption` was always the button's label, so
+  // these are the same bytes the old hard-coded builder produced.
   Rig r;
   r.up();
   ASSERT_RESULT(Ok, r.d.showConfirmBox("OK", "Line one", "Line two"));
   pumpUntilIdle(r.d);
-  expectFrames(r.link, kConfirmBoxOk, 16, "showConfirmBox at the transport ceiling");
+  expectFrames(r.link, kConfirmBoxOk, 16, "showConfirmBox — one button, labelled OK");
 }
 
-void test_showConfirmBox_caption_abuts_the_row_region(void) {
-  // The caption region (content 0x1A..0x20) ABUTS the row region at 0x20: a 7-character
-  // caption writes content[32], which row0 then overwrites. Pinned so that anyone who
-  // "fixes" the overlap sees a failing test rather than a silently different screen.
+void test_showConfirmBox_caption_is_truncated_at_the_label_field(void) {
+  // The label field is SIX bytes (payload 32..37) and the body starts at 38. A 7-character
+  // caption used to write that 38th byte and then be overwritten by row0; it is now cut at
+  // six. The bytes on the wire are identical either way — what changed is that the 7th
+  // character is dropped deliberately instead of being corrupted by accident.
   Rig r;
   r.up();
   ASSERT_RESULT(Ok, r.d.showConfirmBox("ABCDEFG", "Zebra", ""));
@@ -422,11 +424,114 @@ void test_showConfirmBox_caption_abuts_the_row_region(void) {
   TEST_ASSERT_EQUAL_HEX8_MESSAGE('A', f.data[6], "caption starts at content 0x1A");
   TEST_ASSERT_EQUAL_HEX8_MESSAGE('B', f.data[7], "caption cell 1");
   TEST_ASSERT_TRUE(r.link.takeSent(f));                                // frame 5, PCI 0x25
-  // content[28..34]: caption cells 2..6 land at 28..32, then row0 OVERWRITES 32 onward.
+  // payload[34..40]: label cells 2..5 at 34..37, then the body from 38.
   static const uint8_t kWant[8] = {0x25, 'C', 'D', 'E', 'F', 'Z', 'e', 'b'};
   TEST_ASSERT_EQUAL_HEX8_ARRAY_MESSAGE(kWant, f.data, 8,
-                                       "the 7th caption byte is overwritten by row0");
+                                       "label is 6 bytes; the body starts at 38 with row0");
   drain(r.link);
+}
+
+// ---------------------------------------------------------------------------
+// The message box's button count — [OEM], three captures, three counts
+// ---------------------------------------------------------------------------
+// Reassemble what the builder transmitted back into one payload, so these tests can assert
+// on the OFFSETS the corpus names instead of on hand-copied frame arrays. Frame 0 carries
+// eight raw bytes; every continuation carries seven after its PCI.
+uint16_t reassemble(LoopbackLink<256>& link, uint8_t* out, uint16_t cap) {
+  Frame f;
+  uint16_t n = 0;
+  bool first = true;
+  while (link.takeSent(f)) {
+    const uint8_t from = first ? 0 : 1;
+    for (uint8_t i = from; i < f.len && n < cap; ++i) out[n++] = f.data[i];
+    first = false;
+  }
+  return n;
+}
+
+// declared = 105 + 6*buttons and body = 32 + 6*buttons, three-for-three in the corpus:
+// navi start.csv (0 buttons, 105), AVAILABLE SPACE... (1, 111), CONFIRM SCREEN NO (2, 117).
+void test_messageBox_lengths_follow_the_button_count(void) {
+  struct Case { uint8_t buttons; uint8_t declared; uint8_t body; uint8_t sel; };
+  static const Case kCases[] = {{0, 105, 32, 0xFF}, {1, 111, 38, 0x00}, {2, 117, 44, 0x01}};
+  static const char* kLabels[2] = {"Yes", "No"};
+
+  for (const Case& c : kCases) {
+    Rig r;
+    r.up();
+    ASSERT_RESULT(Ok, r.d.showMessageBox("Delete", "entry?", c.buttons ? kLabels : nullptr,
+                                         c.buttons, c.buttons ? c.buttons - 1 : 0));
+    pumpUntilIdle(r.d);
+
+    uint8_t p[160] = {0};
+    const uint16_t n = reassemble(r.link, p, sizeof(p));
+    TEST_ASSERT_GREATER_OR_EQUAL_MESSAGE(2u + c.declared, n, "short transfer");
+
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x10, p[0], "first-frame PCI");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(c.declared, p[1], "declared = 105 + 6*buttons");
+    const uint8_t* const q = p + 2;                    // q[0] is the 0x21 command
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x21, q[0], "screen command");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x05, q[1], "mode 0x05");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(c.sel, q[2], "selected button, 0xFF when there are none");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(c.buttons, q[4], "button count at payload[4]");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x49, q[5], "payload[5] is 0x49 in all five captures");
+    for (uint8_t i = 6; i < 32; ++i)
+      TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00, q[i], "payload[6..31] is zero in every capture");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE('D', q[c.body], "body starts at 32 + 6*buttons");
+  }
+}
+
+// "Yes" and "No" in six-byte NUL-padded fields at 32 and 38 — CONFIRM SCREEN NO.csv.
+void test_messageBox_labels_are_six_byte_nul_padded_fields(void) {
+  static const char* kLabels[2] = {"Yes", "No"};
+  Rig r;
+  r.up();
+  ASSERT_RESULT(Ok, r.d.showMessageBox("Delete", "entry?", kLabels, 2, 1));
+  pumpUntilIdle(r.d);
+
+  uint8_t p[160] = {0};
+  reassemble(r.link, p, sizeof(p));
+  static const uint8_t kYesNo[12] = {'Y', 'e', 's', 0, 0, 0, 'N', 'o', 0, 0, 0, 0};
+  TEST_ASSERT_EQUAL_HEX8_ARRAY_MESSAGE(kYesNo, p + 2 + 32, 12,
+                                       "two 6-byte NUL-padded labels at payload 32");
+}
+
+// The two-button box is 119 wire bytes: 17 frames, and the sequence counter WRAPS from
+// 0x2F to 0x20 on the last one. The OEM does exactly this and the panel ACKs it.
+void test_messageBox_two_buttons_wraps_the_sequence_counter(void) {
+  static const char* kLabels[2] = {"Yes", "No"};
+  Rig r;
+  r.up();
+  ASSERT_RESULT(Ok, r.d.showMessageBox("Delete", "entry?", kLabels, 2, 1));
+  pumpUntilIdle(r.d);
+
+  Frame f;
+  uint16_t count = 0;
+  uint8_t  last  = 0;
+  while (r.link.takeSent(f)) { ++count; last = f.data[0]; }
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(17, count, "119 bytes = 1 first frame + 16 continuations");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x20, last, "the 16th continuation wraps 0x2F -> 0x20");
+}
+
+void test_messageBox_rejects_a_third_button(void) {
+  static const char* kLabels[3] = {"Yes", "No", "Maybe"};
+  Rig r;
+  r.up();
+  // No capture has ever shown three, and the declared length formula would be a guess.
+  ASSERT_RESULT(BadArgument, r.d.showMessageBox("a", "b", kLabels, 3, 0));
+}
+
+// `03 29 05 <index>` — a three-byte single frame. NOT the 7-byte `29 01 <rowtag> 80` form
+// that highlightItem() sends at a two-row list. [OEM] CONFIRM SCREEN SWITCH TO YES.csv
+void test_selectBoxButton_is_a_three_byte_single_frame(void) {
+  static const Frame kSelect0[] = {
+      {0x151, 8, {0x03, 0x29, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00}, false},
+  };
+  Rig r;
+  r.up();
+  ASSERT_RESULT(Ok, r.d.selectBoxButton(0));
+  pumpUntilIdle(r.d);
+  expectFrames(r.link, kSelect0, 1, "selectBoxButton(0) [CAP-VERBATIM]");
 }
 
 // ---------------------------------------------------------------------------
@@ -444,15 +549,10 @@ void test_showInfoPopup_is_three_messages_space_padded(void) {
   expectFrames(r.link, kInfoPopupOem, 6, "showInfoPopup — OEM SPACE padding");
 }
 
-void test_hideInfoPopup_falls_back_to_the_source_banner(void) {
-  // The real popup-close command has never been observed; inventing one would be a guess
-  // presented as a fact, so this is documented as best-effort and pinned as such.
-  Rig r;
-  r.up();
-  ASSERT_RESULT(Ok, r.d.hideInfoPopup());
-  pumpUntilIdle(r.d);
-  expectFrames(r.link, kSetTextRenault, 3, "hideInfoPopup -> setText(\"RENAULT\")");
-}
+// hideInfoPopup() WAS REMOVED, 2026-08-06. It sent setText("RENAULT") — a guess at the OEM
+// idle banner wearing a protocol method's name — and no capture shows how these rows are
+// actually dismissed. There is deliberately no test here now, because there is deliberately
+// no command: this comment is the record of why, so nobody re-adds it as a convenience.
 
 // ---------------------------------------------------------------------------
 // Registration order, which is on the wire
@@ -648,12 +748,16 @@ int main(int, char**) {
   RUN_TEST(test_showMenu_matches_the_capture_verbatim_vector);
   RUN_TEST(test_showMenu_declares_0x5A_while_building_96_bytes);
   RUN_TEST(test_showPopupText_is_capture_verbatim);
-  RUN_TEST(test_hidePopup_and_hideFullscreenText_are_the_same_three_bytes);
+  RUN_TEST(test_hidePopup_is_the_only_close_command);
   RUN_TEST(test_showFullscreenText_is_14_frames);
-  RUN_TEST(test_showConfirmBox_sits_at_the_113_byte_ceiling);
-  RUN_TEST(test_showConfirmBox_caption_abuts_the_row_region);
+  RUN_TEST(test_showConfirmBox_is_a_one_button_box);
+  RUN_TEST(test_showConfirmBox_caption_is_truncated_at_the_label_field);
+  RUN_TEST(test_messageBox_lengths_follow_the_button_count);
+  RUN_TEST(test_messageBox_labels_are_six_byte_nul_padded_fields);
+  RUN_TEST(test_messageBox_two_buttons_wraps_the_sequence_counter);
+  RUN_TEST(test_messageBox_rejects_a_third_button);
+  RUN_TEST(test_selectBoxButton_is_a_three_byte_single_frame);
   RUN_TEST(test_showInfoPopup_is_three_messages_space_padded);
-  RUN_TEST(test_hideInfoPopup_falls_back_to_the_source_banner);
   RUN_TEST(test_first_send_after_a_resync_registers_both_functions_in_order);
   return UNITY_END();
 }

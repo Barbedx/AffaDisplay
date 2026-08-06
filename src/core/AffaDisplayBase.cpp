@@ -602,13 +602,11 @@ Result AffaDisplayBase::hidePopup() { return Result::NotSupported; }
 Result AffaDisplayBase::showFullscreenText(const char*, const char*, const char*) {
   return Result::NotSupported;
 }
-Result AffaDisplayBase::hideFullscreenText() { return Result::NotSupported; }
 Result AffaDisplayBase::showConfirmBox(const char*, const char*, const char*) {
   return Result::NotSupported;
 }
 Result AffaDisplayBase::showInfoPopup(const char*, const char*, const char*) {
   return Result::NotSupported;
 }
-Result AffaDisplayBase::hideInfoPopup() { return Result::NotSupported; }
 
 } // namespace affa

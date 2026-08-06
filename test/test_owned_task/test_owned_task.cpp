@@ -72,14 +72,12 @@ class RecordingDisplay final : public AffaDisplayBase {
   Result showFullscreenText(const char* a, const char* b, const char* c) override {
     return rec("fullscreen", a, b, c);
   }
-  Result hideFullscreenText() override              { return rec("hideFullscreen"); }
   Result showConfirmBox(const char* a, const char* b, const char* c) override {
     return rec("confirm", a, b, c);
   }
   Result showInfoPopup(const char* a, const char* b, const char* c) override {
     return rec("info", a, b, c);
   }
-  Result hideInfoPopup() override                   { return rec("hideInfo"); }
 
   bool begin() override { ++begins; return AffaDisplayBase::begin(); }
 

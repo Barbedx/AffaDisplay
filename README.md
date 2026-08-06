@@ -305,9 +305,9 @@ defaults.
 | `AFFA_ENABLE_MENU` | **`0`** | `src/widget/`, `CarminatMenuRenderer`, `MenuController`, `IPage`, `nav()`, `getMenu()`. The largest optional block, and **off by default**: the menu is a widget, not protocol. `showMenu` / `highlightItem` stay available with it off. |
 | ↳ `src/widget/` | *same gate* | `MenuModel` + `IMenuRenderer` + `MenuGeometry` — the sliding-window algorithm with rows, characters-per-row and wrap as **parameters**, for any display. Panel-free, host-testable, no heap after construction. The **only** menu implementation in the library; `CarminatDisplay` uses it too. See [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md). |
 | `AFFA_ENABLE_POPUP` | `1` | `showPopupText` / `hidePopup` |
-| `AFFA_ENABLE_FULLSCREEN` | `1` | `showFullscreenText` / `hideFullscreenText` |
+| `AFFA_ENABLE_FULLSCREEN` | `1` | `showFullscreenText` |
 | `AFFA_ENABLE_CONFIRMBOX` | `1` | `showConfirmBox` (sits at exactly the 113-byte ceiling) |
-| `AFFA_ENABLE_INFOPOPUP` | `1` | `showInfoPopup` / `hideInfoPopup` (three messages) |
+| `AFFA_ENABLE_INFOPOPUP` | `1` | `showInfoPopup` (three messages) |
 | `AFFA_ENABLE_TRANSLITERATION` | `1` | `toAscii` + its table (~1.2 kB). **0 is dangerous**: UTF-8 then reaches the wire unchanged and renders as garbage — a visual failure, not a compile error. |
 | `AFFA_ENABLE_LOG` | `1` | the `AFFA_LOG*` macros. 0: no format strings enter flash at all, so never put a side effect in a log argument. |
 | `AFFA_LOG_LEVEL` | `3` | 0 off, 1 error, 2 warn, 3 info, 4 debug, 5 trace. Compile-time. |
@@ -943,9 +943,9 @@ OLED 6 × 20. Модель оперує *індексом рядка* і від�
 | `AFFA_ENABLE_MENU` | **`0`** | `src/widget/`, `CarminatMenuRenderer`, `MenuController`, `IPage`, `nav()`, `getMenu()`. Найбільший опціональний блок, і **типово вимкнений**: меню — це віджет, а не протокол. `showMenu` / `highlightItem` доступні й з вимкненим меню. |
 | ↳ `src/widget/` | *той самий прапорець* | `MenuModel` + `IMenuRenderer` + `MenuGeometry` — той самий алгоритм ковзного вікна, але кількість рядків, символів у рядку і зациклення стали **параметрами**, для будь-якого дисплея. Без панелі, тестується на хості, без купи після конструювання. Див. [`docs/MENU-WIDGET.md`](docs/MENU-WIDGET.md). |
 | `AFFA_ENABLE_POPUP` | `1` | `showPopupText` / `hidePopup` |
-| `AFFA_ENABLE_FULLSCREEN` | `1` | `showFullscreenText` / `hideFullscreenText` |
+| `AFFA_ENABLE_FULLSCREEN` | `1` | `showFullscreenText` |
 | `AFFA_ENABLE_CONFIRMBOX` | `1` | `showConfirmBox` (рівно на стелі в 113 байтів) |
-| `AFFA_ENABLE_INFOPOPUP` | `1` | `showInfoPopup` / `hideInfoPopup` (три повідомлення) |
+| `AFFA_ENABLE_INFOPOPUP` | `1` | `showInfoPopup` (три повідомлення) |
 | `AFFA_ENABLE_TRANSLITERATION` | `1` | `toAscii` і його таблиця (~1.2 кБ). **0 — небезпечно**: UTF-8 тоді потрапляє на шину як є і малюється сміттям — це візуальна помилка, а не помилка компіляції. |
 | `AFFA_ENABLE_LOG` | `1` | макроси `AFFA_LOG*`. При 0 жоден формат-рядок не потрапляє у флеш, тому ніколи не ховайте побічний ефект в аргументі логу. |
 | `AFFA_LOG_LEVEL` | `3` | 0 off, 1 error, 2 warn, 3 info, 4 debug, 5 trace. На етапі компіляції. |

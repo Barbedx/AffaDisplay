@@ -215,9 +215,9 @@ enum class Feature : uint8_t {
   Power,        // setPower
   Menu,         // getMenu / showMenu / highlightItem / nav
   Popup,        // showPopupText / hidePopup
-  Fullscreen,   // showFullscreenText / hideFullscreenText
+  Fullscreen,   // showFullscreenText
   ConfirmBox,   // showConfirmBox
-  InfoPopup,    // showInfoPopup / hideInfoPopup
+  InfoPopup,    // showInfoPopup
   NavBitmap,    // showNavBitmap / navTick — the Carminat 48x48 pane on 0x1F1
   KeyTx,        // this panel family has a key-transmit id, so pressKey(..., Wire) can
                 // put a frame on the bus
@@ -254,9 +254,9 @@ enum class RenderSlot : uint8_t {
                // pending full redraw, and vice versa
   Popup,       // showPopupText / hidePopup — never coalesces against Text: the popup is
                // a non-destructive overlay and the screen underneath keeps redrawing
-  Fullscreen,  // showFullscreenText / hideFullscreenText
+  Fullscreen,  // showFullscreenText
   ConfirmBox,  // showConfirmBox
-  InfoPopup,   // showInfoPopup / hideInfoPopup
+  InfoPopup,   // showInfoPopup
   Control,     // setPower and other non-rendering control payloads
   None,        // raw enqueue(); never coalesced
 };

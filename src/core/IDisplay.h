@@ -35,14 +35,23 @@ struct IDisplay {
                                              uint8_t srcIcon = 0xFF,
                                              uint8_t fmt = 0x60)              = 0;
   [[nodiscard]] virtual Result hidePopup()                                    = 0;
+  // THE POPUP IS THE ONLY SCREEN WITH A HIDE, and that is a protocol fact rather than an
+  // omission. It is the one true overlay: the screen underneath keeps redrawing and
+  // reappears when it is cleared, so something has to clear it. Every other screen —
+  // fullscreen, menu, message box, info rows — is REPLACED by the next render, so
+  // "closing" one means drawing the next thing.
+  //
+  // `hideFullscreenText()` was removed on 2026-08-06. It emitted `02 54 03`, byte for byte
+  // the same three bytes as hidePopup(), so it was a second name for one command and it
+  // implied a teardown callers do not owe. If you want that command, call hidePopup(); if
+  // you want the fullscreen gone, draw something else. `hideInfoPopup()` went with it for a
+  // worse reason: it was never a close command at all, just setText("RENAULT") wearing one.
   [[nodiscard]] virtual Result showFullscreenText(const char* l1, const char* l2,
                                                   const char* l3)             = 0;
-  [[nodiscard]] virtual Result hideFullscreenText()                           = 0;
   [[nodiscard]] virtual Result showConfirmBox(const char* caption, const char* row0,
                                               const char* row1)               = 0;
   [[nodiscard]] virtual Result showInfoPopup(const char* l1, const char* l2,
                                              const char* l3)                  = 0;
-  [[nodiscard]] virtual Result hideInfoPopup()                                = 0;
 };
 
 } // namespace affa

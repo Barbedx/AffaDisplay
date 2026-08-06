@@ -89,7 +89,7 @@ All on `0x151` unless noted.
 | `70` | 1 | `kRegisterByte` | ✅ implemented |
 | `52 09 00` / `52 00 00` | 3 | `setPower(true/false)` | ✅ |
 | `54 01` | 2 | `hidePopup()` | ✅ |
-| `54 03` | 2 | `hideFullscreenText()` | ✅ |
+| `54 03` | 2 | `hidePopup()` | ✅ — `hideFullscreenText()` sent these same bytes and was removed 2026-08-06 |
 | `56 "HHMM"` | 5 | `setTime()` | ✅ verbatim match |
 | `77 <5 hdr> <8 cells>` | 14 | `setText()` | ✅ |
 | `76 60 <row> <8 cells>` | 11 | `showInfoPopup()` | ✅ verbatim match |
@@ -122,7 +122,7 @@ builders count from the PCI, so library offset = these + 2.
 [5] 00
 [6] 0x80 | itemCount         <-- CONFIRMED across three menus
 [7] FF
-[8] scroll mask              0x00 none / 0x07 up / 0x0B down / 0x03
+[8] scroll mask              0x00 none / 0x07 up / 0x0B down / 0x03 BOTH
 [9 .. 34]   title, 26 bytes  (== kMenuHeaderMax)
 [35]        index of the first visible item
 [36]        item 0 tag    0x00..0x05 list index, or 0x7E/0x7F row tag in a 2-row window
@@ -243,12 +243,14 @@ matching rule, but the byte is not always zero and it appears exactly at the BA 
 
 Ranked by evidence strength and cost:
 
-1. **`showMenu` with N rows.** The item layout is confirmed at 2, 4 and 6 items and the
-   only header change is `0x80 | count`. Highest value, lowest risk.
-2. **A real two-button confirm box** — `21 05 <sel> 00 02 49` + two 6-byte labels — plus
-   `highlightButton(i)` sending `29 05 i`. The current `showConfirmBox` is a one-button box
-   under a misleading name.
-3. **`navTick(bool)`** — `25 00 00 00` / `25 00 03 00`. Four bytes, verbatim from capture.
+1. ~~**`showMenu` with N rows.**~~ **DONE** — `showMenuN()`.
+2. ~~**A real two-button confirm box**~~ **DONE, 2026-08-06** — `showMessageBox(row0, row1,
+   labels, buttonCount, selected)` and `selectBoxButton(i)` sending `03 29 05 i`. Both
+   length formulas below are pinned by `test_messageBox_lengths_follow_the_button_count`,
+   and the two-button form's counter wrap by
+   `test_messageBox_two_buttons_wraps_the_sequence_counter`. `AFFA_MAX_PAYLOAD` went 113 →
+   119 to hold it; the old "113 is a validated wire limit" note was wrong on both counts.
+3. ~~**`navTick(bool)`**~~ **DONE**.
 4. **Fix `showFullscreenText` byte `[5]` to `0x49`** and let the payload length vary; the
    OEM uses 105 and 117 where the library is fixed at 96.
 5. **Decode inbound `0x1C1` `63`/`64`** into an observer callback. Receive-side only, zero

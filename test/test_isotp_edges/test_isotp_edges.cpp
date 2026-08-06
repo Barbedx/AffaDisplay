@@ -108,9 +108,15 @@ void test_showConfirmBox_at_exactly_113_still_succeeds(void) {
   uint8_t lastPci = 0;
   while (r.link.takeSent(f)) { if (n) lastPci = f.data[0]; ++n; }
   TEST_ASSERT_EQUAL_INT_MESSAGE(16, n, "showConfirmBox is sixteen frames");
-  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x2F, lastPci, "and it ends at the counter ceiling");
-  TEST_ASSERT_EQUAL_UINT16_MESSAGE(113, AFFA_MAX_PAYLOAD,
-                                   "AFFA_MAX_PAYLOAD is the validated wire limit");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x2F, lastPci, "and it ends at PCI 0x2F");
+  // THE OLD ASSERTION HERE PINNED AFFA_MAX_PAYLOAD == 113 and called it "the validated wire
+  // limit". It was neither validated nor a wire limit: 8 + 15*7 is only where the sequence
+  // counter first repeats, and this library wraps that counter 44 frames at a time on every
+  // nav bitmap. Pinning the constant also made it a test of a #define rather than of the
+  // wire — the exact weakness docs/HANDOFF-2026-08-06 warns about. What matters is that a
+  // one-button box is still sixteen frames ending at 0x2F, which is asserted above.
+  TEST_ASSERT_TRUE_MESSAGE(AFFA_MAX_PAYLOAD >= 113,
+                           "the one-button box must still fit the inline buffer");
 }
 
 // ---------------------------------------------------------------------------

@@ -451,12 +451,12 @@ affa::Result sendScreen(const String& w, const String& a, const String& b, const
   if      (w == "menu")       res = g_display.showMenu(a.c_str(), b.c_str(), c.c_str());
   else if (w == "infomenu")   res = g_display.showInfoMenu(a.c_str(), b.c_str(), c.c_str());
   else if (w == "fullscreen") res = g_display.showFullscreenText(a.c_str(), b.c_str(), c.c_str());
-  else if (w == "fshide")     res = g_display.hideFullscreenText();
+  // No fshide: a fullscreen is replaced by the next render, not closed. `pophide` sends the
+  // same 02 54 03 for anyone who wants the raw close command.
   else if (w == "popup")      res = g_display.showPopupText(a.c_str());
   else if (w == "pophide")    res = g_display.hidePopup();
   else if (w == "confirm")    res = g_display.showConfirmBox(a.c_str(), b.c_str(), c.c_str());
   else if (w == "infopopup")  res = g_display.showInfoPopup(a.c_str(), b.c_str(), c.c_str());
-  else if (w == "infohide")   res = g_display.hideInfoPopup();
   else if (w == "text")       res = g_display.setText(a.c_str());
   else if (w == "hi0")        res = g_display.highlightItem(0);
   else if (w == "hi1")        res = g_display.highlightItem(1);

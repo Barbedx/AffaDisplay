@@ -304,10 +304,8 @@ class AffaDisplayBase : public IDisplay, public IPanel {
                                      uint8_t = 0x60) override;
   [[nodiscard]] Result hidePopup() override;
   [[nodiscard]] Result showFullscreenText(const char*, const char*, const char*) override;
-  [[nodiscard]] Result hideFullscreenText() override;
   [[nodiscard]] Result showConfirmBox(const char*, const char*, const char*) override;
   [[nodiscard]] Result showInfoPopup(const char*, const char*, const char*) override;
-  [[nodiscard]] Result hideInfoPopup() override;
 
  protected:
   // ---- panel hooks ---------------------------------------------------------
