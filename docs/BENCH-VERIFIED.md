@@ -13,6 +13,31 @@ did not work** · **⬜ never run**.
 
 ---
 
+## Session of 2026-08-06 — the two-button message box, on the wire for the first time
+
+Driven over HTTP against `192.168.100.97` running `ex17_mediascreen`. **The panel ACKed
+every one of these**, so read the caution at the bottom of this file before treating an ACK
+as proof of pixels — what is new here is the *transfer*, which is not an ACK question.
+
+| | | Evidence |
+|---|---|---|
+| **The two-button Yes/No box transmits at all** | ✅ | `TX 151 10 75 21 05 01 00 02 49` — declared `0x75` = 117, selected 1, **count 2** — then 16 continuations. Byte-for-byte the shape of the OEM's `CONFIRM SCREEN NO.csv` |
+| **Six-byte NUL-padded labels at payload 32** | ✅ | `24 .. 59 45` / `25 53 00 00 00 4E 4F 00` — `"YES\0\0\0"` at 32, `"NO\0\0\0\0"` at 38 |
+| **Body at 32 + 6×buttons** | ✅ | `26 00 00 00 44 45 4C 45` — `DELETE` starts at payload **44**, exactly as the formula predicts |
+| **OUR transmitter wraps the ISO-TP counter** | ✅ | the last two frames are PCI `2F` then **`20`**. 17 frames, 119 bytes. The corpus only ever witnessed the OEM doing this; now we do it and the panel accepts it |
+| The panel ACKed the 119-byte transfer | ✅ | `lastRendered()` advanced to `ConfirmBox`, which only happens on the terminal `74` |
+| **`setText` replaces any screen** — fullscreen, menu, box | ✅ | three round trips: `slot` 5 → 0, 2 → 0, 6 → 0, `owner` back to `main` each time. This is what makes `hideFullscreenText()` unnecessary rather than merely redundant |
+| **The family switch survives a reboot** | ✅ | stored `updatelist`, booted `updatelist`; stored `carminat`, booted `carminat`. It had been silently discarded on every boot because the env built one family |
+
+| | Why not |
+|---|---|
+| That the box's **buttons are drawn**, or that "YES"/"NO" appear as buttons | ⬜ nobody looked at the glass for this one. The bytes match the OEM's and the panel ACKed them; both were also true of twenty clock frames that did nothing (§ below) |
+| That `03 29 05 <n>` **moves** the selection | ⬜ the frame goes out and is ACKed; no one has watched a highlight move between two buttons |
+| A **three**-button box | ❌ refused by the builder on purpose — no capture shows one, so its declared length would be a guess |
+| `showFullscreenText`'s `[5] = 0x40` vs the OEM's `0x49`, and 96 vs 105 bytes | ⬜ still unresolved and deliberately unchanged — see the note in `CarminatDisplay::showFullscreenText` |
+
+---
+
 ## Session of 2026-08-04, evening — AFFA2 / UpdateList, FIRST EVER CONTACT
 
 **The UpdateList family had never put a frame on a bus.** Every byte it emits was pinned by

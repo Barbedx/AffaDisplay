@@ -68,6 +68,7 @@ affa::IDisplay*        g_panel    = nullptr;
 affa::AffaDisplayBase* g_base     = nullptr;
 
 void logmsg(const char* fmt, ...);
+affa::Result takeMainLine();          // defined below; the opening's last step needs it
 
 // ---------------------------------------------------------------------------
 // State
@@ -250,8 +251,11 @@ void openingPoll() {
     // `54 03` DOES have a builder — it is hidePopup(), the panel's only close command.
     case 2: logmsg("opening 3/3  54 03 -> %d", static_cast<int>(g_panel->hidePopup()));
             break;
+    // The opening ends with a close-window, so the glass is empty and the main line is ours
+    // again — but lastRendered() cannot say that (see takeMainLine). Assert it.
     default: g_open.done = true; g_forceFrame = true;
-             logmsg("opening complete"); return;
+             logmsg("opening complete -> main line %d", static_cast<int>(takeMainLine()));
+             return;
   }
   ++g_open.step;
   g_open.nextMs = ::millis() + 250;
@@ -340,6 +344,24 @@ inline bool rowsShouldTick() {
   for (const auto& r : g_row)
     if (r.on) return true;
   return false;
+}
+
+// TAKE THE LINE BACK, NOW, whatever lastRendered() currently says. Two callers: an explicit
+// SET TEXT, and the end of the opening.
+//
+// The opening needs it because its last step is `02 54 03` — the close-window command,
+// which the library spells hidePopup() — and that leaves lastRendered() reading Popup. The
+// glass is in fact EMPTY at that point, but nothing in the record says so: a hide and a show
+// are both "the last thing I did was a popup". Without this the scrolling line would sit
+// silent from boot, waiting for a screen to clear that had already cleared.
+affa::Result takeMainLine() {
+  char w[kMainWidth + 1];
+  g_main.window(w, kMainWidth);
+  (void)g_main.changed(w);          // adopt it: the loop must not repaint identical bytes
+  g_main.nextMs = ::millis() + g_main.periodMs;
+  g_holdUntil   = 0;
+  return g_carminat ? g_carminat->setTextStyled(w, g_icon, g_src, g_fmt, g_fmt2)
+                    : g_panel->setText(w);
 }
 
 inline bool mainLineIsOurs() {
@@ -477,15 +499,7 @@ Cmd dispatch(PsychicRequest* r) {
     g_fmt2 = static_cast<uint8_t>(N("fmt2", g_fmt2));
     saveSettings();
 
-    // Send it NOW, and adopt the window we sent so the loop does not immediately repaint
-    // the identical bytes. The next scroll tick carries on from here.
-    char w[kMainWidth + 1];
-    g_main.window(w, kMainWidth);
-    (void)g_main.changed(w);
-    g_main.nextMs = ::millis() + g_main.periodMs;
-    g_holdUntil   = 0;
-    return fromResult(g_carminat ? g_carminat->setTextStyled(w, g_icon, g_src, g_fmt, g_fmt2)
-                                 : g_panel->setText(w));
+    return fromResult(takeMainLine());
   }
 
   // ---- menus --------------------------------------------------------------
