@@ -1,6 +1,6 @@
 # Handoff — 2026-08-04/05, the day both families worked
 
-Library **0.5.0**. The previous handoff (2026-07-29) described a bench that could decode the
+Library **1.0.0** (this handoff was written at 0.5.0; see CHANGELOG.md for what 1.0.0 changed). The previous handoff (2026-07-29) described a bench that could decode the
 panel but never establish a link. That problem was solved earlier today; this one records
 what happened after.
 
