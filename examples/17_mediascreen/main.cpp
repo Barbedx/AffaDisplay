@@ -70,6 +70,10 @@ affa::AffaDisplayBase* g_base     = nullptr;
 void logmsg(const char* fmt, ...);
 affa::Result takeMainLine();          // defined below; the opening's last step needs it
 
+// Set by any command that needs a restart to take effect. The route restarts AFTER the
+// response has gone out, so the browser still gets its verdict.
+bool g_wantReboot = false;
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -106,6 +110,48 @@ affa::TxTicket g_navTicket = affa::kNoTicket;
 uint8_t g_menuBuf[affa::CarminatDisplay::menuScreenBytes(affa::carminat::kMenuMaxItems)];
 volatile bool  g_menuBusy = false;
 affa::TxTicket g_menuTicket = affa::kNoTicket;
+
+// ---- the OEM's own Navigation menu, byte for byte ---------------------------
+// Extracted from docs/captures/"some more logs from origin"/
+// "mENU NAVIGATION MAIN SCREEN AFTER BACK.csv" — one ISO-TP message, `10 C6` = FF_DL 198 =
+// 36 + 27*6, reassembled with ZERO sequence gaps. PCI included, so this is exactly what the
+// OEM head unit put on 0x151 while the glass showed the screen in the Carminat handbook:
+// "Menu Principal", a left gutter with a pictogram, one row in inverted video.
+//
+// WHY IT IS STILL HERE NOW THAT THE FIELD IS DECODED. It was the control that settled the
+// question on 2026-08-07: the panel drew the book from these exact bytes, and then
+// showMenuN() drew the same book from its own title and its own items. Keeping it means a
+// builder change that stops drawing an icon can be told apart from a panel that stopped
+// accepting one — press this, and if the book is still there the builder moved, not the
+// panel.
+//
+//   op=oem                 -> verbatim, [3][4] = 3D 14, the book
+//   op=oem&i0=0x80&i1=0x00 -> the same 200 bytes with the "no icon" pair
+constexpr uint16_t kOemNavBytes = 200;
+const uint8_t kOemNavMenu[kOemNavBytes] = {
+  0x10, 0xC6, 0x21, 0x01, 0x01, 0x3D, 0x14, 0x00, 0x86, 0xFF, 0x03, 0x4E,
+  0x61, 0x76, 0x69, 0x67, 0x61, 0x74, 0x69, 0x6F, 0x6E, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x01, 0x00, 0x44, 0x65, 0x73, 0x74, 0x69, 0x6E, 0x61, 0x74, 0x69,
+  0x6F, 0x6E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x44, 0x65, 0x73, 0x74, 0x2E, 0x20,
+  0x6D, 0x65, 0x6D, 0x6F, 0x72, 0x79, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x4C, 0x61, 0x73,
+  0x74, 0x20, 0x64, 0x65, 0x73, 0x74, 0x69, 0x6E, 0x61, 0x74, 0x69, 0x6F,
+  0x6E, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+  0x50, 0x2E, 0x4F, 0x2E, 0x49, 0x2E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x04, 0x52, 0x6F, 0x75, 0x74, 0x65, 0x20, 0x73, 0x65, 0x74,
+  0x74, 0x69, 0x6E, 0x67, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x42, 0x61, 0x63, 0x6B, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+// Wire indices, not payload indices: the payload starts at 2 because the PCI is in here.
+constexpr uint16_t kOemAtSel = 4;   // payload [2] — selection
+constexpr uint16_t kOemAtI0  = 5;   // payload [3] — gutter glyph index
+constexpr uint16_t kOemAtI1  = 6;   // payload [4] — scrollbar thumb
+static_assert(kOemNavBytes == 2 + 36 + 27 * 6, "36 + 27N, PCI included");
 
 // ---- text, with scrolling as an option rather than a fact --------------------
 // The main line shows 8 characters and an info-menu row shows 8 — both measured with a
@@ -370,6 +416,24 @@ inline bool mainLineIsOurs() {
          s == affa::RenderSlot::Clock;
 }
 
+// THE SAME QUESTION FOR THE INFO ROWS, and it is a separate function because the answer is
+// NOT `mainLineIsOurs()` and it is not its negation either.
+//
+// The row tick used to be gated on `!mainLineIsOurs()`, which is backwards in both
+// directions and shipped that way: with a MENU on the glass the rows woke up and repainted
+// over it every 700 ms — the "menu hides itself immediately" report — and once they had, the
+// slot read InfoPopup, still "not the main line", so the loop never stopped. With TEXT on
+// the glass they never ticked at all, so a row with scroll enabled sat still.
+//
+// The rows own the glass when nothing a user deliberately opened is on it. InfoPopup is in
+// the list because the rows' own render must not stop them scrolling; Menu, Highlight,
+// Popup, Fullscreen and ConfirmBox are out because those are screens somebody asked for.
+inline bool rowsAreOurs() {
+  const affa::RenderSlot s = g_base->lastRendered();
+  return s == affa::RenderSlot::None || s == affa::RenderSlot::Text ||
+         s == affa::RenderSlot::Clock || s == affa::RenderSlot::InfoPopup;
+}
+
 // ---------------------------------------------------------------------------
 // Settings that survive a flash
 // ---------------------------------------------------------------------------
@@ -432,7 +496,8 @@ Cmd fromResult(affa::Result r) {
   return (r == affa::Result::Ok) ? kOk : fail("panel refused it");
 }
 
-const char* sendMenuN(const String& title, const String& csv, uint8_t sel, uint8_t scroll) {
+const char* sendMenuN(const String& title, const String& csv, uint8_t sel, uint8_t scroll,
+                      uint8_t icon, uint8_t thumb) {
   if (!g_carminat) return "Carminat only";
   if (g_menuBusy)  return "busy: the menu buffer is still lent out";
   static char store[400];
@@ -447,7 +512,7 @@ const char* sendMenuN(const String& title, const String& csv, uint8_t sel, uint8
   }
   if (!n) return "no items";
   if (g_carminat->showMenuN(g_menuBuf, sizeof(g_menuBuf), title.c_str(), items, n, 0, sel,
-                            scroll) != affa::Result::Ok) return "refused";
+                            scroll, icon, thumb) != affa::Result::Ok) return "refused";
   g_menuTicket = g_base->lastEnqueued();
   g_menuBusy = true;
   return nullptr;
@@ -503,21 +568,53 @@ Cmd dispatch(PsychicRequest* r) {
   }
 
   // ---- menus --------------------------------------------------------------
-  if (op == "menu")   return fromResult(g_panel->showMenu(S("h","MENU").c_str(),
-                                                          S("a","ROW ONE").c_str(),
-                                                          S("b","ROW TWO").c_str(),
-                                                          static_cast<uint8_t>(N("scroll",0))));
+  // `s0`/`s1` are payload bytes [3] and [4] — the list screen's last undecoded field. The
+  // defaults are the pair the library has always sent, so leaving them alone changes no
+  // byte; the other two pairs are what the OEM's Settings and Navigation menus carry.
+  if (op == "menu") {
+    if (!g_carminat) return fromResult(g_panel->showMenu(S("h","MENU").c_str(),
+                                                         S("a","ROW ONE").c_str(),
+                                                         S("b","ROW TWO").c_str(),
+                                                         static_cast<uint8_t>(N("scroll",0))));
+    return fromResult(g_carminat->showMenuIcon(
+        S("h","MENU").c_str(), S("a","ROW ONE").c_str(), S("b","ROW TWO").c_str(),
+        static_cast<uint8_t>(N("scroll",0)),
+        static_cast<uint8_t>(N("i0", affa::carminat::kMenuIconOemBlank)),
+        static_cast<uint8_t>(N("i1", affa::carminat::kMenuThumbNone))));
+  }
   if (op == "hilite") return fromResult(g_panel->highlightItem(static_cast<uint8_t>(N("n",0))));
   if (op == "menun") {
     const char* e = sendMenuN(S("h","NAVIGATION"),
                               S("i","DESTINATION|ROUTE|MAP|TRAFFIC|SETTINGS|BACK"),
                               static_cast<uint8_t>(N("n",0)),
-                              static_cast<uint8_t>(N("scroll", affa::carminat::kScrollBoth)));
+                              static_cast<uint8_t>(N("scroll", affa::carminat::kScrollBoth)),
+                              static_cast<uint8_t>(N("i0", affa::carminat::kMenuIconOemBlank)),
+                              static_cast<uint8_t>(N("i1", affa::carminat::kMenuThumbNone)));
     return e ? fail(e) : kOk;
   }
   if (op == "select") {
     if (!g_carminat) return fail("Carminat only");
     return fromResult(g_carminat->selectMenuItem(static_cast<uint8_t>(N("n",0))));
+  }
+
+  // The OEM's Navigation menu replayed verbatim — the bytes that drew a pictogram on a real
+  // car. `s0`/`s1`/`sel` patch three bytes of the copy; everything else stays as captured.
+  // Borrowed like every other long payload here: the buffer must outlive the ticket, so it
+  // shares g_menuBuf's busy flag rather than inventing a second one.
+  if (op == "oem") {
+    if (!g_carminat) return fail("Carminat only");
+    if (g_menuBusy)  return fail("busy: the menu buffer is still lent out");
+    static_assert(sizeof(g_menuBuf) >= kOemNavBytes, "g_menuBuf holds the OEM screen");
+    memcpy(g_menuBuf, kOemNavMenu, kOemNavBytes);
+    g_menuBuf[kOemAtSel] = static_cast<uint8_t>(N("sel", kOemNavMenu[kOemAtSel]));
+    g_menuBuf[kOemAtI0]  = static_cast<uint8_t>(N("i0",  kOemNavMenu[kOemAtI0]));
+    g_menuBuf[kOemAtI1]  = static_cast<uint8_t>(N("i1",  kOemNavMenu[kOemAtI1]));
+    affa::TxOptions opt;
+    if (g_base->enqueueExternal(affa::carminat::kIdSetText, g_menuBuf, kOemNavBytes, opt)
+        == affa::kNoTicket) return fail("refused");
+    g_menuTicket = g_base->lastEnqueued();
+    g_menuBusy = true;
+    return kOk;
   }
 
   // ---- info menu ----------------------------------------------------------
@@ -629,10 +726,43 @@ Cmd dispatch(PsychicRequest* r) {
     p.putUChar("family", S("f","carminat") == "updatelist" ? 1 : 0);
     p.end();
     logmsg("family stored, rebooting");
+    g_wantReboot = true;
     return Cmd{true, "stored - rebooting into that family"};
   }
-  if (op == "reboot") return Cmd{true, "rebooting"};
+  // WRITE the STA credentials. startWifi() reads NVS `megaopen`/`ssid`/`pass` and this
+  // console had no way to WRITE them, so moving the board between networks meant a reflash
+  // — the one iteration loop this example exists to protect.
+  //
+  // A WRONG PASSWORD IS NOT A BRICK: startWifi() waits kStaJoinMs and then brings up the
+  // SoftAP, so a failed join lands back on AffaMedia / 192.168.4.1 with OTA intact. That is
+  // the whole reason this is safe to expose.
+  //
+  // With no `ssid` param it REPORTS instead of writing, and reports the SSID only — a stored
+  // password has no business coming back out over an open AP.
+  if (op == "wifi") {
+    Preferences p;
+    if (!r->hasParam("ssid")) {
+      if (!p.begin(kWifiNamespace, true)) return fail("nvs");
+      const String s = p.getString("ssid", "");
+      p.end();
+      static char msg[80];
+      snprintf(msg, sizeof(msg), "stored ssid: %s", s.length() ? s.c_str() : "(none)");
+      return Cmd{true, msg};
+    }
+    if (!p.begin(kWifiNamespace, false)) return fail("nvs");
+    p.putString("ssid", S("ssid", ""));
+    p.putString("pass", S("pass", ""));
+    p.end();
+    g_wantReboot = B("reboot", true);
+    return Cmd{true, g_wantReboot ? "stored - rebooting to join it"
+                                  : "stored - takes effect on the next boot"};
+  }
+  if (op == "reboot") { g_wantReboot = true; return Cmd{true, "rebooting"}; }
   if (op == "panic") {
+    // The per-row scroll flags too, and they are the ones that mattered: `rowsShouldTick()`
+    // is true if ANY row has one, they persist in NVS, and panic used to clear only the
+    // `live` switch — so the thing you pressed to stop everything left the rows repainting.
+    for (auto& r : g_row) r.on = false;
     g_main.on = false; g_rowsLive = false; g_paneOn = false;
     snprintf(g_main.text, sizeof(g_main.text), "AFFA");
     g_main.reset();
@@ -668,7 +798,9 @@ void routes() {
     res.setContentType("application/json");
     res.setContent(j.c_str());
     const esp_err_t e = res.send();
-    if (op == "reboot" || op == "family") { delay(250); ESP.restart(); }
+    // A FLAG, NOT AN OP-NAME LIST. Whether a command needs a restart is the command's own
+    // business — `wifi` can be asked not to — and the list had already been forgotten once.
+    if (g_wantReboot) { g_wantReboot = false; delay(250); ESP.restart(); }
     return e;
   });
 
@@ -728,6 +860,11 @@ void routes() {
     j += ",\"fmt\":";      j += g_fmt;
     j += ",\"fmt2\":";     j += g_fmt2;
     j += ",\"rowslive\":"; j += g_rowsLive ? "true" : "false";
+    // WHAT IS ACTUALLY REPAINTING, not what was asked for. `rowslive` read false for the
+    // whole session in which the rows were overwriting every menu at 700 ms, because a
+    // per-row scroll flag drives the tick too. A status field that cannot answer "is this
+    // thing running right now" is how a live repaint loop stays invisible.
+    j += ",\"rowstick\":"; j += rowsShouldTick() ? "true" : "false";
     j += ",\"rows\":[";
     for (int i = 0; i < 3; ++i) {
       if (i) j += ",";
@@ -927,7 +1064,7 @@ void loop() {
 
   // The info rows, if asked to keep scrolling. Three rows repainting on a timer is a lot of
   // traffic next to one main line, so it is opt-in.
-  if (rowsShouldTick() && !mainLineIsOurs() &&
+  if (rowsShouldTick() && rowsAreOurs() &&
       static_cast<int32_t>(now - g_row[0].nextMs) >= 0) {
     g_row[0].nextMs = now + g_row[0].periodMs;
     char w0[kRowWidth+1], w1[kRowWidth+1], w2[kRowWidth+1];

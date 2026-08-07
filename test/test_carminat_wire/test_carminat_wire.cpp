@@ -666,6 +666,102 @@ void test_menuN_item_tags_land_on_a_stride_of_27(void) {
   pumpUntilIdle(r.d);
 }
 
+// The gutter glyph at payload [3] and the scrollbar thumb at [4]. Three things have to hold:
+// the defaults draw neither — so every showMenu vector above still passes byte for byte —
+// asking for a glyph moves [3] AND NOTHING ELSE, and asking for a thumb moves [4] AND
+// NOTHING ELSE. The last two matter because these two bytes were mistaken for ONE field
+// while the only evidence was three captures in which both moved together.
+void test_menuN_glyph_and_thumb_default_to_neither(void) {
+  Rig r;
+  r.up();
+  static uint8_t scratch[CarminatDisplay::menuScreenBytes(10)];
+  const char* items[2] = {"A", "B"};
+  TEST_ASSERT_EQUAL(Result::Ok, r.d.showMenuN(scratch, sizeof(scratch), "T", items, 2));
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(carminat::kMenuIconOemBlank, scratch[2 + 3], "[3] blank");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(carminat::kMenuThumbNone, scratch[2 + 4], "[4] no scrollbar");
+  pumpUntilIdle(r.d);
+}
+
+// Parameterised over the two fields so neither can quietly write the other's byte.
+void menuN_field_moves_only_its_own_byte(uint8_t icon, uint8_t thumb, uint16_t movedAt) {
+  Rig r;
+  r.up();
+  static uint8_t base[CarminatDisplay::menuScreenBytes(10)];
+  static uint8_t got[CarminatDisplay::menuScreenBytes(10)];
+  const char* items[6] = {"DESTINATION", "ROUTE", "MAP", "TRAFFIC", "SETTINGS", "BACK"};
+  const uint16_t len = CarminatDisplay::menuScreenBytes(6);
+
+  TEST_ASSERT_EQUAL(Result::Ok,
+                    r.d.showMenuN(base, sizeof(base), "NAVIGATION", items, 6, 0, 0,
+                                  carminat::kScrollBoth));
+  pumpUntilIdle(r.d);
+  TEST_ASSERT_EQUAL(Result::Ok,
+                    r.d.showMenuN(got, sizeof(got), "NAVIGATION", items, 6, 0, 0,
+                                  carminat::kScrollBoth, icon, thumb));
+  pumpUntilIdle(r.d);
+
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(icon,  got[2 + 3], "[3] glyph");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(thumb, got[2 + 4], "[4] thumb");
+  for (uint16_t i = 0; i < len; ++i) {
+    if (i == movedAt) continue;
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(base[i], got[i], "no other byte moved");
+  }
+}
+
+void test_menuN_glyph_moves_only_payload_3(void) {
+  menuN_field_moves_only_its_own_byte(carminat::kMenuIconBookOpen, carminat::kMenuThumbNone,
+                                      2 + 3);
+}
+
+void test_menuN_thumb_moves_only_payload_4(void) {
+  menuN_field_moves_only_its_own_byte(carminat::kMenuIconOemBlank, carminat::kMenuThumbMax,
+                                      2 + 4);
+}
+
+void test_showMenuIcon_moves_only_its_own_two_bytes(void) {
+  Rig r;
+  r.up();
+  drain(r.link);
+  TEST_ASSERT_EQUAL(Result::Ok, r.d.showMenu("Main Menu", "Voltage:0V", "Boost:0mbar", 0x0B));
+  pumpUntilIdle(r.d);
+  Frame plain;
+  TEST_ASSERT_TRUE(r.link.takeSent(plain));
+
+  drain(r.link);
+  TEST_ASSERT_EQUAL(Result::Ok,
+                    r.d.showMenuIcon("Main Menu", "Voltage:0V", "Boost:0mbar", 0x0B,
+                                     carminat::kMenuIconGps, carminat::kMenuThumbMin));
+  pumpUntilIdle(r.d);
+  Frame styled;
+  TEST_ASSERT_TRUE(r.link.takeSent(styled));
+
+  // Payload [3]/[4] = first-frame data[5]/data[6] (0x10 0x5A then 21 01 7E).
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(carminat::kMenuIconOemBlank, plain.data[5], "[3] blank");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(carminat::kMenuThumbNone, plain.data[6], "[4] no scrollbar");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(carminat::kMenuIconGps,   styled.data[5], "[3] = 0x30 GPS");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(carminat::kMenuThumbMin,  styled.data[6], "[4] = 0x10 top");
+  for (uint8_t i = 0; i < 8; ++i) {
+    if (i == 5 || i == 6) continue;
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(plain.data[i], styled.data[i], "no other byte moved");
+  }
+}
+
+// The suppress bit is a property of [3] alone: index | 0x80 keeps the index and blanks it.
+void test_menu_glyph_suppress_bit_only_sets_bit_7(void) {
+  Rig r;
+  r.up();
+  drain(r.link);
+  TEST_ASSERT_EQUAL(Result::Ok,
+                    r.d.showMenuIcon("M", "a", "b", 0x00,
+                                     carminat::kMenuIconGps | carminat::kMenuIconSuppress));
+  pumpUntilIdle(r.d);
+  Frame f;
+  TEST_ASSERT_TRUE(r.link.takeSent(f));
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0xB0, f.data[5], "0x30 | 0x80");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(carminat::kMenuIconGps,
+                                 static_cast<uint8_t>(f.data[5] & 0x7F), "index survives");
+}
+
 void test_menuN_refuses_a_scratch_that_is_too_small(void) {
   Rig r;
   r.up();
@@ -736,6 +832,11 @@ int main(int, char**) {
   RUN_TEST(test_registration_does_not_count_as_a_screen);
   RUN_TEST(test_menuN_length_and_count_byte_match_the_corpus);
   RUN_TEST(test_menuN_item_tags_land_on_a_stride_of_27);
+  RUN_TEST(test_menuN_glyph_and_thumb_default_to_neither);
+  RUN_TEST(test_menuN_glyph_moves_only_payload_3);
+  RUN_TEST(test_menuN_thumb_moves_only_payload_4);
+  RUN_TEST(test_showMenuIcon_moves_only_its_own_two_bytes);
+  RUN_TEST(test_menu_glyph_suppress_bit_only_sets_bit_7);
   RUN_TEST(test_menuN_refuses_a_scratch_that_is_too_small);
   RUN_TEST(test_setText_is_capture_verbatim);
   RUN_TEST(test_setText_declares_0x0E_for_20_transmitted_bytes);

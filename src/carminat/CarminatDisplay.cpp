@@ -262,8 +262,20 @@ Result CarminatDisplay::highlightItem(uint8_t row) {
 // holds the declared count (6 + 12*7 = 90), so hardware DONEs after PCI 0x2C at 13 frames
 // while the self-ACK emulator runs to 14. row1 therefore has 26 usable characters even
 // though the builder accepts 30. Change neither number without panel testing.
+//
+// [3] AND [4] ARE PARAMETERS NOW — the gutter glyph and the scrollbar thumb, two unrelated
+// fields. They were two literals here, `0x80, 0x00`, which is "glyph 0, suppressed" and "no
+// scrollbar": blank twice over, and the reason this panel was thought to have neither. The
+// override keeps sending exactly those bytes so no existing caller moves; showMenuIcon() is
+// the spelling that can ask for a glyph.
 Result CarminatDisplay::showMenu(const char* header, const char* row0, const char* row1,
                                  uint8_t scrollIndicator) {
+  return showMenuIcon(header, row0, row1, scrollIndicator, kMenuIconOemBlank, kMenuThumbNone);
+}
+
+Result CarminatDisplay::showMenuIcon(const char* header, const char* row0, const char* row1,
+                                     uint8_t scrollIndicator,
+                                     uint8_t icon, uint8_t thumb) {
   const Ascii h(header);
   const Ascii r0(row0);
   const Ascii r1(row1);
@@ -277,8 +289,8 @@ Result CarminatDisplay::showMenu(const char* header, const char* row0, const cha
   p[idx++] = kCmdScreen;        // 0x21
   p[idx++] = kScreenWindowed;   // 0x01 windowed (0x05 = fullscreen)
   p[idx++] = kRowTagTop;        // 0x7E
-  p[idx++] = 0x80;
-  p[idx++] = 0x00;
+  p[idx++] = icon;              // payload [3] — gutter glyph index
+  p[idx++] = thumb;             // payload [4] — scrollbar thumb position
   p[idx++] = 0x00;
 
   p[idx++] = 0x82;
@@ -434,7 +446,7 @@ Result CarminatDisplay::selectMenuItem(uint8_t index) {
 Result CarminatDisplay::showMenuN(uint8_t* scratch, uint16_t cap, const char* title,
                                   const char* const* items, uint8_t count,
                                   uint8_t firstVisible, uint8_t selected,
-                                  uint8_t scrollMask) {
+                                  uint8_t scrollMask, uint8_t icon, uint8_t thumb) {
   if (!scratch || !items || count == 0)  return Result::BadArgument;
   if (count > kMenuMaxItems)             return Result::BadArgument;
   const uint16_t need = menuScreenBytes(count);
@@ -449,8 +461,8 @@ Result CarminatDisplay::showMenuN(uint8_t* scratch, uint16_t cap, const char* ti
   p[0] = kCmdScreen;                     // 0x21
   p[1] = kScreenWindowed;                // 0x01
   p[2] = selected;                       // row tag of the selection
-  p[3] = 0x80;
-  p[4] = 0x00;
+  p[3] = icon;                           // gutter glyph index — carminat::kMenuIcon*
+  p[4] = thumb;                          // scrollbar thumb — kMenuThumbNone/Min/Max
   p[5] = 0x00;
   p[6] = static_cast<uint8_t>(0x80 | count);
   p[7] = 0xFF;

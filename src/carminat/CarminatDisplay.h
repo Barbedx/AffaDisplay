@@ -119,6 +119,29 @@ class CarminatDisplay final : public AffaDisplayBase {
 
   [[nodiscard]] Result showMenu(const char* header, const char* row0, const char* row1,
                                 uint8_t scrollIndicator = carminat::kScrollDown) override;
+
+  // THE TWO-ROW MENU WITH A GUTTER GLYPH AND A SCROLLBAR. TWO SEPARATE FIELDS:
+  //
+  //   icon   payload [3] — an INDEX into a glyph table the panel owns. 0x00..0x10 blank,
+  //          0x11 book-with-magnifier, 0x19 open book, 0x26 bluetooth, 0x30 GPS, 0x34
+  //          aircraft, and populated uncatalogued runs between. Bit 7 set draws nothing.
+  //   thumb  payload [4] — the SCROLLBAR THUMB POSITION. 0x00 no scrollbar, 0x10 top of
+  //          travel, 0x58 bottom. Independent of `scrollIndicator` ([8], the arrows) and of
+  //          showMenuN's `firstVisible` ([35]) — the panel derives none of the three from
+  //          the others, so a scrolling application moves this itself.
+  //
+  // Both swept on the bench 2026-08-07; carminat::kMenuIcon* / kMenuThumb* is that table.
+  //
+  // The plain showMenu() override delegates here with kMenuIconOemBlank / kMenuThumbNone —
+  // the bytes it always sent, so nothing on the wire moved. Note what that default IS:
+  // `0x80 0x00` is glyph 0 with the suppress bit set and no scrollbar, doubly blank and
+  // unreachable from any caller, which is the entire reason this panel looked for months as
+  // though it had no icon-bearing list. The same trap setTextStyled() was built to open.
+  [[nodiscard]] Result showMenuIcon(const char* header, const char* row0, const char* row1,
+                                    uint8_t scrollIndicator = carminat::kScrollDown,
+                                    uint8_t icon = carminat::kMenuIconOemBlank,
+                                    uint8_t thumb = carminat::kMenuThumbNone);
+
   [[nodiscard]] Result highlightItem(uint8_t row) override;
 
   [[nodiscard]] Result showPopupText(const char* text, uint8_t icon = carminat::kPopupIcon,
@@ -189,10 +212,17 @@ class CarminatDisplay final : public AffaDisplayBase {
   //
   // `firstVisible` scrolls a short window over a long list; `selected` is the row tag of the
   // highlighted item; `scrollMask` is 0x00 none / 0x07 up / 0x0B down / 0x03.
+  //
+  // `icon` is the gutter glyph and `thumb` the scrollbar position — payload [3] and [4],
+  // two unrelated fields; see showMenuIcon() above and the swept table in
+  // CarminatConstants.h. THE THUMB MATTERS MOST HERE: this is the builder that scrolls a
+  // long list, and `firstVisible` moves the viewport without moving the scrollbar.
   [[nodiscard]] Result showMenuN(uint8_t* scratch, uint16_t cap, const char* title,
                                  const char* const* items, uint8_t count,
                                  uint8_t firstVisible = 0, uint8_t selected = 0,
-                                 uint8_t scrollMask = 0);
+                                 uint8_t scrollMask = 0,
+                                 uint8_t icon = carminat::kMenuIconOemBlank,
+                                 uint8_t thumb = carminat::kMenuThumbNone);
 
   // Move the selection inside a list already on screen — eight bytes instead of the whole
   // screen. highlightItem() is the two-row form and refuses anything past row 1; this takes

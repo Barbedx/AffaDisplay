@@ -6,6 +6,90 @@ described the panel wrongly, and a silent behaviour change would have been worse
 
 ---
 
+## Unreleased
+
+### The list screen has a pictogram and a scrollbar, and the library was hiding both
+
+**Swept on the bench panel 2026-08-07.** Payload `[3]` and `[4]` of the `21 01` list screen
+were hard-coded to `0x80 0x00` and unreachable from any caller, so neither capability
+existed as far as this library was concerned.
+
+**`[3]` is a glyph index** into a table the panel owns:
+
+| value | on the glass |
+|-------|--------------|
+| `0x00`–`0x10` | blank |
+| `0x11` | book with a magnifier |
+| `0x19` | open book |
+| `0x26` | bluetooth |
+| `0x30` | GPS |
+| `0x34` | aircraft |
+| `0x3D` / `0x47` | the OEM Navigation and Settings glyphs |
+
+with populated **uncatalogued runs between**. Bit 7 set draws nothing and the index survives
+underneath, so `0x80` was never a "none" value — it is glyph `0`, blank twice over.
+
+**`[4]` is the scrollbar thumb position** — `0x00` none, `0x10` top, `0x58` bottom. A
+position, not a proportion, and independent of `[8]` (arrow mask) and `[35]` (first visible
+item): three separate scrolling controls, none derived from the others.
+
+**They were first read as one field.** That came from three OEM captures in which both bytes
+co-varied; walking them independently took it apart in one bench session. Worth keeping as a
+lesson — *three co-varying samples are not a field.*
+
+### Added
+
+* **`CarminatDisplay::showMenuIcon(header, row0, row1, scroll, icon, thumb)`** and
+  **`showMenuN(..., icon, thumb)`**. Defaults are the bytes the builders always sent, so **no
+  existing call changes a byte** — every capture-verbatim vector in `test_carminat_wire`
+  passes unmodified. Five new tests, including one per field asserting it moves *its own byte
+  and nothing else*, which is the check that would have caught the one-field misreading.
+* **`carminat::kMenuIcon{None,First,BookGlass,BookOpen,Bluetooth,Gps,Plane,OemNav,OemSet}`**,
+  **`kMenuIconSuppress`**, **`kMenuThumb{None,Min,Max}`**, and **`kMenuIconOemBlank`** — the
+  builders' default, `0x80`, kept over the tidier-looking `0x00` because it is the captured
+  byte and both are blank.
+* **17_mediascreen: separate *Gutter glyph* and *Scrollbar thumb* cards** on the Menus tab —
+  a dropdown of the named glyphs, ±1 stepping for the uncatalogued runs, a hide checkbox for
+  bit 7, a slider with off/top/bottom shortcuts for the thumb, a live wire preview, and three
+  explicit send buttons. **Nothing sends by itself:** an earlier version swept on
+  `setInterval`, so the glass changed while you were still reading it.
+* **17_mediascreen: `op=oem`**, the OEM Navigation menu replayed verbatim — 200 wire bytes
+  from `mENU NAVIGATION MAIN SCREEN AFTER BACK.csv`. It was the control that separated "our
+  builder is wrong" from "the panel needs more than one message", and it stays as the control
+  for the next such question.
+* **17_mediascreen: `op=wifi`** — writes the STA credentials to NVS `megaopen`/`ssid`/`pass`,
+  the keys `startWifi()` already read. Moving the board between networks used to mean a
+  reflash. A wrong password is not a brick: the join is given 15 s and then the SoftAP comes
+  up with OTA on it. Reports the SSID only, never the stored password.
+* **17_mediascreen: a `list + pane` button** — turns the `0x1F1` layer on, then draws the
+  list on top of it.
+
+### Fixed
+
+* **17_mediascreen: the info rows repainted over every menu, and the gate was inverted.**
+  The row tick was `rowsShouldTick() && !mainLineIsOurs()` — the rows woke up precisely when
+  something *else* was on the glass. Draw a menu, and 700 ms later three `76 60 …` messages
+  painted over it; the slot then read `InfoPopup`, still "not the main line", so it never
+  stopped. The same sign error meant a row with scroll enabled never moved while the main
+  line was up. Now gated on `rowsAreOurs()` — `None`/`Text`/`Clock`/`InfoPopup`, so a screen
+  somebody opened is never repainted over. Measured: a two-row menu now sits for 8 s with
+  **zero** further traffic on `0x151`.
+* **17_mediascreen: `panic` left the rows repainting.** It cleared `rowslive` but not the
+  per-row scroll flags, and *any* of those drives the tick. It clears them too now.
+* **17_mediascreen: `/api/state` could not answer "is anything repainting right now".**
+  `rowslive` read `false` through the entire session in which the rows were overwriting
+  every menu, because a per-row flag drove the tick. New `rowstick` reports the tick itself,
+  the console shows it, and a **stop repainting** button clears all four switches at once.
+* **17_mediascreen: which commands reboot is a flag now, not a list of op names.** The list
+  had already been forgotten once, and `op=wifi` can be asked *not* to reboot.
+
+### Still open
+
+The uncatalogued glyph runs between the named entries. `docs/OEM-CSV-CORPUS.md` §4 and
+`docs/BENCH-VERIFIED.md`.
+
+---
+
 ## 1.0.0 — 2026-08-06
 
 **Both panel families work on real glass, the protocol questions that blocked 1.0 are

@@ -300,6 +300,72 @@ inline constexpr uint8_t kSelectModeList = 0x01;
 inline constexpr uint8_t kRowTagTop    = 0x7E;
 inline constexpr uint8_t kRowTagBottom = 0x7F;
 
+// ---------------------------------------------------------------------------
+// List screen [3] — THE GUTTER GLYPH.  [4] — THE SCROLLBAR THUMB.
+// ---------------------------------------------------------------------------
+// SWEPT ON THE BENCH PANEL 2026-08-07, and the two bytes turned out to be two unrelated
+// fields rather than one pair. The first reading here called them "the icon pair" because
+// the only three values anyone had were three OEM captures in which both bytes moved
+// together; walking them independently took that apart in one session.
+//
+// [3] IS A GLYPH INDEX into a table the PANEL owns. Plain 8-bit, one entry per value:
+//
+//   0x00 .. 0x10   blank — no glyph drawn
+//   0x11           book with a magnifier          <- the first entry that draws
+//   0x19           open book
+//   0x26           bluetooth
+//   0x30           GPS
+//   0x34           an aircraft
+//   0x3D           unnamed — what the OEM's Navigation menu sends       [OEM]
+//   0x47           unnamed — what the OEM's Settings menu sends         [OEM]
+//
+// The named entries are the ones read off the glass; the runs between them are populated
+// and UNCATALOGUED. Bit 7 set draws nothing — 0x3D draws, 0xBD does not — so treat the
+// table as 7-bit and kMenuIconSuppress as the bit that blanks it. Whether that is a
+// suppress FLAG or simply the table ending at 0x7F is a distinction without a difference
+// on the wire.
+//
+// AND SO `0x80 0x00`, THE PAIR THE LIBRARY HARD-CODED, WAS NEVER A "NONE" VALUE. It is
+// glyph 0x00 with bit 7 set and no scrollbar — doubly blank, which is exactly why this
+// panel looked for months like it had no icon-bearing list at all.
+//
+// [4] IS THE SCROLLBAR THUMB POSITION, not part of the icon:
+//
+//   0x00           no scrollbar drawn
+//   0x10           thumb at the top of its travel
+//   0x58           thumb at the bottom
+//
+// It is a POSITION, not a proportion, and it is independent of [8] (the arrow mask) and of
+// [35] (first visible item) — three separate ways this screen talks about scrolling, and
+// nothing makes the panel derive one from the others. An application that scrolls a long
+// list has to move this itself.
+//
+// The glyph is a FIELD, not a property of the captured bytes: showMenuN() draws the same
+// glyph with its own title and its own items. There is no per-item icon byte and nowhere to
+// put one — the item cell is 27 bytes, 1 tag + 26 text — so the whole list gets one glyph.
+inline constexpr uint8_t kMenuIconNone      = 0x00;  // 0x00..0x10 all blank   [BENCH]
+inline constexpr uint8_t kMenuIconFirst     = 0x11;  // first drawing entry    [BENCH]
+inline constexpr uint8_t kMenuIconBookGlass = 0x11;  // book with a magnifier  [BENCH]
+inline constexpr uint8_t kMenuIconBookOpen  = 0x19;  // open book              [BENCH]
+inline constexpr uint8_t kMenuIconBluetooth = 0x26;  // bluetooth              [BENCH]
+inline constexpr uint8_t kMenuIconGps       = 0x30;  // GPS                    [BENCH]
+inline constexpr uint8_t kMenuIconPlane     = 0x34;  // an aircraft            [BENCH]
+inline constexpr uint8_t kMenuIconOemNav    = 0x3D;  // the OEM Navigation menu's   [OEM]
+inline constexpr uint8_t kMenuIconOemSet    = 0x47;  // the OEM Settings menu's     [OEM]
+// OR this into [3] and nothing is drawn, whatever the index says.        [BENCH]
+inline constexpr uint8_t kMenuIconSuppress  = 0x80;
+// THE BUILDERS' DEFAULT, AND IT IS 0x80 RATHER THAN 0x00 ON PURPOSE. Both are blank on the
+// glass, but 0x80 is the byte the OEM's own two-row list sends and the byte this library has
+// always sent, so every capture-verbatim vector in test_carminat_wire keeps passing. Picking
+// the tidier-looking 0x00 would have moved the wire for no visible gain — the exact trade
+// this project has lost before.                                          [OEM]
+inline constexpr uint8_t kMenuIconOemBlank  = kMenuIconNone | kMenuIconSuppress;
+
+// [4], the scrollbar thumb.
+inline constexpr uint8_t kMenuThumbNone = 0x00;  // no scrollbar            [BENCH]
+inline constexpr uint8_t kMenuThumbMin  = 0x10;  // top of travel           [BENCH]
+inline constexpr uint8_t kMenuThumbMax  = 0x58;  // bottom of travel        [BENCH]
+
 // setPower states. Carminat enables with 0x09, UpdateList with 0x02 — do not unify. [CAP]
 inline constexpr uint8_t kDisplayCtrlOff = 0x00;
 inline constexpr uint8_t kDisplayCtrlOn  = 0x09;

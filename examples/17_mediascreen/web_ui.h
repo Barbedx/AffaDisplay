@@ -238,6 +238,76 @@ th{color:var(--dim);font-weight:normal}
 
 <main id="p-menus" class="hide">
   <section>
+    <h2>Gutter glyph &mdash; payload [3]</h2>
+    <div class="r">
+      <small>known</small>
+      <select id="mst" onchange="styPreset()">
+        <option value="0" selected>none (00&ndash;10 all blank)</option>
+        <option value="17">11 &mdash; book with magnifier</option>
+        <option value="25">19 &mdash; open book</option>
+        <option value="38">26 &mdash; bluetooth</option>
+        <option value="48">30 &mdash; GPS</option>
+        <option value="52">34 &mdash; aircraft</option>
+        <option value="61">3D &mdash; OEM Navigation menu</option>
+        <option value="71">47 &mdash; OEM Settings menu</option>
+        <option value="">custom</option>
+      </select>
+      <input id="ms0" size="4" value="0x80" oninput="stySync()">
+      <button onclick="styStep(0,-1)">&minus;</button><button onclick="styStep(0,1)">+</button>
+      <label><input type="checkbox" id="mshide" onchange="styHide()"> hide it (bit 7)</label>
+    </div>
+
+    <h2 style="margin-top:15px">Scrollbar thumb &mdash; payload [4]</h2>
+    <div class="r">
+      <input id="msr" type="range" min="0" max="88" value="0" style="flex:1;min-width:160px"
+             oninput="el('ms1').value = hx(+this.value); stySync()">
+      <input id="ms1" size="4" value="0x00" oninput="el('msr').value = styGet(1); stySync()">
+      <button onclick="styStep(1,-1)">&minus;</button><button onclick="styStep(1,1)">+</button>
+      <button onclick="stySet(1,0x00)">off</button>
+      <button onclick="stySet(1,0x10)">top</button>
+      <button onclick="stySet(1,0x58)">bottom</button>
+    </div>
+
+    <div class="r">
+      <b>send:</b>
+      <button class="p" onclick="sendMenu()">2-row menu</button>
+      <button class="p" onclick="sendMenuN()">N-item list</button>
+      <button class="p" onclick="sendOem()">OEM replay</button>
+      <span id="mspv" class="k"></span>
+    </div>
+    <p><small>
+      <b>Nothing here sends by itself.</b> Set the two fields, then press a send button &mdash;
+      all three take whatever is in them. <span class="k">&minus;</span>/<span class="k">+</span>
+      only move a field, so walking the glyph table is step, send, look.
+      <br><br><b>These are two unrelated fields, and they were mistaken for one.</b> The first
+      reading called <span class="k">[3] [4]</span> "the icon pair" because the only evidence
+      was three OEM captures in which both bytes happened to move together. Walking them
+      independently took that apart: <span class="k">[3]</span> is a <b>glyph index</b>,
+      <span class="k">[4]</span> is the <b>scrollbar thumb position</b>.
+      <br><br><b>The glyph table, read off the glass:</b> <span class="k">00</span>&ndash;<span
+      class="k">10</span> blank, <span class="k">11</span> book with a magnifier,
+      <span class="k">19</span> open book, <span class="k">26</span> bluetooth,
+      <span class="k">30</span> GPS, <span class="k">34</span> aircraft &mdash; and populated,
+      <b>uncatalogued runs between them</b>. The dropdown holds only what has been seen; the
+      <span class="k">+</span> button is how the rest gets named.
+      <br><br><b>hide it</b> is the top bit of <span class="k">[3]</span>:
+      <span class="k">0x30</span> &rarr; <span class="k">0xB0</span>. It keeps the index and
+      stops the drawing. So <span class="k">0x80</span> &mdash; the byte the library sent for
+      months &mdash; was never a "no icon" value; it is glyph <span class="k">0</span> with
+      that bit set, blank twice over.
+      <br><br><b>The thumb is a position, not a proportion</b>, and it is independent of the
+      scroll-arrow mask <span class="k">[8]</span> and of <span class="k">firstVisible</span>
+      <span class="k">[35]</span>. Three separate ways this screen talks about scrolling, and
+      the panel derives none of them from the others &mdash; an application that scrolls a long
+      list moves this itself.
+      <br><br>The glyph is a <b>field</b>, not a property of the captured bytes: showMenuN
+      draws it with its own title and its own items. There is no per-item icon byte and
+      nowhere to put one &mdash; the item cell is 27 bytes, 1 tag + 26 text &mdash; so the
+      whole list gets one glyph.
+    </small></p>
+  </section>
+
+  <section>
     <h2>Two-row menu</h2>
     <div class="r">
       <input id="mh" size="9" value="MENU"><input id="ma" size="9" value="ROW ONE"><input id="mb" size="9" value="ROW TWO">
@@ -278,10 +348,37 @@ th{color:var(--dim);font-weight:normal}
       <select id="nsk"><option value="0">none 00</option><option value="7">up 07</option><option value="11">down 0B</option><option value="3" selected>both 03</option></select>
       <small>&larr; this is the screen where it shows</small>
     </div>
+    <div class="r">
+      <button onclick="listPlusPane()">list + pane</button>
+      <small>&larr; turn the 48&times;48 pane on, then draw this list on top of it</small>
+    </div>
     <p><small>
       The panel <b>tracks six items and draws two</b> &mdash; the glass is a two-row viewport.
       Send the list once, then move the selection with <b>selectMenuItem</b> (eight bytes
       instead of two hundred) and the panel scrolls itself.
+      <br><br><b>list + pane is the composition route to "a menu with a picture", and it
+      needs no new protocol.</b> The <span class="k">0x1F1</span> pane is an independent
+      layer: confirmed 2026-08-05 that the info menu draws with it and that the image can be
+      replaced under an open popup. <b>Whether it also survives a <span class="k">21 01</span>
+      list has never been tried</b> &mdash; two ids, two layers, and one press to find out.
+      Pick the picture on the Bitmap tab first.
+    </small></p>
+
+    <h2 style="margin-top:15px">OEM replay &mdash; the capture, byte for byte</h2>
+    <div class="r">
+      <small>selected</small><input id="osel" type="number" value="1" style="width:52px">
+      <button onclick="sendOem()">replay</button>
+      <small>&larr; uses the icon bytes from the top card</small>
+    </div>
+    <p><small>
+      200 wire bytes lifted straight out of
+      <span class="k">mENU NAVIGATION MAIN SCREEN AFTER BACK.csv</span> &mdash; one ISO-TP
+      message, <span class="k">10 C6</span> = FF_DL 198 = <span class="k">36 + 27&times;6</span>,
+      reassembled with zero sequence gaps. <b>These are the bytes that drew "Menu Principal"
+      with a pictogram on a real car</b>, and they are what settled the question: the panel
+      drew the book, then <span class="k">showMenuN</span> drew the same book with its own
+      text. Kept as the control &mdash; if a builder change ever stops drawing an icon, this
+      says whether the panel or the builder moved.
     </small></p>
   </section>
 
@@ -293,6 +390,8 @@ th{color:var(--dim);font-weight:normal}
     <div class="r">
       <button class="p" onclick="sendRows()">showInfoMenu</button>
       <label><input type="checkbox" id="rlive" onchange="sendRows()"> keep repainting</label>
+      <button onclick="rowsOff()">stop repainting</button>
+      <span id="rtick" class="k"></span>
     </div>
     <p><small>
       This is the screen that <b>coexists with the bitmap</b> &mdash; both on the glass at
@@ -433,6 +532,25 @@ th{color:var(--dim);font-weight:normal}
       <br><br>It knows which screen is up from the library's own record of the last
       acknowledged render (<span class="k">lastRendered()</span>) rather than from a flag
       this example keeps, so it cannot drift out of step with what was actually drawn.
+    </small></p>
+
+    <h2 style="margin-top:15px">WiFi &mdash; which network this board joins</h2>
+    <div class="r">
+      <input id="wss" size="14" placeholder="SSID">
+      <input id="wpw" size="14" type="password" placeholder="password">
+      <button class="p" onclick="wifiSet()">store &amp; reboot</button>
+      <button onclick="cmd('wifi')">show stored SSID</button>
+    </div>
+    <p><small>
+      Written to NVS <span class="k">megaopen</span> / <span class="k">ssid</span> +
+      <span class="k">pass</span> &mdash; the same keys <span class="k">startWifi()</span>
+      reads at boot, so every example on this board picks them up.
+      <br><br><b>A wrong password is not a brick.</b> The join is given 15 s and then the
+      board brings up its own AP: <span class="k">AffaMedia</span> / <span class="k">affa1234</span>
+      at <span class="k">http://192.168.4.1/</span>, with OTA still on it. That is why this
+      field is safe to expose &mdash; the way back never depends on the value you typed.
+      <br><br>The stored password is <b>never</b> read back out; <b>show stored SSID</b>
+      returns the name only. This console has no auth and may be serving on an open AP.
     </small></p>
 
     <h2 style="margin-top:15px">Board</h2>
@@ -622,14 +740,65 @@ function pick() { return WORDS[Math.floor(Math.random() * WORDS.length)]; }
 function randomFull() { cmd('fullscreen', { a: pick(), b: pick(), c: pick() }); }
 
 // ---- menus -----------------------------------------------------------------
+// TWO FIELDS, EDITED IN ONE PLACE AND SENT BY AN EXPLICIT PRESS. `ms0` is the glyph index at
+// payload [3], `ms1` the scrollbar thumb at [4] — unrelated to each other, and the reason
+// they sit together is that they are the two bytes this screen still had no UI for.
+//
+// Nothing is on a timer: an earlier version swept [4] and pulsed bit 7 on setInterval, so the
+// glass changed while you were still reading it and no press mapped to one screen.
+//
+// Sent as text, because the dispatcher parses with strtol base 0 — `0x14` and `20` both
+// arrive as 20, so a hand-typed byte works in either notation.
+function sty() { return { i0: el('ms0').value, i1: el('ms1').value }; }
+function styGet(which) { return parseInt(el(which ? 'ms1' : 'ms0').value, 16) & 255; }
+function stySet(which, v) {
+  el(which ? 'ms1' : 'ms0').value = hx(v);
+  el('mst').value = '';                            // any hand edit is "custom"
+  stySync();
+}
+function styStep(which, d) { stySet(which, (styGet(which) + d) & 255); }
+// Bit 7 of [3] suppresses the glyph — MEASURED, not a guess. It is a checkbox and not a
+// "flip bit 7" button because the button named the mechanism and the user has to care about
+// the result: same glyph chosen, drawn or not drawn.
+function styHide() {
+  var v = styGet(0);
+  stySet(0, el('mshide').checked ? (v | 0x80) : (v & 0x7F));
+}
+// One place where the checkbox and the preview follow the fields, whoever moved them —
+// preset, step, hand-typed byte. Without it the checkbox lies as soon as you type.
+function stySync() {
+  var a = styGet(0), b = styGet(1);
+  el('mshide').checked = (a & 0x80) !== 0;
+  el('msr').value = b;
+  el('mspv').textContent = 'sends 21 01 xx ' + hx(a).slice(2) + ' ' + hx(b).slice(2)
+                         + ((a & 0x80) ? '  (glyph hidden)' : '')
+                         + (b === 0 ? '  (no scrollbar)' : '');
+}
+// The dropdown carries the glyph only — the thumb has its own control and must not jump
+// because you picked an icon.
+function styPreset() {
+  var v = el('mst').value;
+  if (v === '') return;                            // "custom": leave the field alone
+  el('ms0').value = hx(+v);
+  stySync();
+}
 function sendMenu() {
-  cmd('menu', { h: el('mh').value, a: el('ma').value, b: el('mb').value, scroll: el('msk').value });
+  var o = { h: el('mh').value, a: el('ma').value, b: el('mb').value, scroll: el('msk').value };
+  o.i0 = sty().i0; o.i1 = sty().i1;
+  cmd('menu', o);
 }
 function sendMenuN() {
-  cmd('menun', { h: el('nh').value, i: el('ni').value, n: el('nsel').value,
-                 scroll: el('nsk').value });
+  var o = { h: el('nh').value, i: el('ni').value, n: el('nsel').value, scroll: el('nsk').value };
+  o.i0 = sty().i0; o.i1 = sty().i1;
+  cmd('menun', o);
+}
+function sendOem() {
+  cmd('oem', { sel: el('osel').value, i0: sty().i0, i1: sty().i1 });
 }
 function selectItem() { cmd('select', { n: el('nsel').value }); }
+// SEQUENTIAL: the pane is 44 CAN frames and the list is another 30, so firing both at once
+// puts the second one on a busy transmitter. Pane first — it is the layer underneath.
+function listPlusPane() { cmd('pane', { on: 1 }).then(sendMenuN); }
 // Only as many label fields as there are buttons, so the form cannot ask for a label the
 // wire has nowhere to put.
 function cLabels() {
@@ -646,9 +815,26 @@ function sendRows() {
                     s0: el('s0').checked ? 1 : 0, s1: el('s1').checked ? 1 : 0,
                     s2: el('s2').checked ? 1 : 0, live: el('rlive').checked ? 1 : 0 });
 }
+// ONE PRESS THAT ACTUALLY STOPS IT. "keep repainting" is not the only thing that drives the
+// tick — any per-row scroll flag does — so unticking it left the loop running, and those
+// flags survive a reboot in NVS.
+function rowsOff() {
+  el('rlive').checked = false;
+  el('s0').checked = false; el('s1').checked = false; el('s2').checked = false;
+  sendRows();
+}
 
 // ---- settings --------------------------------------------------------------
 function famSet(f) { if (confirm('Reboot into ' + f + '?')) cmd('family', { f: f }); }
+// The board reboots to join, so say where it will and will not be afterwards. If the join
+// fails it comes back on its own AP — the reason this is not a one-way door.
+function wifiSet() {
+  var s = el('wss').value;
+  if (!s) { say(false, 'SSID is empty'); return; }
+  if (!confirm('Store "' + s + '" and reboot?\n\nIf the join fails the board comes back on '
+             + 'its own AP: AffaMedia / affa1234 at 192.168.4.1')) return;
+  cmd('wifi', { ssid: s, pass: el('wpw').value });
+}
 function setHold() { cmd('hold', { ms: el('hold').value }); }
 // ---- wire filter -----------------------------------------------------------
 // THE OPTIONS ARE BUILT FROM WHAT HAS ACTUALLY BEEN SEEN, never from a hard-coded list of
@@ -751,6 +937,8 @@ function poll() {
       el('per').value = s.period;
       for (var i = 0; i < 3; i++) { el('r' + i).value = s.rows[i].t; el('s' + i).checked = s.rows[i].s; }
       el('rlive').checked = s.rowslive;
+      // The truth about the tick, not the switch that was meant to control it.
+      el('rtick').textContent = s.rowstick ? 'repainting every 700 ms' : '';
       // ADOPT THE BOARD'S HEADER BYTES rather than leaving the form on its HTML defaults.
       // The page used to show "none 55" while the board held something else entirely, so
       // the first SET TEXT silently reverted whatever was actually on the glass.
@@ -804,6 +992,7 @@ function poll() {
 }
 load('tryzub');
 cLabels();
+stySync();
 iconChips();
 poll();
 setInterval(poll, 1500);

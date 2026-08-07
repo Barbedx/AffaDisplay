@@ -117,8 +117,8 @@ builders count from the PCI, so library offset = these + 2.
 [0] 21                       command
 [1] 01                       mode = list
 [2] row tag of the selection (0x7E top / 0x7F bottom / 0x00 / 0x01)
-[3] 0x80 or 0x3D or 0x47     ?
-[4] 0x00 or 0x14 or 0x01     ?
+[3] glyph index              GUTTER PICTOGRAM — swept on glass 2026-08-07, see below
+[4] scrollbar thumb          POSITION of the thumb, 0x00 none / 0x10 top / 0x58 bottom
 [5] 00
 [6] 0x80 | itemCount         <-- CONFIRMED across three menus
 [7] FF
@@ -151,6 +151,53 @@ with (FFFF, GROSS-ZIMMERN) and `[35]=0x00` with (GROSS-ZIMMERN, HOME). The full-
 send `0x01`. The library's "row-0 index / row-1 index" bytes are this field and the item-0
 tag; there is no second index byte — `WIRE-SPEC`'s "offsets 4, 38 and 65" are exactly the
 selection tag, the item-0 tag and the item-1 tag.
+
+#### `[3]` is a glyph index. `[4]` is the scrollbar thumb. SWEPT ON GLASS 2026-08-07.
+
+**This panel has a list screen with a pictogram, and the library was hiding it** behind a
+hard-coded `0x80 0x00` that no caller could reach — which is why the honest answer here used
+to be "no capture shows one".
+
+**They are two unrelated fields.** An earlier revision of this section called them "the icon
+pair", because the only evidence was three OEM captures in which both bytes happened to move
+together. Walking them independently on the bench took that apart in one session. Record the
+mistake as well as the finding: *three samples that co-vary are not a field.*
+
+**`[3]` — an index into a glyph table the panel owns.**
+
+| value | on the glass |
+|-------|--------------|
+| `0x00`–`0x10` | blank |
+| `0x11` | book with a magnifier — the first entry that draws |
+| `0x19` | open book |
+| `0x26` | bluetooth |
+| `0x30` | GPS |
+| `0x34` | an aircraft |
+| `0x3D` | unnamed — what the OEM's Navigation menu sends |
+| `0x47` | unnamed — what the OEM's Settings menu sends |
+
+The runs between the named entries are **populated and uncatalogued**. Bit 7 set draws
+nothing: `0x30` shows GPS, `0xB0` shows nothing, and the index survives underneath. So
+`0x80` was never a "none" value — it is glyph `0` with the suppress bit set, blank twice
+over.
+
+**`[4]` — the scrollbar thumb position.** `0x00` no scrollbar, `0x10` top of travel, `0x58`
+bottom, `0x57` one step above bottom. A **position, not a proportion**, and independent of
+`[8]` (the arrow mask) and `[35]` (first visible item). Three separate ways this screen
+talks about scrolling and the panel derives none of them from the others, so an application
+that scrolls a long list has to move this itself.
+
+**The glyph is a field, not a property of the captured bytes.** The experiment ran in two
+steps: replay the OEM's 200 bytes verbatim (the panel drew its glyph), then send
+`showMenuN()` with our own title and our own items and the same index (same glyph). It works
+on the two-row `showMenu()` too — `10 5A 21 01 7E 3D 14 00`. That also resolves the
+item-tag confound recorded here earlier: the tag namespace (`7E`/`7F` versus `00..05`) has
+nothing to do with it.
+
+Library surface: `showMenuIcon()`, `showMenuN(..., icon, thumb)`, `carminat::kMenuIcon*` and
+`kMenuThumb*`. The builders default to `kMenuIconOemBlank` (`0x80`) rather than the tidier
+`0x00` **on purpose** — both are blank, but `0x80` is the captured byte, so every
+capture-verbatim vector in `test_carminat_wire` keeps passing.
 
 ### Mode `0x05` — fullscreen text / message box
 
