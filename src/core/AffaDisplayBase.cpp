@@ -107,6 +107,17 @@ void AffaDisplayBase::poll() {
   pumpLink();
   pumpRx();
   pumpSync();
+  // WHAT OTHER TASKS POSTED, ADMITTED HERE AND NOWHERE ELSE.
+  //
+  // AFTER pumpSync() so a posted render is judged against the sync state THIS poll
+  // established rather than the previous one's — the hold window and the lazy registration
+  // burst both read it. BEFORE pumpTx() so a render posted during this period goes out
+  // during this period rather than the next: one poll of latency saved for free.
+  //
+  // It cannot go above pumpRx(): a key that arrives in the same drain must still reach the
+  // application before any transmit pumping, which is the guarantee the whole poll order
+  // exists to protect.
+  pumpDispatch();
   pumpTx();
 
   // THE ONE TIME-DRIVEN PHASE EDGE. Every other transition is a frame; this one is the

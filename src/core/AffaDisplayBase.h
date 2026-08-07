@@ -8,6 +8,7 @@
 #include "IDisplay.h"
 #include "IPanel.h"
 #include "../util/AffaLog.h"
+#include "AffaDispatch.h"
 #if AFFA_ENABLE_ISOTP_RX
 #  include "../proto/IsoTp.h"
 #endif
@@ -58,6 +59,23 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // is the caller-owned mode: one task, by contract, unchecked.
   void setPollOwner(void* owner, TaskIdFn fn);
   uint32_t foreignPolls() const;   // poll() calls refused because they were off-task
+
+  // ---- cross-task dispatch -------------------------------------------------
+  // ONCE AN OWNER IS REGISTERED, EVERY RENDER IS CALLABLE FROM EVERY TASK. A call from any
+  // other task builds its bytes on its own stack — every render in this library is a pure
+  // function of its arguments — and then crosses into the owner as data. It never blocks and
+  // it never fails for being on the wrong task.
+  //
+  // THE ONE HONEST CONSEQUENCE, and it is the whole cost: a refusal the direct path reports
+  // in Submitted::result (NoSync, QueueFull, LinkDown) is reported through onComplete()
+  // instead, because at the moment of return nothing has been enqueued yet. The three that
+  // ARE still synchronous are the caller's own mistakes — BadArgument, TooLong, UnknownFunc
+  // — because those need no library state to detect.
+  //
+  // Renders refused because the ring itself was full. Counted, never sampled: a burst that
+  // filled it once is still visible later, which is what makes it debuggable at all.
+  uint32_t dispatchDropped() const;
+  uint8_t  dispatchQueued() const;   // posted and not yet drained
 
   // Has begin() run? AffaTask::start() refuses on false — a task that starts polling a
   // display that was never begun transmits nothing and reports no reason.
@@ -506,13 +524,25 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   void invalidateInFlightForSession(uint32_t now);
   void advanceSessionEpoch();
   void completeTicket(TxTicket t, Result r);
-  // The shared tail of enqueue/enqueueExternal/enqueueSplit: everything from the capacity
-  // check onwards, against a ticket that has ALREADY been minted. Split out because the
-  // ticket is now issued before the decision to queue is taken — it has to be, so that a
-  // call from another task can be handed its handle without waiting for the owning task to
-  // drain anything (docs/REFACTOR-2.0.md §3.4).
+
+  // ---- the task boundary ---------------------------------------------------
+  // The shared tail of enqueue/enqueueExternal/enqueueSplit: every state-dependent decision,
+  // against a ticket that has ALREADY been minted. Called directly on the poll owner's task
+  // and from pumpDispatch() for a render posted by another — ONE implementation, so a posted
+  // render and a direct one cannot disagree.
   Submitted admit(TxTicket t, uint16_t funcId, const uint8_t* data, uint16_t len,
                   const TxOptions& opt, const uint8_t* ext, uint16_t prefixLen);
+
+  // Same arguments, other side of the boundary: copy the finished render into the ring for
+  // the owner to admit. Never blocks; refuses QueueFull when the ring is full.
+  Submitted post(TxTicket t, uint16_t funcId, const uint8_t* data, uint16_t len,
+                 const TxOptions& opt, const uint8_t* ext, uint16_t prefixLen);
+
+  // True on the owning task, and true for everyone when no owner is registered.
+  bool onPollOwner() const;
+
+  // Drain what other tasks posted. Owner only; called from poll().
+  void pumpDispatch();
   // Stores the new state and fires SyncCb + EventKind::SyncChanged, but only on an actual
   // change. It took an `extra` EventKind until 2.0, whose only job was to fire a second
   // Layer 2 event beside the first; with that sink gone the parameter had no readers.
@@ -524,6 +554,12 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // modular arithmetic is to review.
   TxJob     _queue[AFFA_TX_QUEUE_DEPTH];
   uint8_t   _qCount = 0;
+#if AFFA_DISPATCH_DEPTH > 0
+  // WHAT OTHER TASKS POSTED. The only field in this class written by a task that is not the
+  // poll owner — everything else below is the owner's alone, which is exactly what the
+  // boundary buys.
+  AffaMpsc<DispatchItem, AFFA_DISPATCH_DEPTH> _dispatch;
+#endif
   TxState   _tx = TxState::Idle;
   SelfAck   _selfAckPending = SelfAck::None;
   uint32_t  _ackDeadlineMs  = 0;

@@ -72,6 +72,104 @@ TxTicket AffaDisplayBase::nextTicket() {
   return static_cast<TxTicket>((v - 1u) % 0xFFFFu + 1u);
 }
 
+// ---------------------------------------------------------------------------
+// The task boundary
+// ---------------------------------------------------------------------------
+
+// True when this call is already on the task that owns poll(), OR when nobody has claimed
+// ownership — the caller-owned mode, where the contract is "one task, by convention" and
+// there is nothing to cross.
+//
+// AffaTask claims ownership with a placeholder BEFORE its task exists, so during that window
+// this answers false for everybody and renders are posted rather than applied. That is the
+// safe direction: they drain on the owned task's first poll.
+bool AffaDisplayBase::onPollOwner() const {
+  return _pollOwnerFn == nullptr || _pollOwnerFn() == _pollOwner;
+}
+
+#if AFFA_DISPATCH_DEPTH > 0
+// Copy the finished render into the ring and hand the caller its ticket. NEVER BLOCKS.
+//
+// A refusal here means the ring was full, which is the one case where a foreign caller gets
+// a synchronous "no" for a reason that is not its own mistake. It is reported as QueueFull —
+// the same answer the transmit queue gives for the same condition — because from the
+// caller's side they are the same event: there was no room for this render.
+Submitted AffaDisplayBase::post(TxTicket t, uint16_t funcId, const uint8_t* data, uint16_t len,
+                                const TxOptions& opt, const uint8_t* ext, uint16_t prefixLen) {
+  DispatchItem it;
+  it.ticket    = t;
+  it.op        = DispatchOp::None;      // a payload
+  it.funcId    = funcId;
+  it.opt       = opt;
+  it.ext       = ext;
+  it.prefixLen = prefixLen;
+  it.len       = len;
+  if (data && prefixLen) std::memcpy(it.data, data, prefixLen);
+
+  if (!_dispatch.push(it)) {
+    // _lastResult is deliberately NOT written here: it is the poll owner's field, and a
+    // foreign task scribbling on it would corrupt the one thing an owned-task callback
+    // reads. The reason travels back in the return value, which is the whole point of
+    // Submitted.
+    AFFA_LOGW(kTag, "dispatch ring full (%u slots) — render %u refused",
+              static_cast<unsigned>(AFFA_DISPATCH_DEPTH), static_cast<unsigned>(t));
+    return Submitted::refused(Result::QueueFull);
+  }
+  return Submitted::accepted(t);
+}
+
+// Drain what other tasks posted, on the owning task, inside poll(). See poll() for why it
+// runs where it does.
+void AffaDisplayBase::pumpDispatch() {
+  DispatchItem it;
+  // BOUNDED BY THE RING, NOT BY "until empty". A producer posting faster than we drain must
+  // not be able to hold this task inside the loop — the pumpTx() below it is what puts bytes
+  // on the wire, and the pumpRx() above it is what delivers keys.
+  for (uint16_t i = 0; i < AFFA_DISPATCH_DEPTH; ++i) {
+    if (!_dispatch.pop(it)) return;
+
+    if (it.isPayload()) {
+      // The ticket was minted by the CALLING task and the caller already holds it. Minting
+      // another here is the two-handle-space bug 2.0 deleted.
+      const Submitted s = admit(it.ticket, it.funcId, it.prefixLen ? it.data : nullptr,
+                                it.len, it.opt, it.ext, it.prefixLen);
+      // A posted render that the queue refuses NOW reports through onComplete with its
+      // reason, because the caller was told "accepted" and is owed exactly one verdict.
+      if (!s) completeTicket(it.ticket, s.result);
+      continue;
+    }
+
+    switch (it.op) {
+      case DispatchOp::PressKey:
+        (void)pressKey(static_cast<Key>(static_cast<uint16_t>((it.a << 8) | it.b)),
+                       it.c ? KeyEdge::Hold : KeyEdge::Click,
+                       static_cast<KeySource>(it.d ? it.d : 1));
+        break;
+      case DispatchOp::AbortPending: (void)abortPending(); break;
+      case DispatchOp::AbortAll:     (void)abortAll();     break;
+      case DispatchOp::Resync:       (void)begin();        break;
+      case DispatchOp::None:         break;                // unreachable: isPayload()
+    }
+  }
+}
+
+uint32_t AffaDisplayBase::dispatchDropped() const { return _dispatch.dropped(); }
+uint8_t  AffaDisplayBase::dispatchQueued()  const {
+  return static_cast<uint8_t>(_dispatch.size());
+}
+#else
+Submitted AffaDisplayBase::post(TxTicket, uint16_t, const uint8_t*, uint16_t,
+                                const TxOptions&, const uint8_t*, uint16_t) {
+  // AFFA_DISPATCH_DEPTH == 0: there is no ring, so there is no cross-task path. onPollOwner()
+  // is the only caller and it answers true whenever no owner is registered, so this is
+  // reachable only in a build that registered an owner AND compiled the ring out.
+  return Submitted::refused(Result::NotSupported);
+}
+void     AffaDisplayBase::pumpDispatch() {}
+uint32_t AffaDisplayBase::dispatchDropped() const { return 0; }
+uint8_t  AffaDisplayBase::dispatchQueued()  const { return 0; }
+#endif
+
 bool AffaDisplayBase::registrationQueued() const {
   for (uint8_t i = 0; i < _qCount; ++i)
     if (_queue[i].kind == JobKind::Registration) return true;
@@ -215,6 +313,23 @@ Submitted AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t
   // costs nothing — the counter wraps at 0xFFFF and no refusal returns one.
   const TxTicket t = nextTicket();
 
+  // THE TASK BOUNDARY, AND IT IS ONE LINE BECAUSE EVERY RENDER IN THIS LIBRARY FUNNELS HERE.
+  // Above this point nothing has been read but the caller's arguments and a table fixed at
+  // construction; below it, every decision reads state the poll owner mutates. So this is
+  // where the call stops and the bytes travel instead. docs/REFACTOR-2.0.md §2.
+  if (!onPollOwner()) return post(t, funcId, data, len, opt, nullptr, len);
+
+  return admit(t, funcId, data, len, opt, nullptr, len);
+}
+
+// The state-dependent tail, against a ticket that was minted by whoever called. Shared by
+// the three enqueue entry points and by the drain — which is what makes a posted render and
+// a direct one the same code rather than two implementations that can disagree.
+Submitted AffaDisplayBase::admit(TxTicket t, uint16_t funcId, const uint8_t* data,
+                                 uint16_t len, const TxOptions& optIn, const uint8_t* ext,
+                                 uint16_t prefixLen) {
+  TxOptions opt = optIn;
+
   // The sole current durable control is Carminat power.  If a recovery replay is still
   // waiting in the queue, it represents an OLDER requested state.  Discard it before the
   // capacity check so a full queue cannot make a stale replay win over a new ON/OFF call.
@@ -250,8 +365,12 @@ Submitted AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t
   const bool needReg = !_passive && linkReady() &&
                        !hasFlag(_sync, SyncState::FuncsReg) && !registrationQueued();
 
+  // A BORROWED PAYLOAD IS NEVER COALESCABLE and the two guards say so independently:
+  // enqueueExternal/enqueueSplit force opt.coalesce false AND refuse a RenderSlot, and
+  // findCoalescable() returns -1 for RenderSlot::None. Both, because the failure the pair
+  // prevents is a memcpy from a null `data` into a queue slot.
   int ci = -1;
-  if (opt.coalesce) ci = findCoalescable(funcId, opt.slot);
+  if (opt.coalesce && !ext) ci = findCoalescable(funcId, opt.slot);
 
   const uint8_t newSlots =
       static_cast<uint8_t>((ci >= 0 ? 0 : 1) + (needReg ? _funcCount : 0));
@@ -304,7 +423,8 @@ Submitted AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t
     return Submitted::accepted(t);
   }
 
-  pushJob(funcId, data, len, JobKind::Payload, t, opt, insertIndexFor(opt.priority));
+  pushJob(funcId, data, len, JobKind::Payload, t, opt, insertIndexFor(opt.priority), ext,
+          prefixLen);
   _lastResult   = Result::Ok;
   return Submitted::accepted(t);
 }
@@ -330,27 +450,12 @@ Submitted AffaDisplayBase::enqueueExternal(uint16_t funcId, const uint8_t* data,
 
   const TxTicket t = nextTicket();      // see enqueue(): above every state-dependent check
 
-  const uint32_t now = _clock.millis();
-  if (AFFA_TX_HOLD_MS == 0 && !linkReady()) {
-    const Result r = _link.isLive() ? Result::NoSync : Result::LinkDown;
-    _lastResult = r;
-    return Submitted::refused(r);
-  }
-  (void)now;
+  // THE BORROWED BYTES CROSS AS A POINTER, and that needs no new rule: the contract already
+  // says they must stay valid and unchanged until the ticket completes, which outlives the
+  // dispatch by definition.
+  if (!onPollOwner()) return post(t, funcId, nullptr, len, opt, data, /*prefixLen=*/0);
 
-  const bool needReg = !_passive && linkReady() &&
-                       !hasFlag(_sync, SyncState::FuncsReg) && !registrationQueued();
-  const uint8_t newSlots = static_cast<uint8_t>(1 + (needReg ? _funcCount : 0));
-  if (_qCount + newSlots > AFFA_TX_QUEUE_DEPTH) {
-    _lastResult = Result::QueueFull;
-    return Submitted::refused(Result::QueueFull);
-  }
-  if (needReg) (void)queueRegistrations();
-
-  pushJob(funcId, nullptr, len, JobKind::Payload, t, opt, insertIndexFor(opt.priority), data,
-          /*prefixLen=*/0);
-  _lastResult   = Result::Ok;
-  return Submitted::accepted(t);
+  return admit(t, funcId, nullptr, len, opt, data, /*prefixLen=*/0);
 }
 
 Submitted AffaDisplayBase::enqueueSplit(uint16_t funcId, const uint8_t* prefix, uint8_t prefixLen,
@@ -378,25 +483,13 @@ Submitted AffaDisplayBase::enqueueSplit(uint16_t funcId, const uint8_t* prefix, 
 
   const TxTicket t = nextTicket();      // see enqueue(): above every state-dependent check
 
-  if (AFFA_TX_HOLD_MS == 0 && !linkReady()) {
-    const Result r = _link.isLive() ? Result::NoSync : Result::LinkDown;
-    _lastResult = r;
-    return Submitted::refused(r);
-  }
+  // The prefix is COPIED and the body is BORROWED, on this path and across the dispatch
+  // alike — which is what lets a sixteen-byte header built on a web handler's stack be
+  // prepended to an image in flash without either being copied whole.
+  const uint16_t total16 = static_cast<uint16_t>(total);
+  if (!onPollOwner()) return post(t, funcId, prefix, total16, opt, body, prefixLen);
 
-  const bool needReg = !_passive && linkReady() &&
-                       !hasFlag(_sync, SyncState::FuncsReg) && !registrationQueued();
-  const uint8_t newSlots = static_cast<uint8_t>(1 + (needReg ? _funcCount : 0));
-  if (_qCount + newSlots > AFFA_TX_QUEUE_DEPTH) {
-    _lastResult = Result::QueueFull;
-    return Submitted::refused(Result::QueueFull);
-  }
-  if (needReg) (void)queueRegistrations();
-
-  pushJob(funcId, prefix, static_cast<uint16_t>(total), JobKind::Payload, t, opt,
-          insertIndexFor(opt.priority), body, prefixLen);
-  _lastResult   = Result::Ok;
-  return Submitted::accepted(t);
+  return admit(t, funcId, prefix, total16, opt, body, prefixLen);
 }
 
 // A failure worth another attempt: exactly the two that mean NOBODY ANSWERED.

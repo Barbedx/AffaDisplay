@@ -703,6 +703,176 @@ void test_poll_from_a_foreign_task_does_nothing_and_is_counted() {
   g_currentTask = nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// Cross-task dispatch — the point of the whole 2.0 refactor
+// ---------------------------------------------------------------------------
+// Before 2.0, poll() was guarded against a foreign task and enqueue() was NOT. An
+// application holding the display — which every application did, because AffaTask published
+// ten of CarminatDisplay's twenty-two renders — could call setText from an HTTP handler
+// straight into the transmit queue while the owned task was pumping it. That is what
+// examples/17_mediascreen actually did (docs/REFACTOR-2.0.md §1.2).
+//
+// These drive the boundary with the same faked task identity the poll guard above uses.
+
+namespace {
+void* const kOwner   = reinterpret_cast<void*>(0xA1);
+void* const kForeign = reinterpret_cast<void*>(0xB2);
+
+// Bring a WireDisplay up to "renders are accepted", then hand ownership to kOwner.
+// `ack` arms the panel emulator so a transfer can actually complete; the tests that only
+// care about where a call LANDS leave it off.
+void ownedAndSynced(WireDisplay& d, LoopbackLink<>& link, FakeClock& clk, bool ack = false) {
+  g_currentTask = kOwner;
+  bringUpSync(d, link, clk);
+  if (ack) link.setAutoAck(true);
+  d.setPollOwner(kOwner, &currentTask);
+  affatest::drain(link);
+}
+}  // namespace
+
+void test_a_render_from_a_foreign_task_is_accepted_and_applied_on_the_owner(void) {
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  ownedAndSynced(d, link, clk, /*ack=*/true);
+
+  const uint8_t qBefore = d.queued();
+
+  // THE CALL THAT USED TO BE A DATA RACE. It returns a live ticket immediately and never
+  // blocks — but nothing has touched the transmit queue yet.
+  g_currentTask = kForeign;
+  const Submitted s = d.setText("HI", 255);
+  TEST_ASSERT_TRUE_MESSAGE(s.ok(), "a foreign task is never refused for being foreign");
+  TEST_ASSERT_NOT_EQUAL(kNoTicket, s.ticket);
+  ASSERT_RESULT(Ok, s);
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, d.dispatchQueued(), "it is posted, not applied");
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(qBefore, d.queued(),
+                                  "the transmit queue is untouched until the owner runs");
+
+  // The owner's next poll admits it, and the ticket the caller holds is the one that ends
+  // up on the job — not a second handle minted on this side.
+  g_currentTask = kOwner;
+  d.poll();
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, d.dispatchQueued(), "the ring drained");
+  affatest::pumpUntilIdle(d);
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(s.ticket, d.lastTicket(),
+                                   "the ticket minted for the caller is the one that completed");
+  ASSERT_RESULT(Ok, d.lastResult());
+  g_currentTask = nullptr;
+}
+
+void test_the_callers_own_mistakes_are_still_answered_synchronously(void) {
+  // The three checks that need NO library state stay above the boundary, so a foreign
+  // caller still learns about its own bug at the call site rather than through a callback.
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  ownedAndSynced(d, link, clk);
+
+  g_currentTask = kForeign;
+  uint8_t big[AFFA_MAX_PAYLOAD + 1] = {0};
+  const uint8_t one = 1;
+
+  ASSERT_RESULT(BadArgument, d.enqueue(0x151, nullptr, 4));
+  ASSERT_RESULT(TooLong,     d.enqueue(0x151, big, AFFA_MAX_PAYLOAD + 1));
+  ASSERT_RESULT(UnknownFunc, d.enqueue(0x999, &one, 1));
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, d.dispatchQueued(),
+                                  "a refused call posts nothing across the boundary");
+  g_currentTask = nullptr;
+}
+
+void test_a_posted_render_the_queue_refuses_reports_through_onComplete(void) {
+  // THE ONE HONEST COST OF THE BOUNDARY. A foreign caller is told "accepted" before the
+  // queue has been consulted, so a QueueFull discovered at drain time is owed to it as a
+  // completion — never swallowed. It is the same contract a delivery failure already had.
+  static int   completions;
+  static Result lastResult;
+  static TxTicket lastTicket;
+  completions = 0; lastResult = Result::Ok; lastTicket = kNoTicket;
+
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  ownedAndSynced(d, link, clk);
+  d.onComplete([](TxTicket t, Result r, void*) {
+    ++completions; lastResult = r; lastTicket = t;
+  }, nullptr);
+
+  // Fill the transmit queue from the owner, with the link down so nothing drains.
+  link.setLive(false);
+  uint8_t p[4] = {0x03, 0x77, 0x41, 0x00};
+  for (uint8_t i = 0; i < AFFA_TX_QUEUE_DEPTH; ++i) {
+    TxOptions o; o.coalesce = false;
+    (void)d.enqueue(0x151, p, sizeof(p), o);
+  }
+  TEST_ASSERT_EQUAL_UINT8(AFFA_TX_QUEUE_DEPTH - 1, d.queued());
+  completions = 0;
+
+  // Now post one from another task. It is ACCEPTED at the call — the ring had room.
+  g_currentTask = kForeign;
+  const Submitted s = d.setText("XX", 255);
+  TEST_ASSERT_TRUE_MESSAGE(s.ok(), "the ring accepted it; the transmit queue has not seen it");
+
+  // …and refused at the drain, which the caller hears about exactly once.
+  g_currentTask = kOwner;
+  d.poll();
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, completions, "the caller is owed exactly one verdict");
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(s.ticket, lastTicket, "and it names its own ticket");
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(static_cast<uint8_t>(Result::QueueFull),
+                                  static_cast<uint8_t>(lastResult), "with the real reason");
+  g_currentTask = nullptr;
+}
+
+void test_a_full_dispatch_ring_refuses_at_the_call_and_counts_it(void) {
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  ownedAndSynced(d, link, clk);
+
+  g_currentTask = kForeign;
+  for (uint16_t i = 0; i < AFFA_DISPATCH_DEPTH; ++i)
+    TEST_ASSERT_TRUE_MESSAGE(d.setText("A", 255).ok(), "the ring has room");
+
+  const Submitted over = d.setText("B", 255);
+  TEST_ASSERT_FALSE_MESSAGE(over.ok(), "a full ring refuses rather than dropping silently");
+  ASSERT_RESULT(QueueFull, over);
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, d.dispatchDropped(), "and it is counted");
+  g_currentTask = nullptr;
+}
+
+void test_a_call_on_the_owning_task_never_touches_the_ring(void) {
+  // The direct path has to stay direct: a render from inside a KeyCb — which runs ON the
+  // owner — must apply immediately, or the documented preemption pattern
+  // (poll -> KeyCb -> abortPending -> CompleteCb) would defer half of itself by a poll.
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  ownedAndSynced(d, link, clk);
+
+  const Submitted s = d.setText("OK", 255);       // still g_currentTask == kOwner
+  TEST_ASSERT_TRUE(s.ok());
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, d.dispatchQueued(), "the owner does not post to itself");
+  TEST_ASSERT_TRUE_MESSAGE(d.busy(), "it is in the transmit queue already");
+  g_currentTask = nullptr;
+}
+
+void test_with_no_owner_registered_every_task_takes_the_direct_path(void) {
+  // Caller-owned mode, which is what a non-FreeRTOS port and every pre-2.0 build run in:
+  // the contract is "one task, by convention", so there is nothing to cross and the ring is
+  // never touched no matter which task calls.
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  bringUpSync(d, link, clk);
+  affatest::drain(link);
+
+  g_currentTask = kForeign;                       // no setPollOwner() call at all
+  TEST_ASSERT_TRUE(d.setText("HI", 255).ok());
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, d.dispatchQueued(), "unowned means unchecked");
+  TEST_ASSERT_TRUE(d.busy());
+  g_currentTask = nullptr;
+}
+
 void test_begun_reports_whether_begin_has_run() {
   LoopbackLink<> link;
   FakeClock clk;
@@ -739,6 +909,12 @@ int main(int, char**) {
   RUN_TEST(test_request_table_reports_unknown_tickets_as_no_request);
   RUN_TEST(test_request_table_full_refuses_rather_than_evicting);
   RUN_TEST(test_poll_from_a_foreign_task_does_nothing_and_is_counted);
+  RUN_TEST(test_a_render_from_a_foreign_task_is_accepted_and_applied_on_the_owner);
+  RUN_TEST(test_the_callers_own_mistakes_are_still_answered_synchronously);
+  RUN_TEST(test_a_posted_render_the_queue_refuses_reports_through_onComplete);
+  RUN_TEST(test_a_full_dispatch_ring_refuses_at_the_call_and_counts_it);
+  RUN_TEST(test_a_call_on_the_owning_task_never_touches_the_ring);
+  RUN_TEST(test_with_no_owner_registered_every_task_takes_the_direct_path);
   RUN_TEST(test_begun_reports_whether_begin_has_run);
   return UNITY_END();
 }

@@ -496,6 +496,24 @@
 #  define AFFA_PING_REPLY_MIN_MS 250
 #endif
 
+// CROSS-TASK DISPATCH SLOTS. Once a poll owner is registered, a render called from any other
+// task copies its finished bytes into this ring and the owner drains it inside poll(). It is
+// what makes "callable from any task" true for EVERY render — including ones written after
+// this comment — rather than for the handful somebody remembered to mirror.
+//
+// Sized like the transmit queue and for the same reason AFFA_TASK_QUEUE_DEPTH was: a deeper
+// dispatch ring than transmit queue only defers QueueFull to a worse place, where the caller
+// has already been told the render was accepted.
+//
+// Costs sizeof(DispatchItem) ~= AFFA_MAX_PAYLOAD + 20 per slot, and NOTHING in CPU when
+// unused — a call already on the owning task never touches it. Must be a power of two.
+//
+// 0 removes the ring entirely. Do that only for a build with no owned task at all, where the
+// contract is the original one: poll() from exactly one task, and render from that task too.
+#ifndef AFFA_DISPATCH_DEPTH
+#  define AFFA_DISPATCH_DEPTH AFFA_TASK_QUEUE_DEPTH
+#endif
+
 // AFFA_MAX_SUBSCRIPTIONS WAS HERE AND IS GONE. It sized the Layer 1 FrameMatch table —
 // ~256 B of static RAM and a linear scan of it per frame per direction — for an API that
 // nineteen shipped examples never called once. See the comment above Direction in
