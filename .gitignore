@@ -32,3 +32,4 @@ program
 
 # Editor/agent tooling state
 .claude/
+.understand-anything/

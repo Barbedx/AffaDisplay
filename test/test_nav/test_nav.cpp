@@ -14,6 +14,7 @@
 #include "../affa_test_support.h"
 
 #include "carminat/CarminatDisplay.h"
+#include "carminat/CarminatMenu.h"
 #include "carminat/IPage.h"
 #include "proto/IsoTp.h"
 #include "proto/ScreenDecode.h"
@@ -67,13 +68,30 @@ Step capture(L& link) {
   return s;
 }
 
+// THE REFERENCE WIRING, and it is the whole shape of the 2.0 menu contract in five lines.
+//
+// The display no longer knows a menu exists. It delivers every decoded key to KeyCb, and the
+// APPLICATION offers it to the menu first; `true` means the menu had an opinion and the
+// application does nothing further. Before 2.0 this arbitration lived inside
+// AffaDisplayBase::routeKey(), which is why the base needed three virtual menu seams and a
+// hotkey triple that every panel paid for whether or not it had a menu.
+CarminatMenu* g_menu    = nullptr;   // set by Rig::up()
+int           g_appKeys = 0;
+Key           g_appKey  = Key::Load;
+void appKey(Key k, KeyEdge e, void*);
+
 struct Rig {
   LoopbackLink<256> link;
   affatest::FakeClock clk;
   CarminatDisplay d;
-  Rig() : d(link, clk) {}
+  // The application owns the menu since 2.0 — this rig IS the reference wiring.
+  CarminatMenu menu;
+  Rig() : d(link, clk), menu(d) {}
 
   void up() {
+    g_menu = &menu;                               // the KeyCb below routes into it
+    g_appKeys = 0;
+    d.onKey(&appKey, nullptr);
     d.begin();
     // Self-ACK BEFORE the opening: the 0x70 registrations now leave with the final hello.
     d.setSelfAck(true);
@@ -92,24 +110,31 @@ struct Rig {
     a.fields[1]   = listField(kModes, 3, 0);
     a.fields[2]   = readOnlyField(12, "V");
     a.fieldCount  = 3;
-    TEST_ASSERT_EQUAL_INT(0, d.getMenu().addItem(a));
+    TEST_ASSERT_EQUAL_INT(0, menu.model().addItem(a));
 
     MenuItem b{};
     b.label = "Second";
-    TEST_ASSERT_EQUAL_INT(1, d.getMenu().addItem(b));
+    TEST_ASSERT_EQUAL_INT(1, menu.model().addItem(b));
 
     MenuItem c{};
     c.label = "Third";
-    TEST_ASSERT_EQUAL_INT(2, d.getMenu().addItem(c));
+    TEST_ASSERT_EQUAL_INT(2, menu.model().addItem(c));
   }
 
   // Runs one navigation command and returns what it put on the wire.
   Step step(NavCommand c) {
-    ASSERT_RESULT(Ok, d.nav(c));
+    TEST_ASSERT_TRUE_MESSAGE(menu.nav(c), "the menu must consume this navigation intent");
     pumpUntilIdle(d);
     return capture(link);
   }
 };
+
+// The five lines promised above. `true` from routeKey() means the menu consumed the key.
+void appKey(Key k, KeyEdge e, void*) {
+  if (g_menu && g_menu->routeKey(k, e)) return;
+  ++g_appKeys;
+  g_appKey = k;
+}
 
 void expectRedraw(const Step& s, const char* header, const char* row0, const char* row1,
                   uint8_t scroll, uint8_t row, const char* what) {
@@ -156,9 +181,9 @@ void test_open_renders_header_rows_highlight_and_scroll_byte(void) {
   // fields, row 1 the next item, the down-arrow because there is more list below, and the
   // highlight on the TOP row.
   expectRedraw(s, "Main Menu", "Bright: 50% Off 12V", "Second", 0x0B, 0x7E, "nav(Open)");
-  TEST_ASSERT_TRUE(r.d.getMenu().isOpen());
-  TEST_ASSERT_EQUAL_UINT8(0, r.d.getMenu().selectedIndex());
-  TEST_ASSERT_EQUAL_UINT8(0, r.d.getMenu().selectedRow());
+  TEST_ASSERT_TRUE(r.menu.model().isOpen());
+  TEST_ASSERT_EQUAL_UINT8(0, r.menu.model().selectedIndex());
+  TEST_ASSERT_EQUAL_UINT8(0, r.menu.model().selectedRow());
 }
 
 void test_open_on_an_empty_menu_renders_nothing_and_says_so(void) {
@@ -166,9 +191,9 @@ void test_open_on_an_empty_menu_renders_nothing_and_says_so(void) {
   // which reads as a dead panel. Refusing is the whole point.
   Rig r;
   r.up();
-  ASSERT_RESULT(NotSupported, r.d.nav(NavCommand::Open));
+  TEST_ASSERT_FALSE_MESSAGE(r.menu.nav(NavCommand::Open), "an empty menu must refuse to open");
   pumpUntilIdle(r.d);
-  TEST_ASSERT_FALSE(r.d.getMenu().isOpen());
+  TEST_ASSERT_FALSE(r.menu.model().isOpen());
   TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(), "an empty menu draws nothing");
 }
 
@@ -186,18 +211,18 @@ void test_next_and_prev_move_the_selection_and_scroll_the_window(void) {
   // for — a redraw here would be ~14x the bus time for the same picture.
   Step s = r.step(NavCommand::Next);
   expectHighlightOnly(s, 0x7F, "Next 0 -> 1 stays inside the window");
-  TEST_ASSERT_EQUAL_UINT8(1, r.d.getMenu().selectedIndex());
+  TEST_ASSERT_EQUAL_UINT8(1, r.menu.model().selectedIndex());
 
   // The window must scroll: full redraw, and the arrow flips to "up only" because the
   // selection is now the last item.
   s = r.step(NavCommand::Next);
   expectRedraw(s, "Main Menu", "Second", "Third", 0x07, 0x7F, "Next 1 -> 2 scrolls");
-  TEST_ASSERT_EQUAL_UINT8(2, r.d.getMenu().selectedIndex());
+  TEST_ASSERT_EQUAL_UINT8(2, r.menu.model().selectedIndex());
 
   // THE LAST ENTRY IS REACHABLE and does not wrap.
   s = r.step(NavCommand::Next);
   expectNothing(s, "Next at the end of the list does nothing at all");
-  TEST_ASSERT_EQUAL_UINT8(2, r.d.getMenu().selectedIndex());
+  TEST_ASSERT_EQUAL_UINT8(2, r.menu.model().selectedIndex());
 
   s = r.step(NavCommand::Prev);
   expectHighlightOnly(s, 0x7E, "Prev 2 -> 1 stays inside the window");
@@ -209,7 +234,7 @@ void test_next_and_prev_move_the_selection_and_scroll_the_window(void) {
   // THE FIRST ENTRY IS REACHABLE and does not wrap either.
   s = r.step(NavCommand::Prev);
   expectNothing(s, "Prev at the start of the list does nothing at all");
-  TEST_ASSERT_EQUAL_UINT8(0, r.d.getMenu().selectedIndex());
+  TEST_ASSERT_EQUAL_UINT8(0, r.menu.model().selectedIndex());
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +251,7 @@ void test_select_enters_edit_then_advances_field_0_1_2_then_exits(void) {
   Step s = r.step(NavCommand::Select);
   expectRedraw(s, "Main Menu", "*Bright: <50%> Off 12V", "Second", 0x0B, 0x7E,
                "Select enters edit on field 0");
-  TEST_ASSERT_TRUE(r.d.getMenu().isEditing());
+  TEST_ASSERT_TRUE(r.menu.model().isEditing());
 
   s = r.step(NavCommand::Select);
   expectRedraw(s, "Main Menu", "*Bright: 50% <Off> 12V", "Second", 0x0B, 0x7E,
@@ -240,7 +265,7 @@ void test_select_enters_edit_then_advances_field_0_1_2_then_exits(void) {
   s = r.step(NavCommand::Select);
   expectRedraw(s, "Main Menu", "Bright: 50% Off 12V", "Second", 0x0B, 0x7E,
                "Select on the last field leaves edit mode");
-  TEST_ASSERT_FALSE(r.d.getMenu().isEditing());
+  TEST_ASSERT_FALSE(r.menu.model().isEditing());
 }
 
 void test_select_on_an_item_with_no_fields_draws_nothing(void) {
@@ -253,7 +278,7 @@ void test_select_on_an_item_with_no_fields_draws_nothing(void) {
 
   const Step s = r.step(NavCommand::Select);
   expectNothing(s, "an item with no fields has nothing to edit");
-  TEST_ASSERT_FALSE(r.d.getMenu().isEditing());
+  TEST_ASSERT_FALSE(r.menu.model().isEditing());
 }
 
 // ---------------------------------------------------------------------------
@@ -338,10 +363,10 @@ void test_back_closes_the_menu_and_restores_the_source_banner(void) {
   r.step(NavCommand::Select);       // leave it in edit mode, which close() must clear
   drain(r.link);
 
-  ASSERT_RESULT(Ok, r.d.nav(NavCommand::Back));
+  TEST_ASSERT_TRUE_MESSAGE(r.menu.nav(NavCommand::Back), "Back must be consumed");
   pumpUntilIdle(r.d);
-  TEST_ASSERT_FALSE(r.d.getMenu().isOpen());
-  TEST_ASSERT_FALSE_MESSAGE(r.d.getMenu().isEditing(),
+  TEST_ASSERT_FALSE(r.menu.model().isOpen());
+  TEST_ASSERT_FALSE_MESSAGE(r.menu.model().isEditing(),
                             "reopening must not resume in edit mode on a stale field");
 
   // The OEM convention on close: back to the source banner. It ships as a DEFAULT because
@@ -360,13 +385,13 @@ void test_clear_closes_silently_without_firing_the_close_callback(void) {
   Rig r;
   r.up();
   r.addDemoItems();
-  r.d.getMenu().onClose(&countClose, nullptr);
+  r.menu.model().onClose(&countClose, nullptr);
   g_closes = 0;
   r.step(NavCommand::Open);
 
-  r.d.getMenu().clear();
+  r.menu.model().clear();
   pumpUntilIdle(r.d);
-  TEST_ASSERT_FALSE(r.d.getMenu().isOpen());
+  TEST_ASSERT_FALSE(r.menu.model().isOpen());
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_closes, "clear() does not fire CloseCb");
   TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(), "and puts nothing on the wire");
 }
@@ -382,7 +407,7 @@ void test_a_one_and_two_item_menu_shows_no_arrows(void) {
   r.up();
   MenuItem only{};
   only.label = "Only";
-  r.d.getMenu().addItem(only);
+  r.menu.model().addItem(only);
 
   Step s = r.step(NavCommand::Open);
   TEST_ASSERT_TRUE(s.decoded);
@@ -392,12 +417,12 @@ void test_a_one_and_two_item_menu_shows_no_arrows(void) {
 
   MenuItem second{};
   second.label = "Two";
-  r.d.getMenu().addItem(second);
+  r.menu.model().addItem(second);
   drain(r.link);
   // render() returns void on the model — the panel's verdict lives on the adapter, which is
   // the only layer holding an IPanel. Same assertion, one indirection further out.
-  r.d.getMenu().render();
-  ASSERT_RESULT(Ok, r.d.menuRenderer().lastResult());
+  r.menu.model().render();
+  ASSERT_RESULT(Ok, r.menu.renderer().lastResult());
   pumpUntilIdle(r.d);
   s = capture(r.link);
   TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00, s.screen.scroll, "two items: still no arrows");
@@ -424,36 +449,41 @@ void test_an_active_page_owns_every_key_including_the_hotkey(void) {
   r.addDemoItems();
 
   CountingPage page;
-  r.d.pushPage(&page);
+  r.menu.pushPage(&page);
   TEST_ASSERT_EQUAL_INT(1, page.enters);
   drain(r.link);
 
-  // The GESTURE: openMenu() refuses while a page is pushed, which is exactly what makes
-  // the base fall through to routeKeyToMenu() and hand the key to the page.
+  // The GESTURE: open() refuses while a page is pushed, so routeKey() falls through to the
+  // controller, which hands the key to the page.
   ASSERT_RESULT(Ok, r.d.pressKey(Key::Load, KeyEdge::Hold, KeySource::Local));
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, page.keys, "hold-Load reached the page, not the menu");
-  TEST_ASSERT_FALSE(r.d.getMenu().isOpen());
+  TEST_ASSERT_FALSE(r.menu.model().isOpen());
 
-  // The INTENT: nav(Open) asks openMenu() directly and bypasses key routing altogether, so
-  // it reports NotSupported rather than drawing a menu underneath the page — and it is NOT
-  // delivered to the page either, because it was never a key.
-  ASSERT_RESULT(NotSupported, r.d.nav(NavCommand::Open));
+  // The INTENT: nav(Open) asks open() directly and bypasses key routing altogether, so it
+  // refuses rather than drawing a menu underneath the page — and it is NOT delivered to the
+  // page either, because it was never a key.
+  TEST_ASSERT_FALSE_MESSAGE(r.menu.nav(NavCommand::Open), "a page owns the glass");
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, page.keys, "nav(Open) is an intent, not a keystroke");
-  TEST_ASSERT_FALSE(r.d.getMenu().isOpen());
+  TEST_ASSERT_FALSE(r.menu.model().isOpen());
 
   ASSERT_RESULT(Ok, r.d.pressKey(Key::RollDown, KeyEdge::Click, KeySource::Local));
   TEST_ASSERT_EQUAL_INT(2, page.keys);
 
-  // onTick is once per poll(), which is NOT a period — a page that needs one compares
-  // against its own clock.
+  // THE TICK IS THE APPLICATION'S NOW, and that is the point of the move. It used to run
+  // inside CarminatDisplay::onPoll(), i.e. on the poll task, so a page that did slow work
+  // stalled the protocol with it. Polling the display no longer ticks anything…
   const int before = page.ticks;
   affatest::pump(r.d, 5);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(before, page.ticks,
+                                "poll() must not tick a page: that was the protocol's task");
+  // …and the application drives it from its own.
+  for (int i = 0; i < 5; ++i) r.menu.tick();
   TEST_ASSERT_EQUAL_INT(before + 5, page.ticks);
 
   pumpUntilIdle(r.d);
   TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(), "a page draws nothing by itself");
 
-  r.d.popPage();
+  r.menu.popPage();
   TEST_ASSERT_EQUAL_INT(1, page.exits);
   TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(),
                                    "the menu was closed, so nothing is re-rendered");
@@ -470,19 +500,13 @@ void test_an_active_page_owns_every_key_including_the_hotkey(void) {
 // now lives in MenuController::routeKey — route every key into the model instead and the
 // menu silently eats the radio controls whenever it is open.
 
-namespace {
-int  g_appKeys = 0;
-Key  g_appKey  = Key::Load;
-void countAppKey(Key k, KeyEdge, void*) { ++g_appKeys; g_appKey = k; }
-}  // namespace
 
 void test_transport_keys_fall_through_to_the_application_while_the_menu_is_open(void) {
   Rig r;
   r.up();
   r.addDemoItems();
-  r.d.onKey(&countAppKey, nullptr);
   r.step(NavCommand::Open);
-  TEST_ASSERT_TRUE(r.d.getMenu().isOpen());
+  TEST_ASSERT_TRUE(r.menu.model().isOpen());
 
   static const Key kTransport[] = {Key::SrcNext, Key::SrcPrev, Key::VolUp,
                                    Key::VolDown, Key::Pause};
@@ -497,8 +521,8 @@ void test_transport_keys_fall_through_to_the_application_while_the_menu_is_open(
     TEST_ASSERT_EQUAL_HEX16(static_cast<uint16_t>(k), static_cast<uint16_t>(g_appKey));
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(),
                                      "and the menu draws nothing for a key it ignored");
-    TEST_ASSERT_TRUE_MESSAGE(r.d.getMenu().isOpen(), "nor does it close");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, r.d.getMenu().selectedIndex(),
+    TEST_ASSERT_TRUE_MESSAGE(r.menu.model().isOpen(), "nor does it close");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, r.menu.model().selectedIndex(),
                                     "nor does the selection move");
     ++expected;
   }
@@ -510,7 +534,7 @@ void test_transport_keys_fall_through_to_the_application_while_the_menu_is_open(
   ASSERT_RESULT(Ok, r.d.pressKey(Key::RollDown, KeyEdge::Click, KeySource::Local));
   pumpUntilIdle(r.d);
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_appKeys, "the wheel is the menu's while it is open");
-  TEST_ASSERT_EQUAL_UINT8(1, r.d.getMenu().selectedIndex());
+  TEST_ASSERT_EQUAL_UINT8(1, r.menu.model().selectedIndex());
   drain(r.link);
 }
 

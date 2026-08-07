@@ -87,6 +87,10 @@
 #      include "carminat/CarminatMenuRenderer.h"
 #      include "carminat/MenuController.h"
 #      include "carminat/IPage.h"
+// The three above, wired, as one object the APPLICATION owns. It is not a member of
+// CarminatDisplay any more — see the header for why a CAN driver should not hold a UI state
+// machine, and what that cost every panel that had no menu.
+#      include "carminat/CarminatMenu.h"
 #    endif
 #  endif
 #endif

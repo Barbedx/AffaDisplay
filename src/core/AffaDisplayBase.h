@@ -275,17 +275,13 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // BOTH DEFAULT TO Local: in the radio role we RECEIVE key frames. KeySource::Wire is for
   // impersonating the panel at a REAL radio and PUTS PHANTOM PRESSES ON THE BUS — harmless
   // on a bench, input other modules may act on in a vehicle. docs/API.md §7b.6.
+  //
+  // nav(NavCommand, KeySource) WAS HERE AND IS GONE, with the menu hotkey trio beside it.
+  // Both were UI policy on a CAN driver: nav() existed to turn six menu intents into key
+  // presses, and it could only do so because the base carried three virtual menu seams.
+  // The intents live where the menu does now — affa::CarminatMenu — and impersonating the
+  // panel is still pressKey(k, e, KeySource::Wire), which is all nav() ever did on the wire.
   [[nodiscard]] Result pressKey(Key k, KeyEdge e, KeySource src = KeySource::Local);
-  [[nodiscard]] Result nav(NavCommand c,          KeySource src = KeySource::Local);
-
-#if AFFA_ENABLE_MENU
-  // The gesture that OPENS the menu — UI policy, not wire format. Affects OPENING ONLY;
-  // once open, key routing into the menu is not configurable. nav(NavCommand::Open) works
-  // regardless, so clearing the hotkey makes it the only way in.
-  void setMenuHotkey(Key k, KeyEdge e);   // default: Key::Load, KeyEdge::Hold
-  void clearMenuHotkey();                 // no gesture opens the menu; only nav(Open)
-  bool menuHotkey(Key& k, KeyEdge& e) const;   // false when cleared
-#endif
 
   // ---- rendering: default bodies refuse with NotSupported -------------------
   Submitted setText(const char*, uint8_t digit = 255) override;
@@ -337,18 +333,15 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // key frame.
   virtual bool shouldAutoAck(const Frame& f) const { (void)f; return true; }
 
-  // The base applies the menu hotkey, routes to the panel's menu, then falls through to
-  // KeyCb and EventKind::Key. Panels override to ADD routing, NEVER to replace the
-  // fall-through.
+  // Deliver a decoded key to the application. Panels override to ADD routing (UpdateList
+  // intercepts the AMS gesture), NEVER to replace the fall-through to KeyCb.
+  //
+  // It used to apply a menu hotkey and consult three virtual menu seams first. Those are
+  // gone: a UI state machine deciding whether the application hears a key press is not the
+  // CAN driver's business, and every panel paid for the seams whether or not it had a menu.
+  // affa::CarminatMenu::routeKey() is that logic, moved verbatim, on the application's side
+  // of KeyCb where it can be replaced.
   virtual void routeKey(Key k, KeyEdge e);
-
-#if AFFA_ENABLE_MENU
-  // The three seams the menu hangs on. Here rather than in the panel because the hotkey
-  // POLICY is the base's, while the Menu type is panel-specific.
-  virtual bool menuOpen() const { return false; }
-  virtual bool openMenu()       { return false; }   // true if a menu exists and opened
-  virtual bool routeKeyToMenu(Key k, KeyEdge e) { (void)k; (void)e; return false; }
-#endif
 
   // The Wire half of pressKey(): `03 89 <hi> <lo|hold>` then LITERAL ZERO, not
   // packetFiller() — that is what the capture shows. NotSupported for a Hold edge on a
@@ -677,11 +670,6 @@ class AffaDisplayBase : public IDisplay, public IPanel {
 #if AFFA_ENABLE_ISOTP_RX
   TextCb     _textCb = nullptr;   void* _textCtx = nullptr;
   isotp::Reassembler _textAsm;
-#endif
-#if AFFA_ENABLE_MENU
-  Key        _hotkey     = Key::Load;      // the OEM default, replaceable
-  KeyEdge    _hotkeyEdge = KeyEdge::Hold;
-  bool       _hotkeyOn   = true;
 #endif
 };
 

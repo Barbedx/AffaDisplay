@@ -29,6 +29,7 @@
 
 #include "../affa_test_support.h"
 #include "carminat/CarminatDisplay.h"
+#include "carminat/CarminatMenu.h"
 #include "proto/IsoTp.h"
 #include "proto/ScreenDecode.h"
 
@@ -99,8 +100,12 @@ struct Bench {
   affa::LoopbackLink<128> link;
   affatest::FakeClock clk;
   CarminatDisplay d;
+  // THE MENU IS THE APPLICATION'S NOW, so the rig owns one — which is exactly the wiring an
+  // application writes. It used to be a member of the display, reached through getMenu();
+  // see carminat/CarminatMenu.h for why a CAN driver should not hold a UI state machine.
+  CarminatMenu menu;
 
-  Bench() : d(link, clk) {}
+  Bench() : d(link, clk), menu(d) {}
 
   // What examples/90_bench_ota does in setup(): build the demo menu, install the tap, then
   // begin() and complete the handshake.
@@ -125,7 +130,7 @@ struct Bench {
   void run(int passes) { for (int i = 0; i < passes; ++i) step(); }
 
   void buildDemoMenu() {
-    Menu& m = d.getMenu();
+    Menu& m = menu.model();
     MenuItem bright;
     bright.label = "Bright";
     bright.fields[0] = integerField(50, 0, 100, 5, 4, "%");
@@ -228,16 +233,16 @@ void test_endpoint_popup_shown_then_hidden(void) {
 void test_endpoint_menu_with_three_parameters_renders(void) {
   Bench b; b.begin();
 
-  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Open));
+  TEST_ASSERT_TRUE_MESSAGE(b.menu.nav(NavCommand::Open), "the menu must consume this intent");
   b.apply();
-  TEST_ASSERT_TRUE_MESSAGE(b.d.getMenu().isOpen(), "nav(Open) did not open the menu");
-  TEST_ASSERT_EQUAL_UINT8_MESSAGE(3, b.d.getMenu().count(), "the demo menu must have 3 items");
+  TEST_ASSERT_TRUE_MESSAGE(b.menu.model().isOpen(), "nav(Open) did not open the menu");
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(3, b.menu.model().count(), "the demo menu must have 3 items");
 
   // Walk to the three-field item and prove all three values are on the glass at once.
-  (void)b.d.nav(NavCommand::Next); b.apply();
+  (void)b.menu.nav(NavCommand::Next); b.apply();
   g_txN = 0;
-  (void)b.d.nav(NavCommand::Next); b.apply();
-  TEST_ASSERT_EQUAL_UINT8(2, b.d.getMenu().selectedIndex());
+  (void)b.menu.nav(NavCommand::Next); b.apply();
+  TEST_ASSERT_EQUAL_UINT8(2, b.menu.model().selectedIndex());
 
   const ScreenModel s = decodeTx();
   const bool onRow0 = strstr(s.row0, "12") && strstr(s.row0, "30");
@@ -249,32 +254,32 @@ void test_endpoint_menu_with_three_parameters_renders(void) {
 // "навігація по меню через команди (наступний, попередній, вліво, вправо, вибрати)"
 void test_endpoint_navigation_commands(void) {
   Bench b; b.begin();
-  Menu& m = b.d.getMenu();
+  Menu& m = b.menu.model();
 
-  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Open)); b.apply();
+  TEST_ASSERT_TRUE_MESSAGE(b.menu.nav(NavCommand::Open), "the menu must consume this intent"); b.apply();
   TEST_ASSERT_EQUAL_UINT8(0, m.selectedIndex());
 
   // наступний / попередній
-  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Next)); b.apply();
+  TEST_ASSERT_TRUE_MESSAGE(b.menu.nav(NavCommand::Next), "the menu must consume this intent"); b.apply();
   TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, m.selectedIndex(), "Next did not advance");
-  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Prev)); b.apply();
+  TEST_ASSERT_TRUE_MESSAGE(b.menu.nav(NavCommand::Prev), "the menu must consume this intent"); b.apply();
   TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, m.selectedIndex(), "Prev did not go back");
 
   // вибрати — enters edit on the integer item
-  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Select)); b.apply();
+  TEST_ASSERT_TRUE_MESSAGE(b.menu.nav(NavCommand::Select), "the menu must consume this intent"); b.apply();
   TEST_ASSERT_TRUE_MESSAGE(m.isEditing(), "Select did not enter edit mode");
 
   // вправо / вліво — the value moves by the field's step and comes back
   const int before = m.item(0)->fields[0].value;
-  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Increase)); b.apply();
+  TEST_ASSERT_TRUE_MESSAGE(b.menu.nav(NavCommand::Increase), "the menu must consume this intent"); b.apply();
   const int up = m.item(0)->fields[0].value;
   TEST_ASSERT_TRUE_MESSAGE(up > before, "Increase did not raise the value");
-  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Decrease)); b.apply();
+  TEST_ASSERT_TRUE_MESSAGE(b.menu.nav(NavCommand::Decrease), "the menu must consume this intent"); b.apply();
   TEST_ASSERT_EQUAL_INT_MESSAGE(before, m.item(0)->fields[0].value,
                                 "Decrease did not undo Increase");
 
   // назад — leaves edit, then closes
-  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Back)); b.apply();
+  TEST_ASSERT_TRUE_MESSAGE(b.menu.nav(NavCommand::Back), "the menu must consume this intent"); b.apply();
   TEST_ASSERT_FALSE_MESSAGE(m.isEditing(), "Back did not leave edit mode");
 }
 
@@ -282,18 +287,18 @@ void test_endpoint_navigation_commands(void) {
 // three-field item is in the demo menu at all.
 void test_select_walks_all_three_fields(void) {
   Bench b; b.begin();
-  Menu& m = b.d.getMenu();
-  (void)b.d.nav(NavCommand::Open); b.apply();
-  (void)b.d.nav(NavCommand::Next); b.apply();
-  (void)b.d.nav(NavCommand::Next); b.apply();
+  Menu& m = b.menu.model();
+  (void)b.menu.nav(NavCommand::Open); b.apply();
+  (void)b.menu.nav(NavCommand::Next); b.apply();
+  (void)b.menu.nav(NavCommand::Next); b.apply();
   TEST_ASSERT_EQUAL_UINT8(2, m.selectedIndex());
 
-  (void)b.d.nav(NavCommand::Select); b.apply();
+  (void)b.menu.nav(NavCommand::Select); b.apply();
   TEST_ASSERT_TRUE_MESSAGE(m.isEditing(), "Select did not enter edit on the 3-field item");
 
   int seen = 1;
   for (int i = 0; i < 4 && m.isEditing(); ++i) {
-    (void)b.d.nav(NavCommand::Select);
+    (void)b.menu.nav(NavCommand::Select);
     b.apply();
     if (m.isEditing()) ++seen;
   }

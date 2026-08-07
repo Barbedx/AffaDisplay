@@ -41,22 +41,7 @@ using namespace carminat;
 CarminatDisplay::CarminatDisplay(ICanLink& link, IClock& clock,
                                  carminat::CarminatHelloProfile hello)
     : AffaDisplayBase(link, clock, carminat::syncProfile(hello), carminat::kFuncIds,
-                       carminat::kFuncCount)
-#if AFFA_ENABLE_MENU
-      ,
-      // The AffaDisplayBase subobject is fully constructed before any member is, so binding
-      // the renderer's IPanel& to *this here is well defined. The model then binds to the
-      // renderer and the controller to the model, which is why they are declared in that
-      // order.
-      _menuRenderer(*this),
-      _menu(_menuRenderer, CarminatMenuRenderer::geometry(), "Main Menu"),
-      _menuCtrl(_menu)
-#endif
-{
-#if AFFA_ENABLE_MENU
-  initializeMenu();
-#endif
-}
+                       carminat::kFuncCount) {}
 
 bool CarminatDisplay::supports(Feature f) const {
   switch (f) {
@@ -133,50 +118,9 @@ bool CarminatDisplay::decodeText(const uint8_t* payload, uint8_t len, char* out,
 }
 #endif
 
-void CarminatDisplay::onPoll() {
-#if AFFA_ENABLE_MENU
-  // The active page's own tick. It is called once per poll() and is NOT a period: a page
-  // that needs one compares against its own clock. Nothing here counts calls.
-  _menuCtrl.tickCurrentPage();
-#endif
-}
-
-// ---------------------------------------------------------------------------
-// Menu seams
-// ---------------------------------------------------------------------------
-
-#if AFFA_ENABLE_MENU
-
-void CarminatDisplay::initializeMenu() {
-  // EMPTY, on purpose. What the items are called, what a field means, what happens when
-  // it changes and whether that change is written to NVS is the application's business —
-  // it fills the menu through getMenu(). The extracted version read Preferences here and
-  // hard-wired a car's diagnostics list.
-  _menu.onClose(&CarminatDisplay::onMenuClosed, this);
-}
-
-// The OEM convention when the menu closes: the panel goes back to the source banner. It
-// ships as a default because it is the convention, and it is replaceable because it is
-// policy — MenuModel::onClose() overwrites it.
-void CarminatDisplay::onMenuClosed(void* ctx) {
-  // Deliberately dropped: this is a CloseCb with nowhere to report to, and the banner is
-  // cosmetic. An application that needs the verdict installs its own onClose().
-  (void)static_cast<CarminatDisplay*>(ctx)->setText("RENAULT", 0);
-}
-
-bool CarminatDisplay::menuOpen() const { return _menu.isOpen(); }
-
-bool CarminatDisplay::openMenu() {
-  // An active page owns every key, including the hotkey. Refusing here is what makes the
-  // base fall through to routeKeyToMenu(), which hands the key to the page.
-  if (_menuCtrl.currentPage() != nullptr) return false;
-  _menu.open();
-  return _menu.isOpen();          // false on an empty menu, which never opens
-}
-
-bool CarminatDisplay::routeKeyToMenu(Key k, KeyEdge e) { return _menuCtrl.routeKey(k, e); }
-
-#endif  // AFFA_ENABLE_MENU
+// onPoll() IS GONE FROM THIS PANEL. Its whole body was the menu page's tick, and the menu
+// is affa::CarminatMenu now — the application calls CarminatMenu::tick() from its own task,
+// which is strictly better: a page that does slow work can no longer stall the protocol.
 
 // setText — 0x151, docs/WIRE-SPEC.md §8.1
 //

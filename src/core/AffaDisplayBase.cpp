@@ -397,19 +397,15 @@ bool AffaDisplayBase::decodeKeyFrame(const Frame& f, Key& out, KeyEdge& edge) {
 }
 
 void AffaDisplayBase::routeKey(Key k, KeyEdge e) {
-  bool consumed = false;
-
-#if AFFA_ENABLE_MENU
-  if (_hotkeyOn && k == _hotkey && e == _hotkeyEdge && !menuOpen()) consumed = openMenu();
-  if (!consumed) consumed = routeKeyToMenu(k, e);
-#endif
-
-  // Keys the menu did not consume fall through to the application.
+  // ONE DELIVERY, AND THIS IS IT.
   //
-  // This used to be followed by a second delivery of the same key to the Layer 2 event
-  // sink — which fired whether or not the menu had consumed it, so the two disagreed by
-  // design. With that sink gone there is one key delivery, and KeyCb is it.
-  if (!consumed && _keyCb) _keyCb(k, e, _keyCtx);
+  // It used to be three statements: apply the menu hotkey, offer the key to the panel's
+  // menu, and only then fall through to KeyCb — followed by a second delivery to the Layer 2
+  // event sink, which fired whether or not the menu had consumed the key, so the library's
+  // two deliveries of the same press disagreed by design. The sink is gone and so is the
+  // menu; a key press reaches the application, and what the application does with it —
+  // including handing it to affa::CarminatMenu::routeKey() — is above this line.
+  if (_keyCb) _keyCb(k, e, _keyCtx);
 }
 
 Result AffaDisplayBase::transmitKey(Key k, KeyEdge e) {
@@ -453,65 +449,16 @@ Result AffaDisplayBase::pressKey(Key k, KeyEdge e, KeySource src) {
   if (hasSource(src, KeySource::Wire)) wire = transmitKey(k, e);
 
   if (hasSource(src, KeySource::Local)) {
-    bool observable = (_keyCb != nullptr);
-#if AFFA_ENABLE_MENU
-    observable = observable || _hotkeyOn || menuOpen();
-#endif
+    // A Local press with no KeyCb installed has nowhere to land, and saying Ok would be a
+    // lie. The menu used to count as an observer here too; it is the application's now, and
+    // an application that owns a menu has a KeyCb by definition — that is how it feeds it.
+    const bool observable = (_keyCb != nullptr);
     routeKey(k, e);
     if (!observable && wire == Result::Ok) return Result::NotSupported;
   }
   return wire;
 }
 
-Result AffaDisplayBase::nav(NavCommand c, KeySource src) {
-#if !AFFA_ENABLE_MENU
-  (void)c; (void)src;
-  return Result::NotSupported;
-#else
-  // Increase/Decrease are a coarse step on a held detent, and a held detent has no wire
-  // representation at all — which is also the reason input has to be a seam rather than a
-  // source: the coarse-step feature exists in the menu and the panel physically cannot
-  // reach it.
-  if (hasSource(src, KeySource::Wire) &&
-      (c == NavCommand::Increase || c == NavCommand::Decrease))
-    return Result::NotSupported;
-
-  Key     k = Key::Load;
-  KeyEdge e = KeyEdge::Click;
-  switch (c) {
-    case NavCommand::Open:     k = Key::Load;     e = KeyEdge::Hold;  break;
-    case NavCommand::Back:     k = Key::Load;     e = KeyEdge::Hold;  break;
-    case NavCommand::Select:   k = Key::Load;     e = KeyEdge::Click; break;
-    case NavCommand::Next:     k = Key::RollDown; e = KeyEdge::Click; break;
-    case NavCommand::Prev:     k = Key::RollUp;   e = KeyEdge::Click; break;
-    case NavCommand::Increase: k = Key::RollDown; e = KeyEdge::Hold;  break;
-    case NavCommand::Decrease: k = Key::RollUp;   e = KeyEdge::Hold;  break;
-  }
-
-  if (c == NavCommand::Open) {
-    // Open is an INTENT, not a gesture: it opens the menu regardless of the hotkey
-    // setting. Clearing the hotkey exists precisely so that this becomes the only way in.
-    Result wire = Result::Ok;
-    if (hasSource(src, KeySource::Wire)) wire = transmitKey(k, e);
-    if (hasSource(src, KeySource::Local) && !openMenu()) return Result::NotSupported;
-    return wire;
-  }
-
-  return pressKey(k, e, src);
-#endif
-}
-
-#if AFFA_ENABLE_MENU
-void AffaDisplayBase::setMenuHotkey(Key k, KeyEdge e) {
-  _hotkey = k; _hotkeyEdge = e; _hotkeyOn = true;
-}
-void AffaDisplayBase::clearMenuHotkey() { _hotkeyOn = false; }
-bool AffaDisplayBase::menuHotkey(Key& k, KeyEdge& e) const {
-  if (!_hotkeyOn) return false;
-  k = _hotkey; e = _hotkeyEdge;
-  return true;
-}
-#endif
 
 // ---------------------------------------------------------------------------
 // Options and observation

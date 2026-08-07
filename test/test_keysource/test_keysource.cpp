@@ -203,25 +203,31 @@ void test_a_self_frame_arriving_inbound_is_presented_as_Tx(void) {
 }
 
 // ---------------------------------------------------------------------------
-// nav() carries the same source semantics
+// A held detent has no wire representation
 // ---------------------------------------------------------------------------
 
-void test_nav_refuses_a_coarse_step_on_the_wire(void) {
-  // Increase/Decrease are a held detent, which has no wire representation at all. That is
-  // also the reason input has to be a SEAM rather than a source: the coarse-step feature
-  // exists in the menu and the panel physically cannot reach it.
+// This was test_nav_refuses_a_coarse_step_on_the_wire, asserted through
+// AffaDisplayBase::nav(NavCommand, KeySource). That call is gone — driving a menu and
+// impersonating the panel at another radio were two jobs in one function, and the coarse
+// step is the seam where they contradicted each other. The property it was really testing
+// belongs to transmitKey() and is asserted here directly.
+void test_a_held_wheel_detent_cannot_be_put_on_the_wire(void) {
+  // 0x0101|0xC0 and 0x0141|0xC0 are BOTH 0x01C1, so a hold on a wheel code cannot be
+  // encoded at all: transmitting it would send the CLICK form and step fine where the
+  // caller asked coarse. The coarse step exists in a menu, which is software; the panel
+  // physically cannot produce it.
   Rig r;
   r.up(false);
-  ASSERT_RESULT(NotSupported, r.d.nav(NavCommand::Increase, KeySource::Wire));
-  ASSERT_RESULT(NotSupported, r.d.nav(NavCommand::Decrease, KeySource::Both));
+  ASSERT_RESULT(NotSupported, r.d.pressKey(Key::RollDown, KeyEdge::Hold, KeySource::Wire));
+  ASSERT_RESULT(NotSupported, r.d.pressKey(Key::RollUp,   KeyEdge::Hold, KeySource::Both));
   TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(), "and nothing reaches the bus");
 
-  // The click-edge commands do map to real frames.
-  ASSERT_RESULT(Ok, r.d.nav(NavCommand::Next, KeySource::Wire));
+  // The click edge does map to a real frame.
+  ASSERT_RESULT(Ok, r.d.pressKey(Key::RollDown, KeyEdge::Click, KeySource::Wire));
   Frame f;
   TEST_ASSERT_TRUE(r.link.takeSent(f));
   static const uint8_t kWant[8] = {0x03, 0x89, 0x01, 0x41, 0x00, 0x00, 0x00, 0x00};
-  TEST_ASSERT_EQUAL_HEX8_ARRAY_MESSAGE(kWant, f.data, 8, "Next is a RollDown click");
+  TEST_ASSERT_EQUAL_HEX8_ARRAY_MESSAGE(kWant, f.data, 8, "a RollDown click");
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +244,6 @@ int main(int, char**) {
   RUN_TEST(test_fromSelf_is_dropped_before_the_ack_matcher);
   RUN_TEST(test_fromSelf_is_dropped_before_the_key_decoder);
   RUN_TEST(test_a_self_frame_arriving_inbound_is_presented_as_Tx);
-  RUN_TEST(test_nav_refuses_a_coarse_step_on_the_wire);
+  RUN_TEST(test_a_held_wheel_detent_cannot_be_put_on_the_wire);
   return UNITY_END();
 }

@@ -26,17 +26,18 @@
 #include "../core/AffaDisplayBase.h"
 #include "CarminatConstants.h"
 
+// THE MENU IS NOT PART OF THIS CLASS ANY MORE. It is affa::CarminatMenu, in
+// carminat/CarminatMenu.h, and the application owns it — see that header for why. Only the
+// type aliases below stay here, because they are the application-facing spelling and every
+// example uses them; they name types in widget/, which is where the menu lives.
 #if AFFA_ENABLE_MENU
 #  include "../widget/MenuModel.h"
-#  include "CarminatMenuRenderer.h"
-#  include "MenuController.h"
-#  include "IPage.h"
 #endif
 
 namespace affa {
 
 #if AFFA_ENABLE_MENU
-// THE TYPE BEHIND getMenu() CHANGED, AND THESE NAMES DID NOT.
+// THE TYPE BEHIND THE MENU CHANGED, AND THESE NAMES DID NOT.
 //
 // `affa::Menu` used to be src/carminat/Menu/Menu.{h,cpp} — a two-row sliding-window menu with
 // the panel welded into it (row0/row1, a fixed pair of char[AFFA_MENU_ROW_MAX], the count<=2
@@ -259,29 +260,6 @@ class CarminatDisplay final : public AffaDisplayBase {
                                     uint8_t offset2 = carminat::kInfoOffset2,
                                     uint8_t infoPrefix = carminat::kInfoPrefix);
 
-#if AFFA_ENABLE_MENU
-  // The library hands out an EMPTY menu with a header; the application fills it. See
-  // docs/API.md §8.7 for the complete item-building example — nothing else is needed and
-  // no library internal is touched.
-  //
-  // THE NAME IS THE SAME AND THE TYPE IS NOT: this used to return `affa::Menu&`, the Carminat
-  // widget; it now returns the display-agnostic model that replaced it. See the alias block
-  // above for what a caller can observe.
-  widget::MenuModel& getMenu() { return _menu; }
-
-  // The adapter between that model and this panel's glass. Exposed for the one thing the
-  // model deliberately cannot answer — lastResult(), the panel's verdict on the last redraw —
-  // and for tracing (lastWasHighlightOnly(), the row text as it went out).
-  CarminatMenuRenderer&       menuRenderer()       { return _menuRenderer; }
-  const CarminatMenuRenderer& menuRenderer() const { return _menuRenderer; }
-
-  // The page stack. The application owns every page; pushing one gives it every key until
-  // it is popped, including the menu hotkey.
-  void  pushPage(IPage* p) { _menuCtrl.pushPage(p); }
-  void  popPage()          { _menuCtrl.popPage(); }
-  IPage* currentPage() const { return _menuCtrl.currentPage(); }
-#endif
-
  protected:
   uint8_t  packetFiller() const override { return carminat::kFiller; }
   uint16_t keyTxId()      const override { return carminat::kIdKeyPressed; }
@@ -290,7 +268,6 @@ class CarminatDisplay final : public AffaDisplayBase {
   }
 
   bool onFrame(const Frame& f) override;
-  void onPoll() override;
 
 #if AFFA_ENABLE_ISOTP_RX
   // 0x151 is the id WE render on, so inbound text there is another head unit's — the only
@@ -300,12 +277,6 @@ class CarminatDisplay final : public AffaDisplayBase {
                   uint8_t outSize) const override;
 #endif
 
-#if AFFA_ENABLE_MENU
-  bool menuOpen() const override;
-  bool openMenu() override;
-  bool routeKeyToMenu(Key k, KeyEdge e) override;
-#endif
-
  private:
   // enqueue() + "translate kNoTicket into the reason". Every builder ends in this.
   Submitted submit(uint16_t funcId, const uint8_t* data, uint8_t len,
@@ -313,17 +284,10 @@ class CarminatDisplay final : public AffaDisplayBase {
                               Priority priority = Priority::Normal,
                               bool reassertAfterSession = false);
 
-#if AFFA_ENABLE_MENU
-  void initializeMenu();                    // creates an EMPTY menu; the app fills it
-  static void onMenuClosed(void* ctx);      // -> setText("RENAULT", 0), the OEM default
-
-  // DECLARATION ORDER IS CONSTRUCTION ORDER, and the model binds a reference to the renderer:
-  // the renderer must be declared first, and the controller last because it binds to the
-  // model.
-  CarminatMenuRenderer _menuRenderer;
-  widget::MenuModel    _menu;
-  MenuController       _menuCtrl;
-#endif
+  // NO MEMBERS. Every render above is a pure function of its arguments into a stack buffer,
+  // which is what makes a call from any task safe with nothing to check — see
+  // docs/REFACTOR-2.0.md §2. The three that used to be here were the menu widget's, and it
+  // is affa::CarminatMenu now.
 };
 
 }  // namespace affa
