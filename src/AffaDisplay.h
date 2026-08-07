@@ -66,7 +66,6 @@
 // against nothing but C++17. docs/API.md §4b.
 #if AFFA_ENABLE_TASK
 #  if __has_include("rtos/AffaTask.h")
-#    include "rtos/AffaCommand.h"
 #    include "rtos/AffaTask.h"
 #  endif
 #endif

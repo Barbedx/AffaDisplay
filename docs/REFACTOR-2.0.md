@@ -367,6 +367,30 @@ must not move a byte at any point — **no step in this plan changes the wire.**
      power-cycle, a `setText`, then a bitmap — has no capture behind it. The card needs ±1
      stepping per byte and a one-click "restore captured", because a sweep whose baseline is
      lost is a sweep that proves nothing.
+
+     **HUMAN-IN-THE-LOOP, NOT AUTOMATED, AND THE REASON IS THE ORACLE.** A fully scripted
+     sweep is the obvious idea and it does not work here: the library can report that the
+     panel ACKed, and an ACK is not a render. A panel that is not powered acknowledges a
+     screen it never lights — every counter says success and the glass stays black, which is
+     the failure mode with no symptom this project has already paid for twice. So 256
+     automated steps produce 256 rows of "ACK ok" and no information.
+
+     What works is the hybrid: the console drives the sequence and writes a row per step —
+     the exact bytes sent, in wire order — and the operator supplies the one bit no machine
+     on this bus has, "did the glass change", as a single click. One click per step instead
+     of retyping a byte, and the output is a LABELLED dataset.
+
+     Two things it has to get right or the table lies:
+     * **The preamble is part of the experiment.** The reported symptom needs power-cycle →
+       `setText` → bitmap, so the sweep must replay that before each value. Without it the
+       first few steps run in one panel state and the rest in another.
+     * **One byte at a time, never a pair.** Three captures in which two bytes moved
+       together are what produced the "one icon field" misreading that the list-screen sweep
+       took apart. `test_each_nav_header_byte_moves_its_own_byte_and_nothing_else` is the
+       library-side half of that rule.
+
+     Log rows should land in the shape of `docs/captures/*.csv` so `tools/decode_oem_csv.py`
+     and the existing corpus analysis apply unchanged.
    * **A wire preview before every send.** The menu icon/thumb cards already show the bytes
      they are about to put on the bus; it should be the rule, not one card's feature. It is
      also what makes a sweep safe to run against glass: you see what you are about to change

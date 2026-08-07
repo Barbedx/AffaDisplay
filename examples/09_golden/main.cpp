@@ -225,7 +225,7 @@ uint32_t g_nextPopupAt  = 0;
 uint32_t g_warmUntil  = 0;
 constexpr uint32_t kWarmUpMs = 750;   // the panel does not announce that its glass is lit
 
-void onDone(affa::rtos::TxRequest, affa::Result r, void*) {
+void onDone(affa::TxTicket, affa::Result r, void*) {
   g_lastResult = static_cast<uint8_t>(r);
   if (r == affa::Result::Ok) ++g_okCount; else ++g_failCount;
   g_screenBusy = false;
@@ -282,7 +282,7 @@ void pumpRows(uint32_t now) {
   // this scroll rate. It is deliberately NOT Urgent — it is a demo, not an alarm, and a
   // render that overtakes an in-flight screen is the preemption trap the library documents.
   if (!g_popupUp && static_cast<int32_t>(now - g_nextPopupAt) >= 0) {
-    if (g_task.showPopupText(kPopupText) != affa::rtos::kNoRequest) {
+    if (g_display.showPopupText(kPopupText).ok()) {
       g_screenBusy   = true;
       g_popupUp      = true;
       g_popupShownAt = now;
@@ -290,7 +290,7 @@ void pumpRows(uint32_t now) {
     return;
   }
   if (g_popupUp && static_cast<int32_t>(now - (g_popupShownAt + kPopupHoldMs)) >= 0) {
-    if (g_task.hidePopup() != affa::rtos::kNoRequest) {
+    if (g_display.hidePopup().ok()) {
       g_screenBusy  = true;
       g_popupUp     = false;
       g_nextPopupAt = g_popupShownAt + kPopupEveryMs;
@@ -312,7 +312,7 @@ void pumpRows(uint32_t now) {
     return;
 
   // ONE CALL. No ISO-TP, no flow control, no ACK handling — the library owns all of it.
-  if (g_task.showFullscreenText(w[0], w[1], w[2]) != affa::rtos::kNoRequest) {
+  if (g_display.showFullscreenText(w[0], w[1], w[2]).ok()) {
     g_screenBusy = true;
     for (int i = 0; i < 3; ++i) snprintf(g_shown[i], sizeof(g_shown[i]), "%s", w[i]);
     return;
@@ -692,7 +692,7 @@ void routes() {
     const String v = r->getParam("v") ? r->getParam("v")->value() : String();
     if (v.length() != 4) return r->reply(400, "text/plain", "HHMM, four digits\n");
     // Another one-liner: the library builds `05 56 'H''H''M''M'` and owns the ACK.
-    const bool ok = g_task.setTime(v.c_str()) != affa::rtos::kNoRequest;
+    const bool ok = g_display.setTime(v.c_str()).ok();
     logmsg("clock %s -> %s", v.c_str(), ok ? "queued" : "REFUSED");
     return seeOther(r);
   });
@@ -782,7 +782,7 @@ void setup() {
   // display that was never begun, and a callback installed after the task is running would
   // miss whatever it had already delivered.
   g_display.onFrame(&onWire, nullptr);
-  g_task.onComplete(&onDone, nullptr);
+  g_display.onComplete(&onDone, nullptr);
   g_display.begin();
   if (!g_task.start(g_display))
     Serial.println("[task] start() FAILED - nothing will be polled");

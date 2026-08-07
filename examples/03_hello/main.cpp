@@ -61,16 +61,20 @@ affa::rtos::AffaTask  g_task;     // the library's own poll task
 enum class Step : uint8_t { WaitLink, Power, WarmUp, Text, Time, Done };
 
 Step     g_step  = Step::WaitLink;
-uint32_t g_req   = 0;      // the request we are waiting on
+affa::TxTicket g_req = affa::kNoTicket;   // the ticket we are waiting on
 uint32_t g_until = 0;      // deadline for the current wait
 
 // Set by the library on its own task when a render completes; read by loop().
-volatile uint32_t g_ackReq = 0;
+volatile affa::TxTicket g_ackReq = affa::kNoTicket;
 volatile uint8_t  g_ackRes = 0;
 volatile uint32_t g_ackSeq = 0;
 uint32_t          g_seen   = 0;
 
-void onDone(affa::rtos::TxRequest req, affa::Result r, void*) {
+// ONE HANDLE SPACE SINCE 2.0. This used to take an affa::rtos::TxRequest — a second handle
+// the owned task minted because a posted render could not return the real ticket. Renders
+// go through the display now and hand back the ticket directly, so there is one type here
+// and no translation table behind it.
+void onDone(affa::TxTicket req, affa::Result r, void*) {
   g_ackReq = req;
   g_ackRes = static_cast<uint8_t>(r);
   ++g_ackSeq;          // publish last, so a reader that sees the bump sees the values
@@ -100,7 +104,7 @@ void setup() {
   // THE ORDER IS THE CONTRACT: callbacks, then begin(), then start(). start() refuses a
   // display that was never begun, and a callback installed after the task is running would
   // miss whatever it had already delivered.
-  g_task.onComplete(&onDone, nullptr);
+  g_display.onComplete(&onDone, nullptr);
   g_display.begin();
 
   if (!g_task.start(g_display))
@@ -126,7 +130,7 @@ void loop() {
       // waiting for it here would wait for ever.
       if (affa::hasFlag(st.sync, affa::SyncState::Failed)) break;
       Serial.println("[seq] panel answering — powering the display on");
-      g_req  = g_task.setPower(true);
+      g_req  = g_display.setPower(true).ticket;
       g_seen = g_ackSeq;
       g_step = Step::Power;
       break;
@@ -143,7 +147,7 @@ void loop() {
       // The one hard-coded delay in the file, and it is here because the panel does not
       // announce that its glass is lit.
       if (!affa::expired(now, g_until)) break;
-      g_req  = g_task.setText("SUCCESS");
+      g_req  = g_display.setText("SUCCESS").ticket;
       g_seen = g_ackSeq;
       g_step = Step::Text;
       break;
@@ -151,7 +155,7 @@ void loop() {
     case Step::Text:
       if (ackState() != 1) break;
       Serial.println("[seq] \"SUCCESS\" delivered — setting the clock");
-      g_req  = g_task.setTime("1000");        // HHMM, four ASCII digits: 10:00
+      g_req  = g_display.setTime("1000").ticket;  // HHMM, four ASCII digits: 10:00
       g_seen = g_ackSeq;
       g_step = Step::Time;
       break;

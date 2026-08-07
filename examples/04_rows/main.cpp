@@ -310,7 +310,7 @@ uint32_t          g_ackSeen = 0;    // loop()'s cursor into that stream
 uint32_t g_inFlight    = 0;         // the request we are waiting on; 0 when idle
 uint32_t g_flightSince = 0;
 
-void onRenderComplete(affa::rtos::TxRequest req, affa::Result r, void*) {
+void onRenderComplete(affa::TxTicket req, affa::Result r, void*) {
   g_ackReq = static_cast<uint32_t>(req);
   g_ackRes = static_cast<uint8_t>(r);
   ++g_ackSeq;
@@ -682,8 +682,9 @@ void restart(const char* why) {
 
 // Enqueue one render and arm the wait. Every issue path goes through here so the timeout and
 // the counters cannot disagree.
-bool issue(affa::rtos::TxRequest req, uint32_t now, const char* what) {
-  if (req == affa::rtos::kNoRequest) {
+bool issue(const affa::Submitted& s, uint32_t now, const char* what) {
+  const affa::TxTicket req = s.ticket;
+  if (req == affa::kNoTicket) {
     // The command queue refused: it is full, or the task is not running. Not worth a retry
     // this iteration — the next one is 10 ms away.
     logmsg("%s: command queue refused", what);
@@ -711,7 +712,7 @@ void pumpScreen(uint32_t now) {
   if (g_popupUp) {
     if (!affa::expired(now, g_popupUntil)) return;   // still showing; do not repaint under it
     if (g_inFlight) return;                          // wait for our own last render first
-    if (issue(g_task.hidePopup(), now, "hidePopup")) {
+    if (issue(g_display.hidePopup(), now, "hidePopup")) {
       g_popupUp = false;
       g_popupNextMs = now + kPopupEveryMs;
       // The rows have not moved as far as RowScreen knows, but the GLASS has changed under
@@ -725,7 +726,7 @@ void pumpScreen(uint32_t now) {
     if (g_inFlight) return;
     char msg[AFFA_TEXT_MAX];
     snprintf(msg, sizeof(msg), "POPUP #%lu", static_cast<unsigned long>(g_popupCount + 1));
-    if (issue(g_task.showPopupText(msg), now, "showPopupText")) {
+    if (issue(g_display.showPopupText(msg), now, "showPopupText")) {
       ++g_popupCount;
       g_popupUp    = true;
       g_popupUntil = now + kPopupHoldMs;
@@ -743,7 +744,7 @@ void pumpScreen(uint32_t now) {
   char win[RowScreen::kRows][RowScreen::kCell];
   g_rows.render(now, win);
 
-  if (!issue(g_task.showFullscreenText(win[0], win[1], win[2]), now, "showFullscreenText"))
+  if (!issue(g_display.showFullscreenText(win[0], win[1], win[2]), now, "showFullscreenText"))
     return;
 
   // LATCH ON ACCEPTANCE, NOT ON COMPLETION. A render that is superseded before it reaches
@@ -1114,7 +1115,7 @@ void routes() {
              static_cast<unsigned long>(st.iterations),
              static_cast<unsigned long>(st.pollLateMaxUs),
              static_cast<unsigned long>(st.pollLateAtMs),
-             static_cast<unsigned long>(st.queueDropped),
+             static_cast<unsigned long>(st.postDropped),
              static_cast<unsigned long>(st.stackFreeBytes));
     return r->reply(200, "text/plain", b);
   });
@@ -1749,7 +1750,7 @@ void setup() {
   // THE ORDER IS THE CONTRACT: callbacks, then begin(), then start(). start() refuses a
   // display that was never begun, and a callback installed after the task is running would
   // miss whatever it had already delivered.
-  g_task.onComplete(&onRenderComplete, nullptr);
+  g_display.onComplete(&onRenderComplete, nullptr);
   g_display.onSync(&onSync, nullptr);
   g_display.onFrame(&onTap, nullptr);       // Layer 0: everything, both directions
   g_display.begin();
@@ -1866,7 +1867,7 @@ void loop() {
 
     case Step::PowerOn:
       if (g_inFlight) break;
-      if (!issue(g_task.setPower(true), now, "setPower")) break;
+      if (!issue(g_display.setPower(true), now, "setPower")) break;
       g_powerIsOn = true;
       // NOT `now + kWarmUpMs`. The glass does not begin lighting when we ENQUEUE the power
       // command, it begins when the panel ACKNOWLEDGES it — and on a busy bus that ACK can
@@ -1901,7 +1902,7 @@ void loop() {
       // through the same one-render-in-flight discipline as everything else.
       if (g_powerWanted != g_powerIsOn) {
         if (g_inFlight) break;
-        if (!issue(g_task.setPower(g_powerWanted), now, "setPower")) break;
+        if (!issue(g_display.setPower(g_powerWanted), now, "setPower")) break;
         g_powerIsOn = g_powerWanted;
         logmsg("display %s", g_powerIsOn ? "on" : "off");
         if (g_powerIsOn) g_rows.invalidate();   // it comes back blank
@@ -1913,7 +1914,7 @@ void loop() {
       // completion accounting above is what latches g_clockOk and what schedules the
       // retry after a failure or an abandonment.
       if (!g_clockOk && !g_clockReq && !g_inFlight && affa::expired(now, g_clockRetryAt)) {
-        if (issue(g_task.setTime(kClockHHMM), now, "setTime")) {
+        if (issue(g_display.setTime(kClockHHMM), now, "setTime")) {
           g_clockReq     = g_inFlight;
           g_clockRetryAt = now + kClockRetryMs;
         }

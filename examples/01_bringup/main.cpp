@@ -243,7 +243,7 @@ const char* stepName(Step s) {
   return "?";
 }
 
-void onDone(affa::rtos::TxRequest req, affa::Result r, void*) {
+void onDone(affa::TxTicket req, affa::Result r, void*) {
   g_ackReq = static_cast<uint32_t>(req);
   g_ackRes = static_cast<uint8_t>(r);
   ++g_ackSeq;
@@ -263,8 +263,9 @@ bool linked(const affa::rtos::Status& st) {
 }
 
 // Issue one render and arm the wait. Centralised so every step retries identically.
-void issue(affa::rtos::TxRequest req, Step next, uint32_t now, const char* what) {
-  if (req == affa::rtos::kNoRequest) {
+void issue(const affa::Submitted& s, Step next, uint32_t now, const char* what) {
+  const affa::TxTicket req = s.ticket;
+  if (req == affa::kNoTicket) {
     // The command queue refused us — it is full, or the task is not running. Neither is
     // worth spending an attempt on; come back shortly.
     logmsg("%s: command queue refused", what);
@@ -330,7 +331,7 @@ void sequenceTick(uint32_t now) {
     // -- power on ----------------------------------------------------------
     case Step::SendPower:
       if (!affa::expired(now, g_deadline)) return;
-      issue(g_task.setPower(true), Step::AckPower, now, "power");
+      issue(g_display.setPower(true), Step::AckPower, now, "power");
       return;
 
     case Step::AckPower:
@@ -358,7 +359,7 @@ void sequenceTick(uint32_t now) {
     // -- the text ----------------------------------------------------------
     case Step::SendText:
       if (!affa::expired(now, g_deadline)) return;
-      issue(g_task.setText(kText), Step::AckText, now, "text");
+      issue(g_display.setText(kText), Step::AckText, now, "text");
       return;
 
     case Step::AckText:
@@ -377,7 +378,7 @@ void sequenceTick(uint32_t now) {
     // -- the clock ---------------------------------------------------------
     case Step::SendTime:
       if (!affa::expired(now, g_deadline)) return;
-      issue(g_task.setTime(kTime), Step::AckTime, now, "time");
+      issue(g_display.setTime(kTime), Step::AckTime, now, "time");
       return;
 
     case Step::AckTime:
@@ -533,7 +534,7 @@ void jStatus() {
      linked(st) ? "true" : "false",
      st.registered ? "true" : "false",
      st.busy ? "true" : "false",
-     static_cast<unsigned>(st.queued), static_cast<unsigned>(st.cmdQueued));
+     static_cast<unsigned>(st.queued), static_cast<unsigned>(st.posted));
   jstr(resultName(st.lastResult));
   jf("},");
 
@@ -545,7 +546,7 @@ void jStatus() {
      static_cast<unsigned long>(st.iterations),
      static_cast<unsigned long>(st.pollLateMaxUs),
      static_cast<unsigned long>(st.pollLateAtMs),
-     static_cast<unsigned long>(st.queueDropped),
+     static_cast<unsigned long>(st.postDropped),
      static_cast<unsigned long>(st.foreignPolls),
      static_cast<unsigned long>(st.stackFreeBytes));
 
@@ -710,10 +711,18 @@ void pstr(PsychicRequest* r, const char* k, char* out, size_t n, const char* dfl
 
 esp_err_t replyJson(PsychicRequest* r) { return r->reply(200, "application/json", g_out); }
 
-esp_err_t replyReq(PsychicRequest* r, affa::rtos::TxRequest req) {
+// THE HANDLERS BELOW CALL THE DISPLAY FROM THE HTTP SERVER'S TASK, and since 2.0 that is
+// correct rather than lucky: the render builds its bytes on this task's stack and crosses
+// into the poll task as data (docs/REFACTOR-2.0.md §3.4). It never blocks the handler.
+//
+// `reason` is worth reporting even on success: a refusal here is the caller's own mistake
+// (a bad argument, an unknown function), because everything else is held rather than
+// rejected and the real verdict arrives later through onComplete.
+esp_err_t replyReq(PsychicRequest* r, const affa::Submitted& s) {
   jclear();
-  jf("{\"req\":%lu,\"accepted\":%s}", static_cast<unsigned long>(req),
-     req == affa::rtos::kNoRequest ? "false" : "true");
+  jf("{\"ticket\":%lu,\"accepted\":%s,\"reason\":%u}",
+     static_cast<unsigned long>(s.ticket), s ? "true" : "false",
+     static_cast<unsigned>(s.result));
   return replyJson(r);
 }
 
@@ -764,19 +773,19 @@ void routes() {
   });
 
   g_server.on("/api/power", HTTP_GET, [](PsychicRequest* r) {
-    return replyReq(r, g_task.setPower(pnum(r, "on", 1) != 0));
+    return replyReq(r, g_display.setPower(pnum(r, "on", 1) != 0));
   });
 
   g_server.on("/api/text", HTTP_GET, [](PsychicRequest* r) {
     char t[32];
     pstr(r, "t", t, sizeof(t), kText);
-    return replyReq(r, g_task.setText(t));
+    return replyReq(r, g_display.setText(t));
   });
 
   g_server.on("/api/time", HTTP_GET, [](PsychicRequest* r) {
     char t[8];
     pstr(r, "t", t, sizeof(t), kTime);
-    return replyReq(r, g_task.setTime(t));
+    return replyReq(r, g_display.setTime(t));
   });
 
   // THE TEST THAT SETTLES WHOSE FAULT A BAD BUS IS. Shut our own transmitter and keep
@@ -938,7 +947,7 @@ void setup() {
   //    display that was never begun, and callbacks installed after the task is running
   //    would miss whatever it had already delivered.
   g_display.onFrame(&onTap, nullptr);
-  g_task.onComplete(&onDone, nullptr);
+  g_display.onComplete(&onDone, nullptr);
   g_display.begin();
 
   // Shut the gate BEFORE the task starts polling, so a quiet boot is quiet from the very
