@@ -16,12 +16,12 @@ namespace affa {
 struct IPanel {
   virtual ~IPanel() = default;
 
-  [[nodiscard]] virtual Result showMenu(const char* header, const char* row0,
-                                        const char* row1, uint8_t scrollIndicator) = 0;
-  [[nodiscard]] virtual Result setText(const char* text, uint8_t digit) = 0;
-  [[nodiscard]] virtual Result highlightItem(uint8_t row) = 0;
-  [[nodiscard]] virtual Result showPopupText(const char* text, uint8_t icon,
-                                             uint8_t srcIcon, uint8_t fmt) = 0;
+  virtual Submitted showMenu(const char* header, const char* row0,
+                             const char* row1, uint8_t scrollIndicator) = 0;
+  virtual Submitted setText(const char* text, uint8_t digit) = 0;
+  virtual Submitted highlightItem(uint8_t row) = 0;
+  virtual Submitted showPopupText(const char* text, uint8_t icon,
+                                  uint8_t srcIcon, uint8_t fmt) = 0;
 };
 
 } // namespace affa

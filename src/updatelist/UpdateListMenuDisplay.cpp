@@ -26,7 +26,7 @@ using namespace updatelist;
 // input shorter than the field, so the spaces only ever survived for a full-width string.
 // Every golden vector shows 0x00. Do not change it to spaces.
 
-Result UpdateListMenuDisplay::setText(const char* text, uint8_t /*digit*/) {
+Submitted UpdateListMenuDisplay::setText(const char* text, uint8_t /*digit*/) {
   char t[AFFA_TEXT_MAX];
   toAscii(text, t, sizeof(t));
 

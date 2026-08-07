@@ -233,7 +233,7 @@ const char* sendFramed(uint16_t id, const uint8_t* msg, uint16_t len) {
   n += len;
   g_wireLen = n;
 
-  const affa::TxTicket t = g_display.enqueueExternal(id, g_wire, n);
+  const affa::TxTicket t = g_display.enqueueExternal(id, g_wire, n).ticket;
   if (t == affa::kNoTicket) {
     snprintf(g_lastResult, sizeof(g_lastResult), "reject:%d",
              static_cast<int>(g_display.lastResult()));
@@ -255,7 +255,7 @@ const char* sendShort(uint16_t id, const uint8_t* msg, uint8_t len) {
   if (len == 0 || len > 7) return "control messages are single-frame only";
   buf[0] = len;
   memcpy(buf + 1, msg, len);
-  const affa::TxTicket t = g_display.enqueue(id, buf, static_cast<uint8_t>(len + 1));
+  const affa::TxTicket t = g_display.enqueue(id, buf, static_cast<uint8_t>(len + 1)).ticket;
   if (t == affa::kNoTicket) {
     logmsg("0x%03X control REJECTED (%d)", id, static_cast<int>(g_display.lastResult()));
     return "rejected — see /api/state";
@@ -446,8 +446,8 @@ const uint8_t* presetByName(const String& n) {
 // beats counting a row of identical characters at 48 px.
 const char kRuler[] = "----+----1----+----2----+----3----+----4";
 
-affa::Result sendScreen(const String& w, const String& a, const String& b, const String& c) {
-  affa::Result res = affa::Result::NotSupported;
+affa::Submitted sendScreen(const String& w, const String& a, const String& b, const String& c) {
+  affa::Submitted res = affa::Submitted::refused(affa::Result::NotSupported);
   if      (w == "menu")       res = g_display.showMenu(a.c_str(), b.c_str(), c.c_str());
   else if (w == "infomenu")   res = g_display.showInfoMenu(a.c_str(), b.c_str(), c.c_str());
   else if (w == "fullscreen") res = g_display.showFullscreenText(a.c_str(), b.c_str(), c.c_str());
@@ -460,7 +460,7 @@ affa::Result sendScreen(const String& w, const String& a, const String& b, const
   else if (w == "text")       res = g_display.setText(a.c_str());
   else if (w == "hi0")        res = g_display.highlightItem(0);
   else if (w == "hi1")        res = g_display.highlightItem(1);
-  logmsg("screen %s(%u) -> %d", w.c_str(), a.length(), static_cast<int>(res));
+  logmsg("screen %s(%u) -> %d", w.c_str(), a.length(), static_cast<int>(res.result));
   return res;
 }
 
@@ -514,10 +514,10 @@ const char* sendMenuN(const String& title, const String& csv, uint8_t first, uin
   }
   if (n == 0) return "no items";
 
-  const affa::Result r = g_display.showMenuN(g_menuBuf, sizeof(g_menuBuf), title.c_str(),
-                                             items, n, first, sel, scroll);
-  if (r != affa::Result::Ok) { logmsg("showMenuN(%u) -> %d", n, static_cast<int>(r)); return "refused"; }
-  g_menuTicket = g_display.lastEnqueued();
+  const affa::Submitted r = g_display.showMenuN(g_menuBuf, sizeof(g_menuBuf), title.c_str(),
+                                                items, n, first, sel, scroll);
+  if (!r) { logmsg("showMenuN(%u) -> %d", n, static_cast<int>(r.result)); return "refused"; }
+  g_menuTicket = r.ticket;
   g_menuBusy   = true;
   logmsg("showMenuN %u items, %u bytes", n,
          affa::CarminatDisplay::menuScreenBytes(n));
@@ -704,10 +704,10 @@ void routes() {
   // /api/oemtext below is for when the question is specifically about the OEM's command byte.
   g_server.on("/api/text", HTTP_GET, [](PsychicRequest* r) {
     const String t = r->hasParam("t") ? r->getParam("t")->value() : String("RENAULT");
-    const affa::Result res = g_display.setText(t.c_str());
-    logmsg("setText \"%s\" -> %d", t.c_str(), static_cast<int>(res));
-    return r->reply(res == affa::Result::Ok ? 200 : 409, "text/plain",
-                    res == affa::Result::Ok ? "text queued" : "setText refused");
+    const affa::Submitted res = g_display.setText(t.c_str());
+    logmsg("setText \"%s\" -> %d", t.c_str(), static_cast<int>(res.result));
+    return r->reply(res.ok() ? 200 : 409, "text/plain",
+                    res.ok() ? "text queued" : "setText refused");
   });
 
   // The radio's own text message, every documented parameter exposed. Defaults are the
@@ -742,10 +742,10 @@ void routes() {
     const String b = r->hasParam("b") ? r->getParam("b")->value() : String("ROW ONE");
     const String c = r->hasParam("c") ? r->getParam("c")->value() : String("ROW TWO");
     if (w.length() == 0) return r->reply(400, "text/plain", "unknown screen");
-    const affa::Result res = sendScreen(w, a, b, c);
+    const affa::Submitted res = sendScreen(w, a, b, c);
     String m(w);
-    m += (res == affa::Result::Ok) ? " queued" : " refused";
-    return r->reply(res == affa::Result::Ok ? 200 : 409, "text/plain", m.c_str());
+    m += (res.ok()) ? " queued" : " refused";
+    return r->reply(res.ok() ? 200 : 409, "text/plain", m.c_str());
   });
 
   // HOW WIDE IS THE FIELD, in one send. A column ruler puts a digit at every tenth
@@ -757,10 +757,10 @@ void routes() {
     if (n < 1) n = 1;
     if (n > static_cast<long>(strlen(kRuler))) n = strlen(kRuler);
     const String s = String(kRuler).substring(0, n);
-    const affa::Result res = sendScreen(w, s, s, s);
-    logmsg("ruler %s n=%ld -> %d", w.c_str(), n, static_cast<int>(res));
-    return r->reply(res == affa::Result::Ok ? 200 : 409, "text/plain",
-                    res == affa::Result::Ok ? "ruler sent - now count on the glass"
+    const affa::Submitted res = sendScreen(w, s, s, s);
+    logmsg("ruler %s n=%ld -> %d", w.c_str(), n, static_cast<int>(res.result));
+    return r->reply(res.ok() ? 200 : 409, "text/plain",
+                    res.ok() ? "ruler sent - now count on the glass"
                                             : "refused");
   });
 
@@ -784,10 +784,10 @@ void routes() {
 
   g_server.on("/api/time", HTTP_GET, [](PsychicRequest* r) {
     const String t = r->hasParam("t") ? r->getParam("t")->value() : String("1056");
-    const affa::Result res = g_display.setTime(t.c_str());
-    logmsg("setTime \"%s\" -> %d", t.c_str(), static_cast<int>(res));
-    return r->reply(res == affa::Result::Ok ? 200 : 409, "text/plain",
-                    res == affa::Result::Ok ? "time queued" : "setTime refused");
+    const affa::Submitted res = g_display.setTime(t.c_str());
+    logmsg("setTime \"%s\" -> %d", t.c_str(), static_cast<int>(res.result));
+    return r->reply(res.ok() ? 200 : 409, "text/plain",
+                    res.ok() ? "time queued" : "setTime refused");
   });
 
   // The whole captured opening, in order, so the bitmap is judged in the state the OEM put
@@ -837,7 +837,7 @@ void routes() {
       else {
         memcpy(g_wire, buf, n);
         g_wireLen = static_cast<uint16_t>(n);
-        const affa::TxTicket t = g_display.enqueueExternal(id, g_wire, g_wireLen);
+        const affa::TxTicket t = g_display.enqueueExternal(id, g_wire, g_wireLen).ticket;
         if (t == affa::kNoTicket) err = "rejected — see /api/state";
         else { g_navBusy = true; g_navTicket = t; ++g_navSent; err = nullptr; }
       }
@@ -889,10 +889,10 @@ void routes() {
   // The 4-byte nav tick the OEM alternates at 820 ms with nothing else on the bus.
   g_server.on("/api/navtick", HTTP_GET, [](PsychicRequest* r) {
     const bool phase = r->hasParam("p") && r->getParam("p")->value() == "1";
-    const affa::Result res = g_display.navTick(phase);
-    logmsg("navTick(%d) -> %d", phase ? 1 : 0, static_cast<int>(res));
-    return r->reply(res == affa::Result::Ok ? 200 : 409, "text/plain",
-                    res == affa::Result::Ok ? "tick sent" : "refused");
+    const affa::Submitted res = g_display.navTick(phase);
+    logmsg("navTick(%d) -> %d", phase ? 1 : 0, static_cast<int>(res.result));
+    return r->reply(res.ok() ? 200 : 409, "text/plain",
+                    res.ok() ? "tick sent" : "refused");
   });
 
   g_server.on("/api/sweep", HTTP_GET, [](PsychicRequest* r) {

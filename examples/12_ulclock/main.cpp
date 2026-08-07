@@ -192,7 +192,7 @@ void fire(const Candidate& c) {
     // and the reason lands in lastResult(). Dropping the ticket would turn a refusal into a
     // frame that silently never went out, which in a probe like this reads as "the panel
     // ignored it" and would be the wrong conclusion entirely.
-    const affa::TxTicket t = g_display.enqueue(c.id, c.data, c.len);
+    const affa::TxTicket t = g_display.enqueue(c.id, c.data, c.len).ticket;
     Serial.printf("[%8lu] >> TX   %03X%s   %s   accepted=%s%s\n",
                   static_cast<unsigned long>(millis()), static_cast<unsigned>(c.id), bytes,
                   c.name, t != affa::kNoTicket ? "yes" : "NO — ",
@@ -254,7 +254,7 @@ void loop() {
     char label[16];
     snprintf(label, sizeof(label), "TRY %u  %02u:%02u", static_cast<unsigned>(g_cand + 1),
              static_cast<unsigned>(kHour), static_cast<unsigned>(kMin));
-    if (g_display.setText(label) == affa::Result::Ok) {
+    if (g_display.setText(label).ok()) {
       g_busy  = true;
       g_try   = 1;
       g_nextAt = now + 400;         // let the glass settle before the candidate lands

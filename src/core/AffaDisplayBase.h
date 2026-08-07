@@ -190,14 +190,15 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   bool      synced()     const;   // !hasFlag(state, Failed)
   bool      registered() const;   //  hasFlag(state, FuncsReg)
   bool      busy()       const;   // a job is in flight or queued
-  Result    lastResult() const;   // Result of the most recently COMPLETED ticket, except
-                                  // immediately after a rejected enqueue, where it holds
-                                  // the rejection reason
+  Result    lastResult() const;   // Result of the most recently COMPLETED ticket. DIAGNOSTIC
+                                  // ONLY since 2.0 — a rejection now travels back in
+                                  // Submitted::result, on the calling task, instead of being
+                                  // left here for the caller to race another task for.
   TxTicket  lastTicket() const;   // that ticket
-  // The most recent successful enqueue, INCLUDING one made inside a render call — how an
-  // application that used setText() learns which ticket to match in onComplete. READ IT
-  // IMMEDIATELY: the next enqueue overwrites it, including a render the menu makes for you.
-  TxTicket  lastEnqueued() const;
+  // lastEnqueued() WAS HERE AND IS GONE. Its whole contract was "READ IT IMMEDIATELY: the
+  // next enqueue overwrites it, including a render the menu makes for you" — a documented
+  // footgun that existed only because a render returned a bare Result and had nowhere to put
+  // the handle. Every render now returns Submitted{ticket, result}; take it from there.
   uint8_t   queued()     const;   // jobs waiting behind the active one
   Stats     stats()      const;   // forwarded from the link
 
@@ -223,10 +224,12 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // Copies the bytes and returns immediately; they need not outlive the call. `opt` carries
   // the coalescing slot, priority and per-message opt-out — docs/API.md §3b.4.
   //
-  // [[nodiscard]] because kNoTicket is the ONLY signal of rejection, with the reason in
-  // lastResult(). Dropping it turns a QueueFull into a screen that never appears.
-  [[nodiscard]] TxTicket enqueue(uint16_t funcId, const uint8_t* data, uint8_t len,
-                                 TxOptions opt = TxOptions{});
+  // THE CHOKE POINT. Every render in every panel, present and future, funnels through here —
+  // CarminatDisplay::submit() and UpdateListBase::enqueueRender() are two-line wrappers — so
+  // this is the one place the cross-task boundary has to live, and putting it here is what
+  // makes a render added later thread-safe on the day it is written. docs/REFACTOR-2.0.md §2.
+  Submitted enqueue(uint16_t funcId, const uint8_t* data, uint8_t len,
+                    TxOptions opt = TxOptions{});
 
   // ZERO-COPY, FOR PAYLOADS THAT DO NOT FIT AFFA_MAX_PAYLOAD. Stores `data` by POINTER:
   // the bytes must stay valid and unchanged until the ticket completes. Everything else —
@@ -240,8 +243,8 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // Coalescing and reassertAfterSession are REFUSED with BadArgument: both re-copy a
   // payload into a slot that no longer owns the storage, and both are meaningless for a
   // screen the caller already holds. Ceiling is AFFA_MAX_EXTERNAL_PAYLOAD.
-  [[nodiscard]] TxTicket enqueueExternal(uint16_t funcId, const uint8_t* data, uint16_t len,
-                                         TxOptions opt = TxOptions{});
+  Submitted enqueueExternal(uint16_t funcId, const uint8_t* data, uint16_t len,
+                            TxOptions opt = TxOptions{});
 
   // A SHORT HEADER THE CALLER BUILT, THEN A LONG BODY THE CALLER OWNS — sent as one ISO-TP
   // message. `prefix` is COPIED (so a stack buffer is fine); `body` is BORROWED and must
@@ -253,9 +256,9 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // would force the caller to keep the header alive too. Splitting costs neither.
   //
   // Same refusals as enqueueExternal(): no RenderSlot, no reassertAfterSession.
-  [[nodiscard]] TxTicket enqueueSplit(uint16_t funcId, const uint8_t* prefix, uint8_t prefixLen,
-                                      const uint8_t* body, uint16_t bodyLen,
-                                      TxOptions opt = TxOptions{});
+  Submitted enqueueSplit(uint16_t funcId, const uint8_t* prefix, uint8_t prefixLen,
+                         const uint8_t* body, uint16_t bodyLen,
+                         TxOptions opt = TxOptions{});
 
   // ---- preemption ----------------------------------------------------------
   // Drop every job QUEUED AND NOT YET STARTED. The job on the wire is untouched, and so are
@@ -293,19 +296,19 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   bool menuHotkey(Key& k, KeyEdge& e) const;   // false when cleared
 #endif
 
-  // ---- rendering: default bodies return NotSupported ------------------------
-  [[nodiscard]] Result setText(const char*, uint8_t digit = 255) override;
-  [[nodiscard]] Result setTime(const char*) override;
-  [[nodiscard]] Result setPower(bool) override;
-  [[nodiscard]] Result showMenu(const char*, const char*, const char*,
-                                uint8_t = 0x0B) override;
-  [[nodiscard]] Result highlightItem(uint8_t) override;
-  [[nodiscard]] Result showPopupText(const char*, uint8_t = 0x09, uint8_t = 0xFF,
-                                     uint8_t = 0x60) override;
-  [[nodiscard]] Result hidePopup() override;
-  [[nodiscard]] Result showFullscreenText(const char*, const char*, const char*) override;
-  [[nodiscard]] Result showConfirmBox(const char*, const char*, const char*) override;
-  [[nodiscard]] Result showInfoPopup(const char*, const char*, const char*) override;
+  // ---- rendering: default bodies refuse with NotSupported -------------------
+  Submitted setText(const char*, uint8_t digit = 255) override;
+  Submitted setTime(const char*) override;
+  Submitted setPower(bool) override;
+  Submitted showMenu(const char*, const char*, const char*,
+                     uint8_t = 0x0B) override;
+  Submitted highlightItem(uint8_t) override;
+  Submitted showPopupText(const char*, uint8_t = 0x09, uint8_t = 0xFF,
+                          uint8_t = 0x60) override;
+  Submitted hidePopup() override;
+  Submitted showFullscreenText(const char*, const char*, const char*) override;
+  Submitted showConfirmBox(const char*, const char*, const char*) override;
+  Submitted showInfoPopup(const char*, const char*, const char*) override;
 
  protected:
   // ---- panel hooks ---------------------------------------------------------
@@ -535,6 +538,13 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   void invalidateInFlightForSession(uint32_t now);
   void advanceSessionEpoch();
   void completeTicket(TxTicket t, Result r);
+  // The shared tail of enqueue/enqueueExternal/enqueueSplit: everything from the capacity
+  // check onwards, against a ticket that has ALREADY been minted. Split out because the
+  // ticket is now issued before the decision to queue is taken — it has to be, so that a
+  // call from another task can be handed its handle without waiting for the owning task to
+  // drain anything (docs/REFACTOR-2.0.md §3.4).
+  Submitted admit(TxTicket t, uint16_t funcId, const uint8_t* data, uint16_t len,
+                  const TxOptions& opt, const uint8_t* ext, uint16_t prefixLen);
   // Stores the new state and fires SyncCb + EventKind::SyncChanged, but only on an actual
   // change. `extra` fires additionally (Registered / PeerLost); pass SyncChanged for none.
   void setSync(SyncState s, EventKind extra);
@@ -632,9 +642,13 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // Bumped at every panel-session boundary. A job is stamped only once it starts, so a
   // late ACK from a previous registration/control transfer cannot mutate the new session.
   uint32_t  _sessionEpoch = 1;
-  TxTicket  _nextTicket    = 1;
+  // ATOMIC SINCE 2.0, and it is the one field that had to become so. A ticket is minted at
+  // SUBMIT time now — on whichever task called the render — so two tasks can be inside
+  // nextTicket() at once. Everything else in this class is still written by the poll owner
+  // alone; this counter is the single point where an arbitrary caller touches the object,
+  // which is exactly why the crossing is cheap.
+  volatile uint32_t _nextTicket = 1;
   TxTicket  _lastCompleted = kNoTicket;
-  TxTicket  _lastEnqueued  = kNoTicket;
   Result    _lastResult    = Result::Ok;
   const uint16_t* _funcIds;
   uint8_t   _funcCount;

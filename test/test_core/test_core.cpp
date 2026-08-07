@@ -21,6 +21,21 @@
 
 using namespace affa;
 
+// DELIBERATELY NOT affa_test_support.h. This suite is the panel-agnostic one — it drives
+// AffaDisplayBase against a LoopbackLink and includes no family header — and the shared
+// support header brings the Carminat helpers with it. So ASSERT_RESULT is spelled here,
+// once, with the same two-spelling behaviour: renders return Submitted, the few calls that
+// enqueue nothing (pressKey, nav) return a bare Result, and both are acceptance verdicts.
+namespace {
+inline Result resultOf(Result r) { return r; }
+inline Result resultOf(const Submitted& s) { return s.result; }
+}  // namespace
+
+#define ASSERT_RESULT(want, got)                                            \
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(static_cast<uint8_t>(affa::Result::want), \
+                                  static_cast<uint8_t>(resultOf(got)),      \
+                                  "Result::" #want " expected")
+
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -280,7 +295,7 @@ void test_lazy_registration_then_isotp_frames_are_byte_exact(void) {
 
   TxOptions opt;
   opt.slot = RenderSlot::Text;
-  const TxTicket t = d.enqueue(0x151, payload, sizeof(payload), opt);
+  const TxTicket t = d.enqueue(0x151, payload, sizeof(payload), opt).ticket;
   TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
   TEST_ASSERT_FALSE_MESSAGE(d.registered(), "FUNCSREG must not latch before the probes");
 
@@ -303,8 +318,7 @@ void test_lazy_registration_then_isotp_frames_are_byte_exact(void) {
   Frame f;
   TEST_ASSERT_FALSE_MESSAGE(link.takeSent(f), "22 bytes is exactly three frames");
   TEST_ASSERT_TRUE_MESSAGE(d.registered(), "FUNCSREG latches after the last probe");
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Result::Ok),
-                          static_cast<uint8_t>(d.lastResult()));
+  ASSERT_RESULT(Ok, d.lastResult());
   TEST_ASSERT_EQUAL_UINT16(t, d.lastTicket());
   TEST_ASSERT_FALSE(d.busy());
 }
@@ -322,10 +336,9 @@ void test_enqueue_is_gated_and_bounded(void) {
   // AFFA_TX_HOLD_MS, and started when the panel answers. What must still be true is that
   // NOTHING REACHES THE WIRE before the handshake — that half is unchanged and is what the
   // frame assertion below pins.
-  const TxTicket held = d.enqueue(0x151, &one, 1);
+  const TxTicket held = d.enqueue(0x151, &one, 1).ticket;
   TEST_ASSERT_NOT_EQUAL_MESSAGE(kNoTicket, held, "a render into a dead link is HELD, not refused");
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Result::Ok),
-                          static_cast<uint8_t>(d.lastResult()));
+  ASSERT_RESULT(Ok, d.lastResult());
   drainSent(link);
   for (int i = 0; i < 5; ++i) d.poll();
   {
@@ -336,19 +349,70 @@ void test_enqueue_is_gated_and_bounded(void) {
   }
   d.abortPending();          // clear it so the rest of this test starts from empty
 
+  // A REFUSAL CARRIES ITS OWN REASON NOW. Each of these used to be two assertions — the
+  // ticket came back kNoTicket, then the reason was fetched from lastResult() afterwards —
+  // and the second half was only correct because nothing could enqueue in between. Both
+  // halves are in the returned Submitted, so both are checked on the value itself.
   establishSync(d, link);
-  TEST_ASSERT_EQUAL_UINT16(kNoTicket, d.enqueue(0x999, &one, 1));
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Result::UnknownFunc),
-                          static_cast<uint8_t>(d.lastResult()));
-  TEST_ASSERT_EQUAL_UINT16(kNoTicket, d.enqueue(0x151, nullptr, 4));
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Result::BadArgument),
-                          static_cast<uint8_t>(d.lastResult()));
+  {
+    const Submitted s = d.enqueue(0x999, &one, 1);
+    TEST_ASSERT_EQUAL_UINT16(kNoTicket, s.ticket);
+    ASSERT_RESULT(UnknownFunc, s);
+  }
+  {
+    const Submitted s = d.enqueue(0x151, nullptr, 4);
+    TEST_ASSERT_EQUAL_UINT16(kNoTicket, s.ticket);
+    ASSERT_RESULT(BadArgument, s);
+  }
 
   uint8_t big[AFFA_MAX_PAYLOAD];
   std::memset(big, 0x5A, sizeof(big));
-  TEST_ASSERT_EQUAL_UINT16(kNoTicket, d.enqueue(0x151, big, AFFA_MAX_PAYLOAD + 1));
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Result::TooLong),
-                          static_cast<uint8_t>(d.lastResult()));
+  {
+    const Submitted s = d.enqueue(0x151, big, AFFA_MAX_PAYLOAD + 1);
+    TEST_ASSERT_EQUAL_UINT16(kNoTicket, s.ticket);
+    ASSERT_RESULT(TooLong, s);
+  }
+}
+
+// THE HANDLE SPACE, PINNED. 2.0 mints the ticket at submit time from an atomic counter, so
+// that a render called from any task can be handed its handle without waiting for the task
+// that owns the queue. Two properties have to hold for that to be worth anything, and
+// neither was asserted anywhere before:
+//
+//   * every accepted submission gets a DISTINCT handle — a repeat would make onComplete
+//     ambiguous, which is the failure the old TxTicket/TxRequest translation table existed
+//     to avoid and which a shared counter would reintroduce;
+//   * kNoTicket is never issued, because zero is the refusal.
+//
+// The wrap itself is not exercised here — it needs 65 535 submissions — but it is the
+// reason nextTicket() folds the wrap into a modulo instead of branching on 0xFFFF: a
+// read-compare-write between two callers could hand both of them 1.
+void test_every_accepted_submission_gets_its_own_handle(void) {
+  LoopbackLink<> link;
+  FakeClock clk;
+  TestDisplay d(link, clk);
+  d.begin();
+  establishSync(d, link);
+  d.setSelfAck(true);
+
+  // Comfortably more submissions than the queue is deep, drained as we go, so this walks
+  // the counter rather than the queue.
+  constexpr int kRuns = 64;
+  TxTicket seen[kRuns] = {0};
+  uint8_t  payload[4]  = {0xA0, 0x00, 0x00, 0x00};
+
+  for (int i = 0; i < kRuns; ++i) {
+    payload[1] = static_cast<uint8_t>(i);
+    const Submitted s = d.enqueue(0x151, payload, sizeof(payload));
+    ASSERT_RESULT(Ok, s);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(kNoTicket, s.ticket, "zero is the refusal, never a handle");
+    seen[i] = s.ticket;
+    for (int p = 0; p < 8 && d.busy(); ++p) d.poll();
+  }
+
+  for (int i = 0; i < kRuns; ++i)
+    for (int j = i + 1; j < kRuns; ++j)
+      TEST_ASSERT_NOT_EQUAL_MESSAGE(seen[i], seen[j], "two submissions shared a handle");
 }
 
 void test_coalescing_keeps_one_slot_and_aborts_the_rest(void) {
@@ -376,7 +440,7 @@ void test_coalescing_keeps_one_slot_and_aborts_the_rest(void) {
   uint8_t v[4] = {0, 0, 0, 0};
   for (int i = 0; i < 100; ++i) {
     v[0] = static_cast<uint8_t>(i);
-    TEST_ASSERT_NOT_EQUAL(kNoTicket, d.enqueue(0x151, v, sizeof(v), opt));
+    TEST_ASSERT_NOT_EQUAL(kNoTicket, d.enqueue(0x151, v, sizeof(v), opt).ticket);
   }
 
   // A repeated render of one slot occupies exactly ONE queue slot regardless of render
@@ -411,17 +475,16 @@ void test_abort_pending_leaves_the_in_flight_job_alone(void) {
   TxOptions menu;  menu.slot = RenderSlot::Menu;
   TxOptions text;  text.slot = RenderSlot::Text;
 
-  const TxTicket inFlight = d.enqueue(0x151, big, sizeof(big), menu);
+  const TxTicket inFlight = d.enqueue(0x151, big, sizeof(big), menu).ticket;
   d.poll();                                  // frame 0 of the menu is on the wire
-  const TxTicket queued = d.enqueue(0x151, &seed, 1, text);
+  const TxTicket queued = d.enqueue(0x151, &seed, 1, text).ticket;
   TEST_ASSERT_NOT_EQUAL(kNoTicket, queued);
   TEST_ASSERT_TRUE(d.pending(RenderSlot::Text));
 
   TEST_ASSERT_EQUAL_UINT8(1, d.abortPending());
   TEST_ASSERT_FALSE(d.pending(RenderSlot::Text));
   TEST_ASSERT_EQUAL_UINT16(queued, d.lastTicket());
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Result::Aborted),
-                          static_cast<uint8_t>(d.lastResult()));
+  ASSERT_RESULT(Aborted, d.lastResult());
 
   // A nested-equivalent second call finds nothing.
   TEST_ASSERT_EQUAL_UINT8(0, d.abortPending());
@@ -429,8 +492,7 @@ void test_abort_pending_leaves_the_in_flight_job_alone(void) {
   // The menu finishes untouched.
   for (int i = 0; i < 8; ++i) d.poll();
   TEST_ASSERT_EQUAL_UINT16(inFlight, d.lastTicket());
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Result::Ok),
-                          static_cast<uint8_t>(d.lastResult()));
+  ASSERT_RESULT(Ok, d.lastResult());
 }
 
 // ---------------------------------------------------------------------------
@@ -613,10 +675,8 @@ void test_unsupported_calls_report_instead_of_pretending(void) {
 
   // The legacy IDisplay returned NoError from silently no-op bodies, so calling one on a
   // panel that could not do it looked exactly like success.
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Result::NotSupported),
-                          static_cast<uint8_t>(d.setText("X")));
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Result::NotSupported),
-                          static_cast<uint8_t>(d.showConfirmBox("a", "b", "c")));
+  ASSERT_RESULT(NotSupported, d.setText("X"));
+  ASSERT_RESULT(NotSupported, d.showConfirmBox("a", "b", "c"));
   TEST_ASSERT_FALSE(d.supports(Feature::Menu));
   TEST_ASSERT_TRUE(d.supports(Feature::KeyTx));
 }
@@ -636,6 +696,7 @@ int main(int, char**) {
   RUN_TEST(test_peer_watchdog_is_a_millisecond_deadline);
   RUN_TEST(test_lazy_registration_then_isotp_frames_are_byte_exact);
   RUN_TEST(test_enqueue_is_gated_and_bounded);
+  RUN_TEST(test_every_accepted_submission_gets_its_own_handle);
   RUN_TEST(test_coalescing_keeps_one_slot_and_aborts_the_rest);
   RUN_TEST(test_abort_pending_leaves_the_in_flight_job_alone);
   RUN_TEST(test_key_decode_matches_the_wire_vectors);

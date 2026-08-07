@@ -56,10 +56,20 @@ bool AffaDisplayBase::handleAckFrame(const Frame& f) {
 // Transmit FSM
 // ---------------------------------------------------------------------------
 
+// THE ONE PLACE AN ARBITRARY TASK TOUCHES THIS OBJECT, so it is the one place that needs an
+// atomic. Every other field is written by the poll owner alone.
+//
+// Post-increment semantics, so the value returned is the one that was there — the same
+// numbering the pre-2.0 non-atomic version produced, which is what keeps the golden tests
+// comparing against literal ticket numbers valid.
+//
+// The wrap is folded into the modulo rather than branched on, because a compare-and-branch
+// between the fetch and the store is exactly the race this exists to avoid: two callers could
+// both read 0xFFFF and both write 1. `(v - 1) % 0xFFFF + 1` maps the free-running counter
+// onto 1..0xFFFF with no zero and no shared state between the two steps.
 TxTicket AffaDisplayBase::nextTicket() {
-  const TxTicket t = _nextTicket;
-  _nextTicket = (_nextTicket == 0xFFFF) ? 1 : static_cast<TxTicket>(_nextTicket + 1);
-  return t;
+  const uint32_t v = __atomic_fetch_add(&_nextTicket, 1u, __ATOMIC_RELAXED);
+  return static_cast<TxTicket>((v - 1u) % 0xFFFFu + 1u);
 }
 
 bool AffaDisplayBase::registrationQueued() const {
@@ -185,16 +195,25 @@ void AffaDisplayBase::removeJob(uint8_t index) {
   --_qCount;
 }
 
-TxTicket AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t len,
+Submitted AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t len,
                                    TxOptions opt) {
-  _lastEnqueued = kNoTicket;
-
   // PERMANENT REJECTIONS, and only these. Every one of them is a programming error the
   // caller can fix and no amount of waiting will: a null buffer, a payload past the
   // transport ceiling, an id this panel does not own. Rejecting is the whole point.
-  if (!data || len == 0)          { _lastResult = Result::BadArgument;  return kNoTicket; }
-  if (len > AFFA_MAX_PAYLOAD)     { _lastResult = Result::TooLong;      return kNoTicket; }
-  if (!knownFunc(funcId))         { _lastResult = Result::UnknownFunc;  return kNoTicket; }
+  //
+  // THEY ARE ALSO THE ONLY CHECKS THAT NEED NO LIBRARY STATE — `_funcIds` is fixed at
+  // construction — which is why they stay above the ticket mint. Step 4 of
+  // docs/REFACTOR-2.0.md puts the cross-task branch immediately below this block, so a
+  // foreign caller still gets these three answers synchronously, on its own task.
+  if (!data || len == 0)      { _lastResult = Result::BadArgument; return Submitted::refused(Result::BadArgument); }
+  if (len > AFFA_MAX_PAYLOAD) { _lastResult = Result::TooLong;     return Submitted::refused(Result::TooLong); }
+  if (!knownFunc(funcId))     { _lastResult = Result::UnknownFunc; return Submitted::refused(Result::UnknownFunc); }
+
+  // MINTED HERE, ABOVE EVERY STATE-DEPENDENT CHECK, and that placement is the whole point
+  // of 2.0's handle model: the caller must be able to be handed its ticket without waiting
+  // for the task that owns the queue to do anything. A ticket burned on a refusal below
+  // costs nothing — the counter wraps at 0xFFFF and no refusal returns one.
+  const TxTicket t = nextTicket();
 
   // The sole current durable control is Carminat power.  If a recovery replay is still
   // waiting in the queue, it represents an OLDER requested state.  Discard it before the
@@ -217,8 +236,9 @@ TxTicket AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t 
   // AFFA_TX_HOLD_MS = 0 restores the old behaviour exactly.
   const uint32_t now = _clock.millis();
   if (AFFA_TX_HOLD_MS == 0 && !linkReady()) {
-    _lastResult = _link.isLive() ? Result::NoSync : Result::LinkDown;
-    return kNoTicket;
+    const Result r = _link.isLive() ? Result::NoSync : Result::LinkDown;
+    _lastResult = r;
+    return Submitted::refused(r);
   }
 
   // Lazy function registration, byte-identical to the legacy wire order: the first send
@@ -237,15 +257,13 @@ TxTicket AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t 
       static_cast<uint8_t>((ci >= 0 ? 0 : 1) + (needReg ? _funcCount : 0));
   if (_qCount + newSlots > AFFA_TX_QUEUE_DEPTH) {
     _lastResult = Result::QueueFull;
-    return kNoTicket;
+    return Submitted::refused(Result::QueueFull);
   }
 
   if (needReg) {
     (void)queueRegistrations();         // capacity was reserved above; the helper places
                                          // the wire-ordered probes ahead of held payloads
   }
-
-  const TxTicket t = nextTicket();
 
   if (ci >= 0) {
     // Latest value wins: replace the payload in place, keeping the superseded job's queue
@@ -281,25 +299,21 @@ TxTicket AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t 
       _queue[at] = tmp;
     }
 
-    _lastEnqueued = t;
     _lastResult   = Result::Ok;
     completeTicket(old, Result::Aborted);   // state first, callback second
-    return t;
+    return Submitted::accepted(t);
   }
 
   pushJob(funcId, data, len, JobKind::Payload, t, opt, insertIndexFor(opt.priority));
-  _lastEnqueued = t;
   _lastResult   = Result::Ok;
-  return t;
+  return Submitted::accepted(t);
 }
 
-TxTicket AffaDisplayBase::enqueueExternal(uint16_t funcId, const uint8_t* data, uint16_t len,
+Submitted AffaDisplayBase::enqueueExternal(uint16_t funcId, const uint8_t* data, uint16_t len,
                                           TxOptions opt) {
-  _lastEnqueued = kNoTicket;
-
-  if (!data || len == 0)                  { _lastResult = Result::BadArgument; return kNoTicket; }
-  if (len > AFFA_MAX_EXTERNAL_PAYLOAD)    { _lastResult = Result::TooLong;     return kNoTicket; }
-  if (!knownFunc(funcId))                 { _lastResult = Result::UnknownFunc; return kNoTicket; }
+  if (!data || len == 0)               { _lastResult = Result::BadArgument; return Submitted::refused(Result::BadArgument); }
+  if (len > AFFA_MAX_EXTERNAL_PAYLOAD) { _lastResult = Result::TooLong;     return Submitted::refused(Result::TooLong); }
+  if (!knownFunc(funcId))              { _lastResult = Result::UnknownFunc; return Submitted::refused(Result::UnknownFunc); }
   // Both would re-copy a payload into a slot that does not own its storage. Refuse rather
   // than silently ignore: a caller that asked for latest-value-wins and did not get it
   // would see stale screens and no error.
@@ -310,14 +324,17 @@ TxTicket AffaDisplayBase::enqueueExternal(uint16_t funcId, const uint8_t* data, 
   // coalesces, which is exactly what a borrowed payload wants.
   if (opt.slot != RenderSlot::None || opt.reassertAfterSession) {
     _lastResult = Result::BadArgument;
-    return kNoTicket;
+    return Submitted::refused(Result::BadArgument);
   }
   opt.coalesce = false;                 // belt and braces: nothing may replace these bytes
 
+  const TxTicket t = nextTicket();      // see enqueue(): above every state-dependent check
+
   const uint32_t now = _clock.millis();
   if (AFFA_TX_HOLD_MS == 0 && !linkReady()) {
-    _lastResult = _link.isLive() ? Result::NoSync : Result::LinkDown;
-    return kNoTicket;
+    const Result r = _link.isLive() ? Result::NoSync : Result::LinkDown;
+    _lastResult = r;
+    return Submitted::refused(r);
   }
   (void)now;
 
@@ -326,43 +343,45 @@ TxTicket AffaDisplayBase::enqueueExternal(uint16_t funcId, const uint8_t* data, 
   const uint8_t newSlots = static_cast<uint8_t>(1 + (needReg ? _funcCount : 0));
   if (_qCount + newSlots > AFFA_TX_QUEUE_DEPTH) {
     _lastResult = Result::QueueFull;
-    return kNoTicket;
+    return Submitted::refused(Result::QueueFull);
   }
   if (needReg) (void)queueRegistrations();
 
-  const TxTicket t = nextTicket();
   pushJob(funcId, nullptr, len, JobKind::Payload, t, opt, insertIndexFor(opt.priority), data,
           /*prefixLen=*/0);
-  _lastEnqueued = t;
   _lastResult   = Result::Ok;
-  return t;
+  return Submitted::accepted(t);
 }
 
-TxTicket AffaDisplayBase::enqueueSplit(uint16_t funcId, const uint8_t* prefix, uint8_t prefixLen,
+Submitted AffaDisplayBase::enqueueSplit(uint16_t funcId, const uint8_t* prefix, uint8_t prefixLen,
                                        const uint8_t* body, uint16_t bodyLen, TxOptions opt) {
-  _lastEnqueued = kNoTicket;
-
   const uint32_t total = static_cast<uint32_t>(prefixLen) + bodyLen;
   if (!prefix || !body || prefixLen == 0 || bodyLen == 0) {
     _lastResult = Result::BadArgument;
-    return kNoTicket;
+    return Submitted::refused(Result::BadArgument);
   }
   // The prefix is copied into TxJob::data, so it is bounded by that buffer and not by the
   // external ceiling — a caller that got this wrong would silently overrun a queue slot.
   if (prefixLen > AFFA_MAX_PAYLOAD || total > AFFA_MAX_EXTERNAL_PAYLOAD) {
     _lastResult = Result::TooLong;
-    return kNoTicket;
+    return Submitted::refused(Result::TooLong);
   }
-  if (!knownFunc(funcId))          { _lastResult = Result::UnknownFunc; return kNoTicket; }
+  if (!knownFunc(funcId)) {
+    _lastResult = Result::UnknownFunc;
+    return Submitted::refused(Result::UnknownFunc);
+  }
   if (opt.slot != RenderSlot::None || opt.reassertAfterSession) {
     _lastResult = Result::BadArgument;
-    return kNoTicket;
+    return Submitted::refused(Result::BadArgument);
   }
   opt.coalesce = false;
 
+  const TxTicket t = nextTicket();      // see enqueue(): above every state-dependent check
+
   if (AFFA_TX_HOLD_MS == 0 && !linkReady()) {
-    _lastResult = _link.isLive() ? Result::NoSync : Result::LinkDown;
-    return kNoTicket;
+    const Result r = _link.isLive() ? Result::NoSync : Result::LinkDown;
+    _lastResult = r;
+    return Submitted::refused(r);
   }
 
   const bool needReg = !_passive && linkReady() &&
@@ -370,16 +389,14 @@ TxTicket AffaDisplayBase::enqueueSplit(uint16_t funcId, const uint8_t* prefix, u
   const uint8_t newSlots = static_cast<uint8_t>(1 + (needReg ? _funcCount : 0));
   if (_qCount + newSlots > AFFA_TX_QUEUE_DEPTH) {
     _lastResult = Result::QueueFull;
-    return kNoTicket;
+    return Submitted::refused(Result::QueueFull);
   }
   if (needReg) (void)queueRegistrations();
 
-  const TxTicket t = nextTicket();
   pushJob(funcId, prefix, static_cast<uint16_t>(total), JobKind::Payload, t, opt,
           insertIndexFor(opt.priority), body, prefixLen);
-  _lastEnqueued = t;
   _lastResult   = Result::Ok;
-  return t;
+  return Submitted::accepted(t);
 }
 
 // A failure worth another attempt: exactly the two that mean NOBODY ANSWERED.
@@ -703,9 +720,13 @@ void AffaDisplayBase::finishJob(Result r, bool allowRetry) {
         // Any of those leaves `_autoPowerTicket` clear and the phase goes straight to Ready.
         const bool appOwnsPower =
             _cachedControl.valid || hasQueuedControl() || reassertQueued();
-        if (_autoPower && !_passive && !appOwnsPower && supports(Feature::Power) &&
-            setPower(true) == Result::Ok)
-          _autoPowerTicket = _lastEnqueued;
+        if (_autoPower && !_passive && !appOwnsPower && supports(Feature::Power)) {
+          // The ticket comes straight back from the call now. It used to be fetched from
+          // _lastEnqueued immediately afterwards, which worked only because nothing could
+          // enqueue between the two statements — true here, and a rule the rest of the
+          // library had to keep in its head everywhere else.
+          _autoPowerTicket = setPower(true).ticket;
+        }
       }
     } else {
       // IT NO LONGER TAKES THE PAYLOADS WITH IT. The legacy affa3_send propagated a failed

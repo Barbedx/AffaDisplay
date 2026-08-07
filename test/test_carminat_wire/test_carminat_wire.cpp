@@ -636,8 +636,7 @@ void test_menuN_length_and_count_byte_match_the_corpus(void) {
 
   for (uint8_t n = 2; n <= 6; n += 2) {
     drain(r.link);
-    TEST_ASSERT_EQUAL(Result::Ok,
-                      r.d.showMenuN(scratch, sizeof(scratch), "NAVIGATION", items, n));
+    ASSERT_RESULT(Ok, r.d.showMenuN(scratch, sizeof(scratch), "NAVIGATION", items, n));
     pumpUntilIdle(r.d);
 
     Frame f;
@@ -655,7 +654,7 @@ void test_menuN_item_tags_land_on_a_stride_of_27(void) {
   r.up();
   static uint8_t scratch[CarminatDisplay::menuScreenBytes(10)];
   const char* items[6] = {"A", "B", "C", "D", "E", "F"};
-  TEST_ASSERT_EQUAL(Result::Ok, r.d.showMenuN(scratch, sizeof(scratch), "T", items, 6));
+  ASSERT_RESULT(Ok, r.d.showMenuN(scratch, sizeof(scratch), "T", items, 6));
 
   // Payload offsets 36, 63, 90, 117, 144, 171 reading 00..05 — measured, not inferred.
   for (uint8_t n = 0; n < 6; ++n) {
@@ -676,7 +675,7 @@ void test_menuN_glyph_and_thumb_default_to_neither(void) {
   r.up();
   static uint8_t scratch[CarminatDisplay::menuScreenBytes(10)];
   const char* items[2] = {"A", "B"};
-  TEST_ASSERT_EQUAL(Result::Ok, r.d.showMenuN(scratch, sizeof(scratch), "T", items, 2));
+  ASSERT_RESULT(Ok, r.d.showMenuN(scratch, sizeof(scratch), "T", items, 2));
   TEST_ASSERT_EQUAL_HEX8_MESSAGE(carminat::kMenuIconOemBlank, scratch[2 + 3], "[3] blank");
   TEST_ASSERT_EQUAL_HEX8_MESSAGE(carminat::kMenuThumbNone, scratch[2 + 4], "[4] no scrollbar");
   pumpUntilIdle(r.d);
@@ -691,12 +690,10 @@ void menuN_field_moves_only_its_own_byte(uint8_t icon, uint8_t thumb, uint16_t m
   const char* items[6] = {"DESTINATION", "ROUTE", "MAP", "TRAFFIC", "SETTINGS", "BACK"};
   const uint16_t len = CarminatDisplay::menuScreenBytes(6);
 
-  TEST_ASSERT_EQUAL(Result::Ok,
-                    r.d.showMenuN(base, sizeof(base), "NAVIGATION", items, 6, 0, 0,
+  ASSERT_RESULT(Ok, r.d.showMenuN(base, sizeof(base), "NAVIGATION", items, 6, 0, 0,
                                   carminat::kScrollBoth));
   pumpUntilIdle(r.d);
-  TEST_ASSERT_EQUAL(Result::Ok,
-                    r.d.showMenuN(got, sizeof(got), "NAVIGATION", items, 6, 0, 0,
+  ASSERT_RESULT(Ok, r.d.showMenuN(got, sizeof(got), "NAVIGATION", items, 6, 0, 0,
                                   carminat::kScrollBoth, icon, thumb));
   pumpUntilIdle(r.d);
 
@@ -722,14 +719,13 @@ void test_showMenuIcon_moves_only_its_own_two_bytes(void) {
   Rig r;
   r.up();
   drain(r.link);
-  TEST_ASSERT_EQUAL(Result::Ok, r.d.showMenu("Main Menu", "Voltage:0V", "Boost:0mbar", 0x0B));
+  ASSERT_RESULT(Ok, r.d.showMenu("Main Menu", "Voltage:0V", "Boost:0mbar", 0x0B));
   pumpUntilIdle(r.d);
   Frame plain;
   TEST_ASSERT_TRUE(r.link.takeSent(plain));
 
   drain(r.link);
-  TEST_ASSERT_EQUAL(Result::Ok,
-                    r.d.showMenuIcon("Main Menu", "Voltage:0V", "Boost:0mbar", 0x0B,
+  ASSERT_RESULT(Ok, r.d.showMenuIcon("Main Menu", "Voltage:0V", "Boost:0mbar", 0x0B,
                                      carminat::kMenuIconGps, carminat::kMenuThumbMin));
   pumpUntilIdle(r.d);
   Frame styled;
@@ -751,8 +747,7 @@ void test_menu_glyph_suppress_bit_only_sets_bit_7(void) {
   Rig r;
   r.up();
   drain(r.link);
-  TEST_ASSERT_EQUAL(Result::Ok,
-                    r.d.showMenuIcon("M", "a", "b", 0x00,
+  ASSERT_RESULT(Ok, r.d.showMenuIcon("M", "a", "b", 0x00,
                                      carminat::kMenuIconGps | carminat::kMenuIconSuppress));
   pumpUntilIdle(r.d);
   Frame f;
@@ -767,8 +762,8 @@ void test_menuN_refuses_a_scratch_that_is_too_small(void) {
   r.up();
   static uint8_t small[64];
   const char* items[4] = {"A", "B", "C", "D"};
-  TEST_ASSERT_EQUAL(Result::TooLong, r.d.showMenuN(small, sizeof(small), "T", items, 4));
-  TEST_ASSERT_EQUAL(Result::BadArgument, r.d.showMenuN(small, sizeof(small), "T", items, 0));
+  ASSERT_RESULT(TooLong, r.d.showMenuN(small, sizeof(small), "T", items, 4));
+  ASSERT_RESULT(BadArgument, r.d.showMenuN(small, sizeof(small), "T", items, 0));
 }
 
 
@@ -786,12 +781,12 @@ void test_lastRendered_follows_the_acknowledged_screen(void) {
   TEST_ASSERT_EQUAL_MESSAGE(RenderSlot::None, r.d.lastRendered(),
                             "setPower draws nothing, so nothing has been drawn yet");
 
-  TEST_ASSERT_EQUAL(Result::Ok, r.d.setText("HELLO"));
+  ASSERT_RESULT(Ok, r.d.setText("HELLO"));
   pumpUntilIdle(r.d);
   TEST_ASSERT_EQUAL_MESSAGE(RenderSlot::Text, r.d.lastRendered(), "setText");
   TEST_ASSERT_NOT_EQUAL_MESSAGE(0u, r.d.lastRenderedMs(), "and when");
 
-  TEST_ASSERT_EQUAL(Result::Ok, r.d.showMenu("HEAD", "ONE", "TWO"));
+  ASSERT_RESULT(Ok, r.d.showMenu("HEAD", "ONE", "TWO"));
   pumpUntilIdle(r.d);
   TEST_ASSERT_EQUAL_MESSAGE(RenderSlot::Menu, r.d.lastRendered(),
                             "a menu drawn over the text is what is on the glass now");
@@ -807,7 +802,7 @@ void test_lastRendered_is_the_ACK_not_the_enqueue(void) {
   // Queued but never acknowledged: the panel has not drawn it, so neither has this.
   r.d.setSelfAck(false);
   drain(r.link);
-  TEST_ASSERT_EQUAL(Result::Ok, r.d.showMenu("H", "1", "2"));
+  ASSERT_RESULT(Ok, r.d.showMenu("H", "1", "2"));
   r.d.poll();
   TEST_ASSERT_EQUAL_MESSAGE(RenderSlot::Text, r.d.lastRendered(),
                             "an unacknowledged render is not on the glass");

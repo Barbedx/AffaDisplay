@@ -67,17 +67,17 @@ bool UpdateListBase::familySupports(Feature f) {
 // Transmit helpers
 // ---------------------------------------------------------------------------
 
-Result UpdateListBase::enqueueRender(uint16_t funcId, const uint8_t* data, uint8_t len,
+Submitted UpdateListBase::enqueueRender(uint16_t funcId, const uint8_t* data, uint8_t len,
                                      RenderSlot slot) {
   TxOptions opt;
   opt.slot = slot;
-  const TxTicket t = enqueue(funcId, data, len, opt);
-  // The Result is an ACCEPTANCE verdict. The delivery verdict arrives later through
-  // onComplete(), keyed by lastEnqueued().
-  return (t == kNoTicket) ? lastResult() : Result::Ok;
+  // Straight through since 2.0 — see CarminatDisplay::submit() for why this stopped being a
+  // three-way translation. Submitted is an ACCEPTANCE verdict; the delivery verdict arrives
+  // later through onComplete(), keyed by the ticket this returns.
+  return enqueue(funcId, data, len, opt);
 }
 
-Result UpdateListBase::setPower(bool on) {
+Submitted UpdateListBase::setPower(bool on) {
   const uint8_t data[kPowerLen] = {
       kPowerSfDl,
       kCmdSetState,

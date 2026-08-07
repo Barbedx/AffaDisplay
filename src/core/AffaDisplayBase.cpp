@@ -68,7 +68,6 @@ bool AffaDisplayBase::begin() {
   _nextGenericAckMs       = now;
   _cachedControl           = CachedControl{};
   _lastCompleted  = kNoTicket;
-  _lastEnqueued   = kNoTicket;
   _lastResult     = Result::Ok;
   _autoPowerTicket   = kNoTicket;        // NOT _autoPower: that is a build's decision and
                                          // survives begin(), like _passive and _selfAck
@@ -575,7 +574,6 @@ bool      AffaDisplayBase::registered() const { return hasFlag(_sync, SyncState:
 bool      AffaDisplayBase::busy() const { return _qCount > 0; }
 Result    AffaDisplayBase::lastResult() const { return _lastResult; }
 TxTicket  AffaDisplayBase::lastTicket() const { return _lastCompleted; }
-TxTicket  AffaDisplayBase::lastEnqueued() const { return _lastEnqueued; }
 uint8_t   AffaDisplayBase::queued() const {
   return (_qCount > 0) ? static_cast<uint8_t>(_qCount - 1) : 0;
 }
@@ -586,27 +584,36 @@ Stats     AffaDisplayBase::stats() const { return _link.stats(); }
 // ---------------------------------------------------------------------------
 // The legacy IDisplay gave these silently no-op bodies returning AffaError::NoError, so
 // calling one on a panel that could not do it looked exactly like success. Ask
-// supports(Feature) before you call, and check the Result when you do.
+// supports(Feature) before you call, and check the returned Submitted when you do — the
+// [[nodiscard]] on the type means the compiler asks for you.
 
-Result AffaDisplayBase::setText(const char*, uint8_t) { return Result::NotSupported; }
-Result AffaDisplayBase::setTime(const char*) { return Result::NotSupported; }
-Result AffaDisplayBase::setPower(bool) { return Result::NotSupported; }
-Result AffaDisplayBase::showMenu(const char*, const char*, const char*, uint8_t) {
-  return Result::NotSupported;
+namespace {
+// A panel that cannot do this at all. No ticket is minted: nothing was submitted, so there
+// is nothing for onComplete() to report later, and handing back a live handle for a call
+// that will never reach the wire is exactly the "accepted but untracked" answer Submitted
+// exists to make unrepresentable.
+inline Submitted unsupported() { return Submitted::refused(Result::NotSupported); }
+}  // namespace
+
+Submitted AffaDisplayBase::setText(const char*, uint8_t) { return unsupported(); }
+Submitted AffaDisplayBase::setTime(const char*) { return unsupported(); }
+Submitted AffaDisplayBase::setPower(bool) { return unsupported(); }
+Submitted AffaDisplayBase::showMenu(const char*, const char*, const char*, uint8_t) {
+  return unsupported();
 }
-Result AffaDisplayBase::highlightItem(uint8_t) { return Result::NotSupported; }
-Result AffaDisplayBase::showPopupText(const char*, uint8_t, uint8_t, uint8_t) {
-  return Result::NotSupported;
+Submitted AffaDisplayBase::highlightItem(uint8_t) { return unsupported(); }
+Submitted AffaDisplayBase::showPopupText(const char*, uint8_t, uint8_t, uint8_t) {
+  return unsupported();
 }
-Result AffaDisplayBase::hidePopup() { return Result::NotSupported; }
-Result AffaDisplayBase::showFullscreenText(const char*, const char*, const char*) {
-  return Result::NotSupported;
+Submitted AffaDisplayBase::hidePopup() { return unsupported(); }
+Submitted AffaDisplayBase::showFullscreenText(const char*, const char*, const char*) {
+  return unsupported();
 }
-Result AffaDisplayBase::showConfirmBox(const char*, const char*, const char*) {
-  return Result::NotSupported;
+Submitted AffaDisplayBase::showConfirmBox(const char*, const char*, const char*) {
+  return unsupported();
 }
-Result AffaDisplayBase::showInfoPopup(const char*, const char*, const char*) {
-  return Result::NotSupported;
+Submitted AffaDisplayBase::showInfoPopup(const char*, const char*, const char*) {
+  return unsupported();
 }
 
 } // namespace affa

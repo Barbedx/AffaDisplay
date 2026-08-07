@@ -293,7 +293,7 @@ void test_hold_window_bounds_a_failing_registration(void) {
   TEST_ASSERT_TRUE(d.synced());
 
   const uint8_t payload[3] = {0x03, 0x52, 0x09};
-  const TxTicket t = d.enqueue(0x151, payload, 3);
+  const TxTicket t = d.enqueue(0x151, payload, 3).ticket;
   TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
 
   // Pump for double the hold window, keeping the peer alive so sync never Fails — that
@@ -314,8 +314,7 @@ void test_hold_window_bounds_a_failing_registration(void) {
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_completions,
       "the held render never completed — the registration cycle is unbounded again");
   TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(t), static_cast<uint32_t>(g_lastTicket));
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Result::NoSync),
-                          static_cast<uint8_t>(g_lastResult));
+  ASSERT_RESULT(NoSync, g_lastResult);
   TEST_ASSERT_FALSE(d.busy());
 }
 

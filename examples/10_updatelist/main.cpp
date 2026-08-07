@@ -219,17 +219,17 @@ void loop() {
   // library sends this family's `1B1 04 52 02 FF FF` itself on the way there. Drawing before
   // that is the failure with no symptom: the panel ACKs a screen it never lights.
   if (!g_textSent && g_display.phase() == affa::Phase::Ready) {
-    const affa::Result r = g_display.setText(kText);
-    g_textTicket = g_display.lastEnqueued();
+    const affa::Submitted r = g_display.setText(kText);
+    g_textTicket = r.ticket;
     Serial.printf("[%8lu] ** setText(\"%s\") accepted=%s ticket=%u\n",
                   static_cast<unsigned long>(now), kText,
-                  r == affa::Result::Ok ? "yes" : "NO", static_cast<unsigned>(g_textTicket));
-    if (r != affa::Result::Ok)
+                  r.ok() ? "yes" : "NO", static_cast<unsigned>(g_textTicket));
+    if (!r)
       Serial.printf("[%8lu] !! rejected with %u — that is an ACCEPTANCE verdict, not a "
                     "delivery one\n", static_cast<unsigned long>(now),
-                    static_cast<unsigned>(r));
+                    static_cast<unsigned>(r.result));
     g_textSent = true;
-    g_busy = (r == affa::Result::Ok);
+    g_busy = r.ok();
     // Let the proof frame be READ before the cycle starts talking over it.
     g_nextPhraseAt = now + 4000;
   }
@@ -242,8 +242,8 @@ void loop() {
   if (g_textSent && !g_busy && g_display.phase() == affa::Phase::Ready &&
       static_cast<int32_t>(now - g_nextPhraseAt) >= 0) {
     const size_t ix = nextPhrase();
-    const affa::Result r = g_display.setText(kPhrases[ix]);
-    if (r == affa::Result::Ok) {
+    const affa::Submitted r = g_display.setText(kPhrases[ix]);
+    if (r.ok()) {
       g_phraseIx = ix;
       g_busy     = true;
       g_nextPhraseAt = now + kPhraseHoldMs;
@@ -252,7 +252,7 @@ void loop() {
       // A refusal that is not reported is a frozen panel with every counter looking
       // healthy — which is exactly how this presented on the Carminat bench once.
       Serial.printf("[%8lu] !! setText refused (%u) — retrying on the next tick\n",
-                    static_cast<unsigned long>(now), static_cast<unsigned>(r));
+                    static_cast<unsigned long>(now), static_cast<unsigned>(r.result));
       g_nextPhraseAt = now + 250;
     }
   }

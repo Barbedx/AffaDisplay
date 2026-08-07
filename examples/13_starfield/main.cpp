@@ -293,7 +293,7 @@ void loop() {
   if (static_cast<int32_t>(now - g_nextFrameAt) < 0) return;
 
   stepField();
-  if (g_display.showFullscreenText(g_row[0], g_row[1], g_row[2]) == affa::Result::Ok) {
+  if (g_display.showFullscreenText(g_row[0], g_row[1], g_row[2]).ok()) {
     g_busy = true;
     ++g_frames;
     g_nextFrameAt = now + g_frameMs;

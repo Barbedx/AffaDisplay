@@ -29,7 +29,7 @@ void UpdateListDisplay::copyCells(const char* src, uint8_t* dst, uint8_t cells) 
   while (i < cells) dst[i++] = 0x00;   // NUL, not space — see the header
 }
 
-Result UpdateListDisplay::setText(const char* text, uint8_t digit) {
+Submitted UpdateListDisplay::setText(const char* text, uint8_t digit) {
   // Transliteration is mandatory and it happens here, at the single choke point where
   // this family's frames are built. UTF-8 that reaches the wire is garbage on the glass,
   // not a compile error.

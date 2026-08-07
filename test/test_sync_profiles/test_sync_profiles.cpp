@@ -485,7 +485,7 @@ void test_carminat_ping_alone_never_starts_authentication(void) {
   // had emitted a B9 anyway.
   CarRig r;
   r.d.begin();
-  TEST_ASSERT_EQUAL(Result::Ok, r.d.setPower(true)); // held until real 61 11 00
+  ASSERT_RESULT(Ok, r.d.setPower(true)); // held until real 61 11 00
 
   r.link.inject(affatest::panelPeerAlive());
   r.d.poll();
@@ -542,8 +542,8 @@ void test_carminat_bootstrap_is_held_until_good_auth(void) {
   CarRig r;
   r.d.begin();
   r.d.setSelfAck(true);
-  TEST_ASSERT_EQUAL(Result::Ok, r.d.setPower(true));
-  TEST_ASSERT_EQUAL(Result::Ok, r.d.setTime("1000"));
+  ASSERT_RESULT(Ok, r.d.setPower(true));
+  ASSERT_RESULT(Ok, r.d.setTime("1000"));
 
   r.link.inject(affatest::panelSyncStart());
   r.d.poll();
@@ -604,7 +604,7 @@ void test_carminat_acks_panel_registration_as_a_reflex_without_unlocking_output(
   // its announce burst.
   CarRig r;
   r.d.begin();
-  TEST_ASSERT_EQUAL(Result::Ok, r.d.setPower(true)); // held application work
+  ASSERT_RESULT(Ok, r.d.setPower(true)); // held application work
 
   static const Frame kPanelRegistrationAck =
       {0x5C1, 8, {0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false};
@@ -776,7 +776,7 @@ void test_an_application_that_owns_power_is_not_overridden(void) {
   CarRig r;
   r.d.begin();
   r.d.setSelfAck(true);
-  TEST_ASSERT_EQUAL(Result::Ok, r.d.setPower(false));   // deliberately dark
+  ASSERT_RESULT(Ok, r.d.setPower(false));   // deliberately dark
   affatest::carminatOpeningRequest(r.d, r.link);
   finishCarminatHello(r);
   finishCarminatRegistration(r);
@@ -1203,7 +1203,7 @@ void test_recovery_reasserts_cached_power_before_held_time(void) {
   TEST_ASSERT_FALSE(r.d.synced());
   TEST_ASSERT_FALSE(r.d.registered());
 
-  TEST_ASSERT_EQUAL(Result::Ok, r.d.setTime("1000")); // held behind the new session
+  ASSERT_RESULT(Ok, r.d.setTime("1000")); // held behind the new session
   finishCarminatHello(r);
 
   // The re-registration burst must precede both the internally restored power and the

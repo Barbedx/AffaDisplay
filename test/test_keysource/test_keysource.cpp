@@ -139,7 +139,7 @@ void test_fromSelf_is_dropped_before_the_ack_matcher(void) {
 
   uint8_t payload[22];
   for (uint8_t i = 0; i < sizeof(payload); ++i) payload[i] = static_cast<uint8_t>(i + 1);
-  const TxTicket t = r.d.enqueue(0x151, payload, sizeof(payload));
+  const TxTicket t = r.d.enqueue(0x151, payload, sizeof(payload)).ticket;
   r.d.poll();                                     // frame 0 out, WaitAck
   TEST_ASSERT_TRUE(r.d.busy());
   TEST_ASSERT_EQUAL_UINT32(1, r.link.sentCount());

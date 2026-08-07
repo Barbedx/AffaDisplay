@@ -472,7 +472,7 @@ void loop() {
   // watchdog to feed.
   static char s_pushed[8] = {0};
   if (g_clockEnabled && g_hhmm[0] && strcmp(s_pushed, g_hhmm) != 0) {
-    if (g_display.setTime(g_hhmm) == affa::Result::Ok) {
+    if (g_display.setTime(g_hhmm).ok()) {
       snprintf(s_pushed, sizeof(s_pushed), "%s", g_hhmm);
       g_busy = true;
       Serial.printf("[%8lu] >> panel clock set to %s\n", static_cast<unsigned long>(now),
@@ -485,5 +485,5 @@ void loop() {
   if (static_cast<int32_t>(now - s_nextDraw) < 0) return;
   s_nextDraw = now + 1000;
   pushToPanel();
-  if (g_display.showFullscreenText(g_l1, g_l2, g_l3) == affa::Result::Ok) g_busy = true;
+  if (g_display.showFullscreenText(g_l1, g_l2, g_l3).ok()) g_busy = true;
 }

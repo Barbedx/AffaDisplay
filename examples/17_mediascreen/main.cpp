@@ -68,7 +68,7 @@ affa::IDisplay*        g_panel    = nullptr;
 affa::AffaDisplayBase* g_base     = nullptr;
 
 void logmsg(const char* fmt, ...);
-affa::Result takeMainLine();          // defined below; the opening's last step needs it
+affa::Submitted takeMainLine();          // defined below; the opening's last step needs it
 
 // Set by any command that needs a restart to take effect. The route restarts AFTER the
 // response has gone out, so the browser still gets its verdict.
@@ -285,7 +285,7 @@ void openingPoll() {
   if (g_open.done || !g_carminat || g_base->phase() != affa::Phase::Ready) return;
   if (static_cast<int32_t>(::millis() - g_open.nextMs) < 0) return;
   switch (g_open.step) {
-    case 0: logmsg("opening 1/3 display ON -> %d", static_cast<int>(g_panel->setPower(true)));
+    case 0: logmsg("opening 1/3 display ON -> %d", static_cast<int>(g_panel->setPower(true).result));
             break;
     // THE ONE PLACE THIS CONSOLE STILL WRITES RAW BYTES, and it is here because no builder
     // exists for `54 01`: the OEM always sends it during the opening and nothing decodes
@@ -295,12 +295,12 @@ void openingPoll() {
               (void)g_base->enqueue(affa::carminat::kIdSetText, p, sizeof(p));
               logmsg("opening 2/3  54 01 (raw: no builder)"); break; }
     // `54 03` DOES have a builder — it is hidePopup(), the panel's only close command.
-    case 2: logmsg("opening 3/3  54 03 -> %d", static_cast<int>(g_panel->hidePopup()));
+    case 2: logmsg("opening 3/3  54 03 -> %d", static_cast<int>(g_panel->hidePopup().result));
             break;
     // The opening ends with a close-window, so the glass is empty and the main line is ours
     // again — but lastRendered() cannot say that (see takeMainLine). Assert it.
     default: g_open.done = true; g_forceFrame = true;
-             logmsg("opening complete -> main line %d", static_cast<int>(takeMainLine()));
+             logmsg("opening complete -> main line %d", static_cast<int>(takeMainLine().result));
              return;
   }
   ++g_open.step;
@@ -354,8 +354,9 @@ void pushFrame() {
   // An identical image is 44 CAN frames spent redrawing pixels that have not moved.
   if (!g_forceFrame && g_everSent &&
       memcmp(buf, g_frame[g_drawInto ^ 1], media::kBytes) == 0) return;
-  if (g_carminat->showNavBitmap(buf) != affa::Result::Ok) { ++g_fail; return; }
-  g_navTicket = g_base->lastEnqueued();
+  const affa::Submitted nav = g_carminat->showNavBitmap(buf);
+  if (!nav) { ++g_fail; return; }
+  g_navTicket = nav.ticket;
   g_navBusy = true; g_forceFrame = false; g_everSent = true;
   g_frameStart = ::millis();
   g_drawInto ^= 1;
@@ -400,7 +401,7 @@ inline bool rowsShouldTick() {
 // glass is in fact EMPTY at that point, but nothing in the record says so: a hide and a show
 // are both "the last thing I did was a popup". Without this the scrolling line would sit
 // silent from boot, waiting for a screen to clear that had already cleared.
-affa::Result takeMainLine() {
+affa::Submitted takeMainLine() {
   char w[kMainWidth + 1];
   g_main.window(w, kMainWidth);
   (void)g_main.changed(w);          // adopt it: the loop must not repaint identical bytes
@@ -492,8 +493,10 @@ void loadSettings() {
 struct Cmd { bool ok; const char* msg; };
 constexpr Cmd kOk{true, "ok"};
 Cmd fail(const char* m) { return Cmd{false, m}; }
-Cmd fromResult(affa::Result r) {
-  return (r == affa::Result::Ok) ? kOk : fail("panel refused it");
+Cmd fromResult(const affa::Submitted& s) {
+  // Takes the Submitted, not a Result: every render in this file returns one, and the
+  // handle is right there for a caller that wants to correlate a completion.
+  return s ? kOk : fail("panel refused it");
 }
 
 const char* sendMenuN(const String& title, const String& csv, uint8_t sel, uint8_t scroll,
@@ -511,9 +514,11 @@ const char* sendMenuN(const String& title, const String& csv, uint8_t sel, uint8
     *bar = 0; cur = bar + 1;
   }
   if (!n) return "no items";
-  if (g_carminat->showMenuN(g_menuBuf, sizeof(g_menuBuf), title.c_str(), items, n, 0, sel,
-                            scroll, icon, thumb) != affa::Result::Ok) return "refused";
-  g_menuTicket = g_base->lastEnqueued();
+  const affa::Submitted menu =
+      g_carminat->showMenuN(g_menuBuf, sizeof(g_menuBuf), title.c_str(), items, n, 0, sel,
+                            scroll, icon, thumb);
+  if (!menu) return "refused";
+  g_menuTicket = menu.ticket;
   g_menuBusy = true;
   return nullptr;
 }
@@ -610,9 +615,10 @@ Cmd dispatch(PsychicRequest* r) {
     g_menuBuf[kOemAtI0]  = static_cast<uint8_t>(N("i0",  kOemNavMenu[kOemAtI0]));
     g_menuBuf[kOemAtI1]  = static_cast<uint8_t>(N("i1",  kOemNavMenu[kOemAtI1]));
     affa::TxOptions opt;
-    if (g_base->enqueueExternal(affa::carminat::kIdSetText, g_menuBuf, kOemNavBytes, opt)
-        == affa::kNoTicket) return fail("refused");
-    g_menuTicket = g_base->lastEnqueued();
+    const affa::Submitted oem =
+        g_base->enqueueExternal(affa::carminat::kIdSetText, g_menuBuf, kOemNavBytes, opt);
+    if (!oem) return fail("refused");
+    g_menuTicket = oem.ticket;
     g_menuBusy = true;
     return kOk;
   }

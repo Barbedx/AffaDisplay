@@ -47,7 +47,7 @@ class ClusterDisplay final : public AffaDisplayBase {
 
   // `1B1 03 52 <02|00> 00` padded with 0xFF. The OFF value is from the capture; the ON
   // value is inferred from the other two families and is the least certain byte we ship.
-  [[nodiscard]] Result setPower(bool on) override {
+  Submitted setPower(bool on) override {
     const uint8_t d[cluster::kPowerLen] = {
         cluster::kPowerSfDl,
         cluster::kCmdSetState,

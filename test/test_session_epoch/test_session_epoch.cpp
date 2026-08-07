@@ -235,8 +235,7 @@ void revokeSessionWithAnsweringStart(Rig& r, const char* why) {
 void armCachedPower(Rig& r) {
   r.display.begin();
   r.display.setSelfAck(true);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Result::Ok),
-                    static_cast<uint8_t>(r.display.setPower(true)));
+  ASSERT_RESULT(Ok, r.display.setPower(true));
   affatest::completeCarminatAuth(r.display, r.link, r.clock);
   affatest::settleCarminatRegistration(r.display, r.clock);
   r.clock.advance(carminat::kPayloadAfterRegistrationMs);
@@ -327,8 +326,7 @@ void test_late_registration_ack_cannot_revive_a_torn_down_session(void) {
   // separate sessions. See AffaDisplayBase::setAutoPower().
   r.display.setAutoPower(false);
   r.display.begin();
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Result::Ok),
-                    static_cast<uint8_t>(r.display.setTime("1000")));
+  ASSERT_RESULT(Ok, r.display.setTime("1000"));
 
   startSessionToFirstRegistration(r, "old-session 151 registration");
   completeFreshRegistration(r, "old-session 551 releases the 1F1 registration",
@@ -381,8 +379,7 @@ void test_late_reassert_ack_cannot_clear_the_next_session_restore(void) {
   // which is why runHelloToFirstRegistration() takes it from here rather than a fresh
   // request. Nothing about the reassert race below moves.
   revokeSessionWithAnsweringStart(r, "first 01 starts recovery of cached power");
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Result::Ok),
-                    static_cast<uint8_t>(r.display.setTime("1000")));
+  ASSERT_RESULT(Ok, r.display.setTime("1000"));
   runHelloToFirstRegistration(r, "recovery B starts at 151");
   completeFreshRegistration(r, "recovery B 551 releases 1F1",
                              "recovery B registration has no payload before +400 ms");
@@ -434,8 +431,7 @@ void test_late_reassert_ack_cannot_clear_the_next_session_restore(void) {
 void test_bare_first_69_gets_one_discovery_ba_but_never_unlocks_output(void) {
   Rig r;
   r.display.begin();
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Result::Ok),
-                    static_cast<uint8_t>(r.display.setTime("1000")));
+  ASSERT_RESULT(Ok, r.display.setTime("1000"));
 
   r.link.inject(affatest::panelPeerAlive());
   r.display.poll();

@@ -243,6 +243,45 @@ enum class NavCommand : uint8_t {
 using TxTicket = uint16_t;
 inline constexpr TxTicket kNoTicket = 0;
 
+// WHAT EVERY RENDER CALL RETURNS: the handle and the reason, together, in four bytes.
+//
+// It replaces three spellings of the same answer. Before 2.0 a render returned a bare
+// `Result` and the caller had to fetch the handle separately from `lastEnqueued()`, whose
+// contract was "READ IT IMMEDIATELY: the next enqueue overwrites it, including a render the
+// menu makes for you" — a documented footgun that existed only because the ticket was not
+// returned. Meanwhile the owned task issued a THIRD handle (`TxRequest`) and kept a
+// translation table, because a posted render could not return a ticket that had not been
+// minted yet.
+//
+// 2.0 mints the ticket at SUBMIT time, from an atomic counter, on whichever task called.
+// So the handle is always available to return, the same value reaches `onComplete()` in
+// both threading modes, and `lastEnqueued()` and `TxRequest` are both gone.
+//
+// `ticket` is the authority. A non-zero ticket means ACCEPTED, and `result` is Ok; zero
+// means refused, and `result` says why. It is never "accepted but untracked".
+//
+// THE VERDICT IS ACCEPTANCE, NEVER DELIVERY — "was it queued?", not "did the panel show
+// it?". Delivery arrives later through onComplete(), keyed by this same ticket.
+//
+// [[nodiscard]] IS ON THE TYPE, not on each of the twenty-odd declarations that return it.
+// That is deliberate: a render whose verdict is dropped is a screen that silently never
+// appears, which is the legacy failure this library was extracted to stop repeating, and
+// putting the attribute here means a render added in 2027 inherits the guarantee without
+// its author having to know about it. To ignore one on purpose, say so: `(void)…;`.
+struct [[nodiscard]] Submitted {
+  TxTicket ticket = kNoTicket;
+  Result   result = Result::Ok;
+
+  // `if (!display.setText("HI")) …` — explicit, so a Submitted cannot silently decay to a
+  // bool in arithmetic or in a comparison against a Result.
+  explicit operator bool() const noexcept { return ticket != kNoTicket; }
+  bool ok() const noexcept { return ticket != kNoTicket; }
+
+  // The refusal, spelled once. Every render call in the library ends in one of these two.
+  static Submitted refused(Result r) noexcept { return Submitted{kNoTicket, r}; }
+  static Submitted accepted(TxTicket t) noexcept { return Submitted{t, Result::Ok}; }
+};
+
 // What a queued message is FOR, so a newer one can supersede an older one that has not
 // started yet. Latest value wins, per slot. None opts out of coalescing entirely: a None
 // message never replaces anything and is never replaced.

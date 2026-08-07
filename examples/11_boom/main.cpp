@@ -125,10 +125,10 @@ void onDone(affa::TxTicket, affa::Result r, void*) {
 // which is reported rather than swallowed: a silent refusal is a frozen animation with
 // every counter looking healthy, and that is exactly how it presented on this bench once.
 bool draw(const char* l1, const char* l2, const char* l3) {
-  const affa::Result r = g_display.showFullscreenText(l1, l2, l3);
-  if (r != affa::Result::Ok) {
+  const affa::Submitted r = g_display.showFullscreenText(l1, l2, l3);
+  if (!r) {
     Serial.printf("[%8lu] !! showFullscreenText refused (%u)\n",
-                  static_cast<unsigned long>(millis()), static_cast<unsigned>(r));
+                  static_cast<unsigned long>(millis()), static_cast<unsigned>(r.result));
     return false;
   }
   g_busy = true;

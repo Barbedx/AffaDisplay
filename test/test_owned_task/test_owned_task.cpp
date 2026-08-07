@@ -58,24 +58,24 @@ class RecordingDisplay final : public AffaDisplayBase {
   uint8_t  n = 0;
   uint8_t  begins = 0;
 
-  Result setText(const char* t, uint8_t d) override { return rec("setText", t, nullptr, nullptr, d); }
-  Result setTime(const char* t) override            { return rec("setTime", t); }
-  Result setPower(bool on) override                 { return rec("setPower", nullptr, nullptr, nullptr, on); }
-  Result showMenu(const char* h, const char* r0, const char* r1, uint8_t s) override {
+  Submitted setText(const char* t, uint8_t d) override { return rec("setText", t, nullptr, nullptr, d); }
+  Submitted setTime(const char* t) override            { return rec("setTime", t); }
+  Submitted setPower(bool on) override                 { return rec("setPower", nullptr, nullptr, nullptr, on); }
+  Submitted showMenu(const char* h, const char* r0, const char* r1, uint8_t s) override {
     return rec("showMenu", h, r0, r1, s);
   }
-  Result highlightItem(uint8_t row) override        { return rec("highlight", nullptr, nullptr, nullptr, row); }
-  Result showPopupText(const char* t, uint8_t i, uint8_t s, uint8_t f) override {
+  Submitted highlightItem(uint8_t row) override        { return rec("highlight", nullptr, nullptr, nullptr, row); }
+  Submitted showPopupText(const char* t, uint8_t i, uint8_t s, uint8_t f) override {
     return rec("popup", t, nullptr, nullptr, i, s, f);
   }
-  Result hidePopup() override                       { return rec("hidePopup"); }
-  Result showFullscreenText(const char* a, const char* b, const char* c) override {
+  Submitted hidePopup() override                       { return rec("hidePopup"); }
+  Submitted showFullscreenText(const char* a, const char* b, const char* c) override {
     return rec("fullscreen", a, b, c);
   }
-  Result showConfirmBox(const char* a, const char* b, const char* c) override {
+  Submitted showConfirmBox(const char* a, const char* b, const char* c) override {
     return rec("confirm", a, b, c);
   }
-  Result showInfoPopup(const char* a, const char* b, const char* c) override {
+  Submitted showInfoPopup(const char* a, const char* b, const char* c) override {
     return rec("info", a, b, c);
   }
 
@@ -86,16 +86,20 @@ class RecordingDisplay final : public AffaDisplayBase {
   uint16_t keyTxId()      const override { return 0x1C1; }
 
  private:
-  Result rec(const char* name, const char* s0 = nullptr, const char* s1 = nullptr,
+  Submitted rec(const char* name, const char* s0 = nullptr, const char* s1 = nullptr,
              const char* s2 = nullptr, int a = -1, int b = -1, int c = -1) {
-    if (n >= 8) return Result::QueueFull;
+    if (n >= 8) return Submitted::refused(Result::QueueFull);
     Call& k = calls[n++];
     std::snprintf(k.name, sizeof(k.name), "%s", name);
     if (s0) std::snprintf(k.s0, sizeof(k.s0), "%s", s0);
     if (s1) std::snprintf(k.s1, sizeof(k.s1), "%s", s1);
     if (s2) std::snprintf(k.s2, sizeof(k.s2), "%s", s2);
     k.a = a; k.b = b; k.c = c;
-    return Result::Ok;
+    // ACCEPTED, AND DELIBERATELY WITH NO TICKET. This mock records the call and enqueues
+    // nothing, so there is no transmission for a handle to name — which is exactly what
+    // lastEnqueued() reported here before 2.0. A ticket invented by a mock would bind a
+    // RequestTable slot that nothing ever completes.
+    return Submitted{kNoTicket, Result::Ok};
   }
 };
 
@@ -108,13 +112,13 @@ class WireDisplay final : public AffaDisplayBase {
   // ONE FRAME, deliberately: with LoopbackLink's auto-ACK answering DONE to everything, a
   // multi-frame message completes at frame 0 and its continuations never reach the wire.
   // Eight payload bytes keeps the whole message visible to an ordering assertion.
-  Result setText(const char* t, uint8_t) override {
+  Submitted setText(const char* t, uint8_t) override {
     uint8_t d[8] = {0x05, 0x77, 0x20, 0x20, 0x20, 0x20, 0x00, 0x00};
     for (uint8_t i = 0; i < 4 && t && t[i]; ++i) d[2 + i] = static_cast<uint8_t>(t[i]);
     TxOptions o;
     o.slot     = RenderSlot::None;   // no coalescing: this suite is about ORDER
     o.coalesce = false;
-    return (enqueue(0x151, d, sizeof(d), o) == kNoTicket) ? lastResult() : Result::Ok;
+    return enqueue(0x151, d, sizeof(d), o);
   }
 
  protected:
@@ -279,7 +283,17 @@ void test_apply_reports_the_ticket_the_enqueue_issued() {
   ASSERT_RESULT(Ok, applyCommand(d, c, t));
 
   TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
-  TEST_ASSERT_EQUAL_UINT16(d.lastEnqueued(), t);
+
+  // …and a SECOND command gets a DIFFERENT one. Before 2.0 this line read
+  // `TEST_ASSERT_EQUAL_UINT16(d.lastEnqueued(), t)`, which only checked that applyCommand
+  // had copied the display's side-channel correctly. With the ticket returned from the call
+  // there is no side channel left to copy, so the property worth pinning is the one the
+  // handle space actually owes a caller: two submissions never share a handle.
+  Command c2 = cmd(Op::SetText); setArg(c2.s0, "TWO");
+  TxTicket t2 = kNoTicket;
+  ASSERT_RESULT(Ok, applyCommand(d, c2, t2));
+  TEST_ASSERT_NOT_EQUAL(kNoTicket, t2);
+  TEST_ASSERT_NOT_EQUAL_MESSAGE(t, t2, "two renders were issued the same ticket");
 }
 
 void test_a_render_into_a_dead_link_is_held_not_refused() {
@@ -312,16 +326,16 @@ void test_a_permanently_bad_render_is_still_refused_at_the_call() {
   // The line between "hold it" and "refuse it" is whether waiting could ever help. A null
   // buffer, an over-long payload and an unknown function id are the caller's mistakes, and
   // holding one would turn a programming error into a silent eight-second delay.
-  TEST_ASSERT_EQUAL_UINT16(kNoTicket, d.enqueue(0x151, nullptr, 4));
+  TEST_ASSERT_EQUAL_UINT16(kNoTicket, d.enqueue(0x151, nullptr, 4).ticket);
   ASSERT_RESULT(BadArgument, d.lastResult());
 
   uint8_t big[AFFA_MAX_PAYLOAD];
   std::memset(big, 0x5A, sizeof(big));
-  TEST_ASSERT_EQUAL_UINT16(kNoTicket, d.enqueue(0x151, big, AFFA_MAX_PAYLOAD + 1));
+  TEST_ASSERT_EQUAL_UINT16(kNoTicket, d.enqueue(0x151, big, AFFA_MAX_PAYLOAD + 1).ticket);
   ASSERT_RESULT(TooLong, d.lastResult());
 
   uint8_t one = 0x11;
-  TEST_ASSERT_EQUAL_UINT16(kNoTicket, d.enqueue(0x999, &one, 1));
+  TEST_ASSERT_EQUAL_UINT16(kNoTicket, d.enqueue(0x999, &one, 1).ticket);
   ASSERT_RESULT(UnknownFunc, d.lastResult());
 }
 

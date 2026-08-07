@@ -113,10 +113,10 @@ void test_a_key_reaches_the_callback_in_one_poll_with_a_full_queue(void) {
   // Fill every remaining slot. RenderSlot::None never coalesces, so these really do stack.
   for (int i = 0; i < AFFA_TX_QUEUE_DEPTH - 1; ++i) {
     g_payload[0] = static_cast<uint8_t>(i);
-    TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, g_payload, 4));
+    TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, g_payload, 4).ticket);
   }
   TEST_ASSERT_EQUAL_UINT8_MESSAGE(AFFA_TX_QUEUE_DEPTH - 1, r.d.queued(), "the queue is full");
-  TEST_ASSERT_EQUAL_UINT16_MESSAGE(kNoTicket, r.d.enqueue(0x151, g_payload, 4),
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(kNoTicket, r.d.enqueue(0x151, g_payload, 4).ticket,
                                    "and the next one is refused");
   ASSERT_RESULT(QueueFull, r.d.lastResult());
   drain(r.link);
@@ -225,7 +225,7 @@ void test_abortPending_reports_Aborted_once_per_dropped_ticket(void) {
   TxTicket t[3];
   for (int i = 0; i < 3; ++i) {
     g_payload[0] = static_cast<uint8_t>(0xA0 + i);
-    t[i] = r.d.enqueue(0x151, g_payload, 4);
+    t[i] = r.d.enqueue(0x151, g_payload, 4).ticket;
     TEST_ASSERT_NOT_EQUAL(kNoTicket, t[i]);
   }
 
@@ -253,7 +253,7 @@ void test_abortPending_never_touches_a_registration_job(void) {
   r.sync();
   TEST_ASSERT_FALSE(r.d.registered());
 
-  TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, g_payload, 4));
+  TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, g_payload, 4).ticket);
   TEST_ASSERT_EQUAL_UINT8_MESSAGE(2, r.d.queued(), "1 pending probe + 1 payload are queued");
 
   TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, r.d.abortPending(), "only the PAYLOAD is dropped");
@@ -284,12 +284,12 @@ void test_urgent_overtakes_normal_but_never_a_registration_job(void) {
   TEST_ASSERT_FALSE(r.d.registered());
 
   uint8_t normal[4] = {0xA1, 0xA2, 0xA3, 0xA4};
-  TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, normal, sizeof(normal)));
+  TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, normal, sizeof(normal)).ticket);
 
   uint8_t hot[4] = {0xE1, 0xE2, 0xE3, 0xE4};
   TxOptions opt;
   opt.priority = Priority::Urgent;
-  TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, hot, sizeof(hot), opt));
+  TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, hot, sizeof(hot), opt).ticket);
 
   // The panel acknowledges probe #0 (already in flight from the opening), then probe #1.
   r.link.inject(affatest::mk(0x551, {0x74, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
@@ -323,7 +323,7 @@ void test_abortAll_abandons_at_a_frame_boundary_and_the_next_message_starts_clea
 
   uint8_t big[22];
   for (uint8_t i = 0; i < sizeof(big); ++i) big[i] = static_cast<uint8_t>(0x10 + i);
-  const TxTicket t = r.d.enqueue(0x151, big, sizeof(big));
+  const TxTicket t = r.d.enqueue(0x151, big, sizeof(big)).ticket;
   r.d.poll();                                   // frame 0 out
   TEST_ASSERT_EQUAL_UINT32(1, r.link.sentCount());
 
@@ -335,7 +335,7 @@ void test_abortAll_abandons_at_a_frame_boundary_and_the_next_message_starts_clea
   drain(r.link);
 
   uint8_t next[4] = {0x99, 0x88, 0x77, 0x66};
-  TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, next, sizeof(next)));
+  TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, next, sizeof(next)).ticket);
   pumpUntilIdle(r.d);
   static const Frame kWant[] = {
       {0x151, 8, {0x99, 0x88, 0x77, 0x66, 0x00, 0x00, 0x00, 0x00}, false},

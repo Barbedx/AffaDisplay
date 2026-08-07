@@ -79,33 +79,37 @@ inline void setArg(char* dst, const char* src) {
 // kNoTicket for an op that enqueues nothing (PressKey, AbortPending, AbortAll, Resync) or
 // for a refusal.
 //
-// lastEnqueued() IS READ IMMEDIATELY AFTER EACH CALL, which is the documented contract for
-// it (docs/API.md §3b.4): the next enqueue overwrites it, including one a widget makes on
-// the application's behalf. showInfoPopup enqueues THREE messages and the ticket reported
-// is the last of them — the first failure is what the Result carries.
+// THE lastEnqueued() DANCE IS GONE. Until 2.0 this function called a render, then went back
+// and read `d.lastEnqueued()` to discover the ticket, under a documented rule that nothing
+// may enqueue in between — including a widget rendering on the application's behalf. Every
+// render now returns its ticket, so the handle simply falls out of the call.
+//
+// showInfoPopup enqueues THREE messages and reports the LAST of them, which is the one whose
+// completion means the whole list is on the glass; the first failure is what `result`
+// carries. That rule now lives in the builder (CarminatDisplay::showInfoMenu) rather than
+// being re-stated here.
 inline Result applyCommand(AffaDisplayBase& d, const Command& c, TxTicket& ticket) {
   ticket = kNoTicket;
-  Result r = Result::BadArgument;
+  Submitted s;
 
   switch (c.op) {
-    case Op::SetText:            r = d.setText(c.s0, c.a); break;
-    case Op::SetTime:            r = d.setTime(c.s0); break;
-    case Op::SetPower:           r = d.setPower(c.a != 0); break;
-    case Op::ShowMenu:           r = d.showMenu(c.s0, c.s1, c.s2, c.a); break;
-    case Op::HighlightItem:      r = d.highlightItem(c.a); break;
-    case Op::ShowPopupText:      r = d.showPopupText(c.s0, c.a, c.b, c.c); break;
-    case Op::HidePopup:          r = d.hidePopup(); break;
-    case Op::ShowFullscreenText: r = d.showFullscreenText(c.s0, c.s1, c.s2); break;
-    case Op::ShowConfirmBox:     r = d.showConfirmBox(c.s0, c.s1, c.s2); break;
-    case Op::ShowInfoPopup:      r = d.showInfoPopup(c.s0, c.s1, c.s2); break;
+    case Op::SetText:            s = d.setText(c.s0, c.a); break;
+    case Op::SetTime:            s = d.setTime(c.s0); break;
+    case Op::SetPower:           s = d.setPower(c.a != 0); break;
+    case Op::ShowMenu:           s = d.showMenu(c.s0, c.s1, c.s2, c.a); break;
+    case Op::HighlightItem:      s = d.highlightItem(c.a); break;
+    case Op::ShowPopupText:      s = d.showPopupText(c.s0, c.a, c.b, c.c); break;
+    case Op::HidePopup:          s = d.hidePopup(); break;
+    case Op::ShowFullscreenText: s = d.showFullscreenText(c.s0, c.s1, c.s2); break;
+    case Op::ShowConfirmBox:     s = d.showConfirmBox(c.s0, c.s1, c.s2); break;
+    case Op::ShowInfoPopup:      s = d.showInfoPopup(c.s0, c.s1, c.s2); break;
 
     // Not a render: nothing is enqueued, so there is no ticket and never will be. The
     // Local half fires KeyCb synchronously, on this task, from inside this call.
     case Op::PressKey:
-      r = d.pressKey(static_cast<Key>(static_cast<uint16_t>((c.a << 8) | c.b)),
-                     c.c ? KeyEdge::Hold : KeyEdge::Click,
-                     static_cast<KeySource>(c.d ? c.d : 1));
-      return r;
+      return d.pressKey(static_cast<Key>(static_cast<uint16_t>((c.a << 8) | c.b)),
+                        c.c ? KeyEdge::Hold : KeyEdge::Click,
+                        static_cast<KeySource>(c.d ? c.d : 1));
 
     case Op::AbortPending: d.abortPending(); return Result::Ok;
     case Op::AbortAll:     d.abortAll();     return Result::Ok;
@@ -113,8 +117,8 @@ inline Result applyCommand(AffaDisplayBase& d, const Command& c, TxTicket& ticke
     case Op::None:         return Result::BadArgument;
   }
 
-  if (r == Result::Ok) ticket = d.lastEnqueued();
-  return r;
+  ticket = s.ticket;
+  return s.result;
 }
 
 // TxTicket -> TxRequest, for the completion callback.

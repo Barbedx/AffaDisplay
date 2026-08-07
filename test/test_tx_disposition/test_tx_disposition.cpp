@@ -67,8 +67,7 @@ struct Rig {
   }
 
   void registerFunctions() {
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(Result::Ok),
-                      static_cast<uint8_t>(display.setPower(true)));
+    ASSERT_RESULT(Ok, display.setPower(true));
     affatest::settleCarminatRegistration(display, clock);
     pumpUntilIdle(display);
     TEST_ASSERT_TRUE(display.registered());
@@ -87,16 +86,14 @@ void test_busy_offer_never_commits_payload_bytes_or_started_state(void) {
   r.authorize(/*selfAck=*/true);
   r.registerFunctions();
 
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Result::Ok),
-                    static_cast<uint8_t>(r.display.showMenu("ONE", "TWO", "THREE")));
+  ASSERT_RESULT(Ok, r.display.showMenu("ONE", "TWO", "THREE"));
   r.link.busyOffers = 1;
   r.display.poll();
   TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(), "Busy frame is not observable");
   TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, r.display.abortPending(),
                                   "Busy did not falsely start the payload");
 
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Result::Ok),
-                    static_cast<uint8_t>(r.display.showMenu("ONE", "TWO", "THREE")));
+  ASSERT_RESULT(Ok, r.display.showMenu("ONE", "TWO", "THREE"));
   r.link.busyOffers = 1;
   r.display.poll();
   TEST_ASSERT_EQUAL_UINT32(0, r.link.sentCount());

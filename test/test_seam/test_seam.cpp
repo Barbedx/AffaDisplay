@@ -376,7 +376,7 @@ void abortFromTxCallback(const Frame&, void*) {
 
 void renderFromTxCallback(const Frame&, void*) {
   if (++g_re.hits != 1) return;
-  g_re.second = g_re.d->showMenu("XXX", "YYY", "ZZZ");
+  g_re.second = g_re.d->showMenu("XXX", "YYY", "ZZZ").result;
 }
 
 }  // namespace
@@ -387,8 +387,9 @@ void test_abortPending_from_a_tx_callback_spares_the_frame_it_is_watching(void) 
   g_re = TxReentry{};
   g_re.d = &r.d;
 
-  ASSERT_RESULT(Ok, r.d.showMenu("ONE", "TWO", "SIX"));   // multi-frame, RenderSlot::Menu
-  const TxTicket menu = r.d.lastEnqueued();
+  const Submitted sent = r.d.showMenu("ONE", "TWO", "SIX");  // multi-frame, RenderSlot::Menu
+  ASSERT_RESULT(Ok, sent);
+  const TxTicket menu = sent.ticket;
   ASSERT_RESULT(Ok, r.d.setTime("1234"));                 // queued behind it
   TEST_ASSERT_EQUAL_UINT8(1, r.d.queued());
 
@@ -521,8 +522,9 @@ void test_sync_registered_and_txcomplete_fire_at_the_right_moment(void) {
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_ev.registered, "FUNCSREG has not latched yet");
 
   r.d.setSelfAck(true);
-  ASSERT_RESULT(Ok, r.d.setPower(true));
-  const TxTicket t = r.d.lastEnqueued();
+  const Submitted power = r.d.setPower(true);
+  ASSERT_RESULT(Ok, power);
+  const TxTicket t = power.ticket;
   TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
   affatest::settleCarminatRegistration(r.d, r.clk);
   pumpUntilIdle(r.d);
@@ -533,8 +535,7 @@ void test_sync_registered_and_txcomplete_fire_at_the_right_moment(void) {
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_ev.txComplete, "one payload ticket completed");
   TEST_ASSERT_EQUAL_UINT16_MESSAGE(t, g_ev.lastTicket,
                                    "registration jobs carry kNoTicket and are invisible");
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Result::Ok),
-                          static_cast<uint8_t>(g_ev.lastResult));
+  ASSERT_RESULT(Ok, g_ev.lastResult);
 }
 
 void test_peerlost_fires_on_the_deadline_and_says_so_twice(void) {

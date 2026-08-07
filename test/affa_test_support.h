@@ -225,9 +225,20 @@ inline void pumpUntilIdle(D& d, int maxPolls = 400) {
   TEST_ASSERT_FALSE_MESSAGE(d.busy(), "transmit queue never drained");
 }
 
+// ASSERT_RESULT takes either spelling of an acceptance verdict.
+//
+// Renders return `Submitted{ticket, result}` since 2.0; the handful of calls that enqueue
+// nothing — pressKey, nav, transmitKey — still return a bare Result, because there is no
+// ticket to hand back. Both are acceptance verdicts and every assertion below is about the
+// verdict, so the macro takes the Result out of whichever it was given rather than making
+// three hundred call sites say `.result`.
+inline affa::Result resultOf(affa::Result r) { return r; }
+inline affa::Result resultOf(const affa::Submitted& s) { return s.result; }
+
 }  // namespace affatest
 
 // Result comparison that prints the two enumerators' numeric values rather than "0 != 7".
 #define ASSERT_RESULT(want, got)                                            \
   TEST_ASSERT_EQUAL_UINT8_MESSAGE(static_cast<uint8_t>(affa::Result::want), \
-                                  static_cast<uint8_t>(got), "Result::" #want " expected")
+                                  static_cast<uint8_t>(affatest::resultOf(got)),  \
+                                  "Result::" #want " expected")

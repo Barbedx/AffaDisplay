@@ -51,9 +51,12 @@ void CarminatMenuRenderer::row(uint8_t index, const char* text, bool selected) {
 // A full redraw: the 96-byte screen, then the highlight that says which of its two rows is
 // lit. Both, always — showMenu does not carry the selection.
 void CarminatMenuRenderer::endFrame() {
-  const Result screen = _panel.showMenu(_header, _row[0], _row[1], _scroll);
-  const Result hilite = sendHighlight(_selected);
-  _lastResult          = (screen != Result::Ok) ? screen : hilite;
+  // The renderer keeps reporting a bare Result rather than the ticket: it draws on the
+  // model's behalf, so there is no application call to correlate a handle with. The first
+  // failure wins, which is why the screen is tested before the highlight.
+  const Submitted screen = _panel.showMenu(_header, _row[0], _row[1], _scroll);
+  const Result    hilite = sendHighlight(_selected);
+  _lastResult          = !screen ? screen.result : hilite;
   _lastWasHighlightOnly = false;
 }
 
@@ -77,7 +80,7 @@ Result CarminatMenuRenderer::sendHighlight(uint8_t index) {
   // ordering a second time and then threw the tag away. It looked like a drift guard and
   // was not one: swapping the two constants in CarminatConstants.h changed nothing here.
   // One statement of the ordering, in the builder that puts it on the wire.
-  return _panel.highlightItem(index < kRows ? index : 0);
+  return _panel.highlightItem(index < kRows ? index : 0).result;
 }
 
 }  // namespace affa

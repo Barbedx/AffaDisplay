@@ -56,7 +56,7 @@ void test_113_bytes_is_16_frames_ending_at_PCI_2F(void) {
 
   uint8_t p[113];
   fill(p, sizeof(p));
-  const TxTicket t = r.d.enqueue(0x151, p, sizeof(p));
+  const TxTicket t = r.d.enqueue(0x151, p, sizeof(p)).ticket;
   TEST_ASSERT_NOT_EQUAL_MESSAGE(kNoTicket, t, "113 bytes is exactly the transport ceiling");
   pumpUntilIdle(r.d);
   ASSERT_RESULT(Ok, r.d.lastResult());
@@ -84,7 +84,7 @@ void test_114_bytes_is_refused_with_nothing_on_the_wire(void) {
   uint8_t p[AFFA_MAX_PAYLOAD];
   fill(p, sizeof(p));
   TEST_ASSERT_EQUAL_UINT16_MESSAGE(kNoTicket,
-                                   r.d.enqueue(0x151, p, AFFA_MAX_PAYLOAD + 1),
+                                   r.d.enqueue(0x151, p, AFFA_MAX_PAYLOAD + 1).ticket,
                                    "114 bytes would need a 17th continuation counter");
   ASSERT_RESULT(TooLong, r.d.lastResult());
 
@@ -136,7 +136,7 @@ void test_done_while_bytes_remain_completes_with_Ok(void) {
 
   uint8_t p[96];
   fill(p, sizeof(p));
-  const TxTicket t = r.d.enqueue(0x151, p, sizeof(p));
+  const TxTicket t = r.d.enqueue(0x151, p, sizeof(p)).ticket;
   TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
   pumpUntilIdle(r.d);
 
@@ -157,7 +157,7 @@ void test_partial_after_the_last_frame_is_SendFailed(void) {
 
   uint8_t p[22];
   fill(p, sizeof(p));
-  const TxTicket t = r.d.enqueue(0x151, p, sizeof(p));
+  const TxTicket t = r.d.enqueue(0x151, p, sizeof(p)).ticket;
   TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
   pumpUntilIdle(r.d);
 
@@ -172,7 +172,7 @@ void test_an_unrecognised_ack_byte_fails_the_job(void) {
 
   uint8_t p[22];
   fill(p, sizeof(p));
-  const TxTicket t = r.d.enqueue(0x151, p, sizeof(p));
+  const TxTicket t = r.d.enqueue(0x151, p, sizeof(p)).ticket;
   r.d.poll();                                   // frame 0 out, WaitAck
   TEST_ASSERT_TRUE(r.d.busy());
 
@@ -192,7 +192,7 @@ void test_an_ack_for_a_function_that_is_not_waiting_is_dropped(void) {
 
   uint8_t p[22];
   fill(p, sizeof(p));
-  const TxTicket t = r.d.enqueue(0x151, p, sizeof(p));
+  const TxTicket t = r.d.enqueue(0x151, p, sizeof(p)).ticket;
   r.d.poll();
 
   r.link.inject(affatest::mk(0x5F1, {0x74, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
@@ -223,7 +223,7 @@ void test_fragment_matches_the_transmit_fsm_for_every_length(void) {
                                       want, static_cast<uint8_t>(sizeof(want) / sizeof(want[0])));
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(isotp::frameCount(len), n, "frameCount() disagrees");
 
-    TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, payload, len));
+    TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, payload, len).ticket);
     pumpUntilIdle(r.d);
 
     for (uint8_t i = 0; i < n; ++i) {
@@ -346,7 +346,7 @@ void test_the_OEM_nav_screen_is_44_frames_with_a_twice_wrapped_counter(void) {
   msg[1] = 0x2E;                 // low byte of 302
   for (uint16_t i = 2; i < sizeof(msg); ++i) msg[i] = static_cast<uint8_t>(i);
 
-  const TxTicket t = r.d.enqueueExternal(0x1F1, msg, sizeof(msg));
+  const TxTicket t = r.d.enqueueExternal(0x1F1, msg, sizeof(msg)).ticket;
   TEST_ASSERT_NOT_EQUAL_MESSAGE(kNoTicket, t, "304 bytes is inside AFFA_MAX_EXTERNAL_PAYLOAD");
   pumpUntilIdle(r.d);
   ASSERT_RESULT(Ok, r.d.lastResult());
@@ -380,7 +380,7 @@ void test_external_payload_is_borrowed_not_copied(void) {
   // reinstating the 1.1 kB this path exists to avoid.
   static uint8_t msg[16];
   for (uint8_t i = 0; i < sizeof(msg); ++i) msg[i] = 0xAA;
-  const TxTicket t = r.d.enqueueExternal(0x151, msg, sizeof(msg));
+  const TxTicket t = r.d.enqueueExternal(0x151, msg, sizeof(msg)).ticket;
   TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
   msg[0] = 0x5A;
   pumpUntilIdle(r.d);
@@ -399,14 +399,14 @@ void test_external_refuses_coalescing_and_reassert(void) {
   // flag would reject every ordinary call — this asserts the distinction stays that way.
   TxOptions co;
   co.slot = RenderSlot::Text;
-  TEST_ASSERT_EQUAL_UINT16_MESSAGE(kNoTicket, r.d.enqueueExternal(0x151, msg, sizeof(msg), co),
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(kNoTicket, r.d.enqueueExternal(0x151, msg, sizeof(msg), co).ticket,
                                    "coalescing would re-copy into a slot that owns no storage");
   ASSERT_RESULT(BadArgument, r.d.lastResult());
 
   TxOptions ra;
   ra.reassertAfterSession = true;
   ra.slot                 = RenderSlot::Control;
-  TEST_ASSERT_EQUAL_UINT16_MESSAGE(kNoTicket, r.d.enqueueExternal(0x151, msg, sizeof(msg), ra),
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(kNoTicket, r.d.enqueueExternal(0x151, msg, sizeof(msg), ra).ticket,
                                    "the control cache is a fixed AFFA_MAX_PAYLOAD copy");
   ASSERT_RESULT(BadArgument, r.d.lastResult());
 }
@@ -416,7 +416,7 @@ void test_external_still_has_a_ceiling(void) {
   r.up();
   static uint8_t msg[8] = {0};
   TEST_ASSERT_EQUAL_UINT16_MESSAGE(
-      kNoTicket, r.d.enqueueExternal(0x151, msg, AFFA_MAX_EXTERNAL_PAYLOAD + 1),
+      kNoTicket, r.d.enqueueExternal(0x151, msg, AFFA_MAX_EXTERNAL_PAYLOAD + 1).ticket,
       "a borrowed pointer is still bounded");
   ASSERT_RESULT(TooLong, r.d.lastResult());
 }
@@ -436,7 +436,7 @@ void test_split_frames_prefix_then_body_as_one_message(void) {
   for (uint8_t i = 2; i < sizeof(prefix); ++i) prefix[i] = static_cast<uint8_t>(0xA0 + i);
   for (uint16_t i = 0; i < sizeof(body); ++i)  body[i]  = static_cast<uint8_t>(i);
 
-  const TxTicket t = r.d.enqueueSplit(0x1F1, prefix, sizeof(prefix), body, sizeof(body));
+  const TxTicket t = r.d.enqueueSplit(0x1F1, prefix, sizeof(prefix), body, sizeof(body)).ticket;
   TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
   pumpUntilIdle(r.d);
   ASSERT_RESULT(Ok, r.d.lastResult());
@@ -466,7 +466,7 @@ void test_split_borrows_the_body_but_copies_the_prefix(void) {
   static uint8_t body[16];
   for (uint8_t i = 0; i < sizeof(body); ++i) body[i] = 0xAA;
 
-  const TxTicket t = r.d.enqueueSplit(0x151, prefix, sizeof(prefix), body, sizeof(body));
+  const TxTicket t = r.d.enqueueSplit(0x151, prefix, sizeof(prefix), body, sizeof(body)).ticket;
   TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
   prefix[2] = 0x99;      // copied: must NOT be seen
   body[0]   = 0x5A;      // borrowed: MUST be seen
@@ -486,7 +486,7 @@ void test_split_rejects_a_render_slot(void) {
   TxOptions o;
   o.slot = RenderSlot::Text;
   TEST_ASSERT_EQUAL_UINT16(kNoTicket,
-                           r.d.enqueueSplit(0x151, prefix, sizeof(prefix), body, sizeof(body), o));
+                           r.d.enqueueSplit(0x151, prefix, sizeof(prefix), body, sizeof(body), o).ticket);
   ASSERT_RESULT(BadArgument, r.d.lastResult());
 }
 

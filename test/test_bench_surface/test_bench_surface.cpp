@@ -170,7 +170,7 @@ void test_endpoint_text_reaches_the_panel(void) {
   TEST_ASSERT_TRUE_MESSAGE(b.d.registered(), "the handshake must complete first");
 
   g_txN = 0;
-  TEST_ASSERT_EQUAL(Result::Ok, b.d.setText("AFFA OK", 255));
+  ASSERT_RESULT(Ok, b.d.setText("AFFA OK", 255));
   b.apply();
   TEST_ASSERT_EQUAL_STRING_MESSAGE("AFFA OK", decodeTx().header,
                                    "the wire decoded to a different string");
@@ -180,7 +180,7 @@ void test_endpoint_text_reaches_the_panel(void) {
 void test_endpoint_clock_reaches_the_wire(void) {
   Bench b; b.begin();
   g_txN = 0;
-  TEST_ASSERT_EQUAL(Result::Ok, b.d.setTime("1234"));
+  ASSERT_RESULT(Ok, b.d.setTime("1234"));
   b.apply();
   // 0x151: 05 'V' '1' '2' '3' '4' — the clock frame, verbatim from WIRE-SPEC §8.2.
   const uint8_t want[6] = {0x05, 'V', '1', '2', '3', '4'};
@@ -192,13 +192,13 @@ void test_endpoint_screen_off_then_on(void) {
   Bench b; b.begin();
 
   g_txN = 0;
-  TEST_ASSERT_EQUAL(Result::Ok, b.d.setPower(false));
+  ASSERT_RESULT(Ok, b.d.setPower(false));
   b.apply();
   const uint8_t off[3] = {0x03, 0x52, 0x00};
   TEST_ASSERT_TRUE_MESSAGE(sawTx(0x151, off, 3), "no display-off frame");
 
   g_txN = 0;
-  TEST_ASSERT_EQUAL(Result::Ok, b.d.setPower(true));
+  ASSERT_RESULT(Ok, b.d.setPower(true));
   b.apply();
   const uint8_t on[3] = {0x03, 0x52, 0x09};
   TEST_ASSERT_TRUE_MESSAGE(sawTx(0x151, on, 3), "no display-on frame");
@@ -209,7 +209,7 @@ void test_endpoint_popup_shown_then_hidden(void) {
   Bench b; b.begin();
 
   g_txN = 0;
-  TEST_ASSERT_EQUAL(Result::Ok, b.d.showPopupText("VOL 28", 0x09, 0xFF, 0x60));
+  ASSERT_RESULT(Ok, b.d.showPopupText("VOL 28", 0x09, 0xFF, 0x60));
   b.apply();
   // The wire carries eight cells, space-padded — that is pinned byte for byte by
   // test_carminat_wire. Here we assert the MEANING, and the decoder trims the padding,
@@ -218,7 +218,7 @@ void test_endpoint_popup_shown_then_hidden(void) {
                                    "the popup text did not decode");
 
   g_txN = 0;
-  TEST_ASSERT_EQUAL(Result::Ok, b.d.hidePopup());
+  ASSERT_RESULT(Ok, b.d.hidePopup());
   b.apply();
   const uint8_t close[3] = {0x02, 0x54, 0x03};
   TEST_ASSERT_TRUE_MESSAGE(sawTx(0x151, close, 3), "no popup-close frame");
@@ -228,7 +228,7 @@ void test_endpoint_popup_shown_then_hidden(void) {
 void test_endpoint_menu_with_three_parameters_renders(void) {
   Bench b; b.begin();
 
-  TEST_ASSERT_EQUAL(Result::Ok, b.d.nav(NavCommand::Open));
+  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Open));
   b.apply();
   TEST_ASSERT_TRUE_MESSAGE(b.d.getMenu().isOpen(), "nav(Open) did not open the menu");
   TEST_ASSERT_EQUAL_UINT8_MESSAGE(3, b.d.getMenu().count(), "the demo menu must have 3 items");
@@ -251,30 +251,30 @@ void test_endpoint_navigation_commands(void) {
   Bench b; b.begin();
   Menu& m = b.d.getMenu();
 
-  TEST_ASSERT_EQUAL(Result::Ok, b.d.nav(NavCommand::Open)); b.apply();
+  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Open)); b.apply();
   TEST_ASSERT_EQUAL_UINT8(0, m.selectedIndex());
 
   // наступний / попередній
-  TEST_ASSERT_EQUAL(Result::Ok, b.d.nav(NavCommand::Next)); b.apply();
+  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Next)); b.apply();
   TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, m.selectedIndex(), "Next did not advance");
-  TEST_ASSERT_EQUAL(Result::Ok, b.d.nav(NavCommand::Prev)); b.apply();
+  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Prev)); b.apply();
   TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, m.selectedIndex(), "Prev did not go back");
 
   // вибрати — enters edit on the integer item
-  TEST_ASSERT_EQUAL(Result::Ok, b.d.nav(NavCommand::Select)); b.apply();
+  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Select)); b.apply();
   TEST_ASSERT_TRUE_MESSAGE(m.isEditing(), "Select did not enter edit mode");
 
   // вправо / вліво — the value moves by the field's step and comes back
   const int before = m.item(0)->fields[0].value;
-  TEST_ASSERT_EQUAL(Result::Ok, b.d.nav(NavCommand::Increase)); b.apply();
+  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Increase)); b.apply();
   const int up = m.item(0)->fields[0].value;
   TEST_ASSERT_TRUE_MESSAGE(up > before, "Increase did not raise the value");
-  TEST_ASSERT_EQUAL(Result::Ok, b.d.nav(NavCommand::Decrease)); b.apply();
+  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Decrease)); b.apply();
   TEST_ASSERT_EQUAL_INT_MESSAGE(before, m.item(0)->fields[0].value,
                                 "Decrease did not undo Increase");
 
   // назад — leaves edit, then closes
-  TEST_ASSERT_EQUAL(Result::Ok, b.d.nav(NavCommand::Back)); b.apply();
+  ASSERT_RESULT(Ok, b.d.nav(NavCommand::Back)); b.apply();
   TEST_ASSERT_FALSE_MESSAGE(m.isEditing(), "Back did not leave edit mode");
 }
 

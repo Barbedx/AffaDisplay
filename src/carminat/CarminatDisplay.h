@@ -90,7 +90,7 @@ class CarminatDisplay final : public AffaDisplayBase {
   // verdict — "was it queued?" — never a delivery verdict; that arrives through
   // onComplete(). `digit` is ignored on this panel; it exists for the UpdateList
   // signature.
-  [[nodiscard]] Result setText(const char* text, uint8_t digit = 255) override;
+  Submitted setText(const char* text, uint8_t digit = 255) override;
 
   // setText WITH THE HEADER EXPOSED. The plain override above hard-codes the four bytes
   // after the command; they are documented (MeganeCAN's CarminatDisplay.cpp, cross-checked
@@ -111,13 +111,13 @@ class CarminatDisplay final : public AffaDisplayBase {
   //
   // Format 0x31 is why the OEM's "   1056 " is 105.6 FM and not the number 1056 — the point
   // is drawn between the digits by the panel, not by the sender.
-  [[nodiscard]] Result setTextStyled(const char* text, uint8_t icon, uint8_t srcIcon,
+  Submitted setTextStyled(const char* text, uint8_t icon, uint8_t srcIcon,
                                      uint8_t fmt,
                                      uint8_t iconBank2 = carminat::kIconBank2);
-  [[nodiscard]] Result setTime(const char* hhmm) override;
-  [[nodiscard]] Result setPower(bool on) override;
+  Submitted setTime(const char* hhmm) override;
+  Submitted setPower(bool on) override;
 
-  [[nodiscard]] Result showMenu(const char* header, const char* row0, const char* row1,
+  Submitted showMenu(const char* header, const char* row0, const char* row1,
                                 uint8_t scrollIndicator = carminat::kScrollDown) override;
 
   // THE TWO-ROW MENU WITH A GUTTER GLYPH AND A SCROLLBAR. TWO SEPARATE FIELDS:
@@ -137,22 +137,22 @@ class CarminatDisplay final : public AffaDisplayBase {
   // `0x80 0x00` is glyph 0 with the suppress bit set and no scrollbar, doubly blank and
   // unreachable from any caller, which is the entire reason this panel looked for months as
   // though it had no icon-bearing list. The same trap setTextStyled() was built to open.
-  [[nodiscard]] Result showMenuIcon(const char* header, const char* row0, const char* row1,
+  Submitted showMenuIcon(const char* header, const char* row0, const char* row1,
                                     uint8_t scrollIndicator = carminat::kScrollDown,
                                     uint8_t icon = carminat::kMenuIconOemBlank,
                                     uint8_t thumb = carminat::kMenuThumbNone);
 
-  [[nodiscard]] Result highlightItem(uint8_t row) override;
+  Submitted highlightItem(uint8_t row) override;
 
-  [[nodiscard]] Result showPopupText(const char* text, uint8_t icon = carminat::kPopupIcon,
+  Submitted showPopupText(const char* text, uint8_t icon = carminat::kPopupIcon,
                                      uint8_t srcIcon = carminat::kSrcIconNone,
                                      uint8_t fmt = carminat::kFormatPlain) override;
-  [[nodiscard]] Result hidePopup() override;
+  Submitted hidePopup() override;
 
   // NO hideFullscreenText(). A fullscreen is not an overlay: the next render replaces it,
   // measured on a real Carminat. hidePopup() is the only close this panel needs, and it is
   // the same `02 54 03` the removed method sent. Removed 2026-08-06.
-  [[nodiscard]] Result showFullscreenText(const char* l1, const char* l2,
+  Submitted showFullscreenText(const char* l1, const char* l2,
                                           const char* l3) override;
 
   // The message box, mode 0x05, with its BUTTONS AS A REAL FIELD. `labels` is
@@ -168,7 +168,7 @@ class CarminatDisplay final : public AffaDisplayBase {
   // two-button form is 119 wire bytes and wraps the ISO-TP counter to 0x20 — which is what
   // the OEM's own `CONFIRM SCREEN NO.csv` does, and what the nav pane has done 24 912 times
   // on this bench.
-  [[nodiscard]] Result showMessageBox(const char* row0, const char* row1,
+  Submitted showMessageBox(const char* row0, const char* row1,
                                       const char* const* labels = nullptr,
                                       uint8_t buttonCount = carminat::kButtonsNone,
                                       uint8_t selected = 0);
@@ -176,12 +176,12 @@ class CarminatDisplay final : public AffaDisplayBase {
   // A ONE-BUTTON OK BOX, and `caption` IS THE BUTTON'S LABEL — six characters, the size of
   // the field it lands in. That is what it always was; the name simply never said so, and
   // a 7th character used to spill into the body's first byte.
-  [[nodiscard]] Result showConfirmBox(const char* caption, const char* row0,
+  Submitted showConfirmBox(const char* caption, const char* row0,
                                       const char* row1) override;
 
   // Move the selection between a message box's buttons: `03 29 05 <index>`. This is NOT
   // highlightItem(), which is the two-row list's `29 01 <rowtag>` form.
-  [[nodiscard]] Result selectBoxButton(uint8_t index);
+  Submitted selectBoxButton(uint8_t index);
 
   // showInfoPopup IS showInfoMenu with the OEM's default offsets — the same three 0x76
   // messages, not a second screen. Kept only as the IDisplay spelling; new code should call
@@ -190,7 +190,7 @@ class CarminatDisplay final : public AffaDisplayBase {
   // NO hideInfoPopup(). It never was a close command: it sent setText("RENAULT"), a guess
   // at the OEM's idle banner dressed as protocol. No capture shows how these rows are
   // dismissed, and inventing one is how a guess becomes a fact. Removed 2026-08-06.
-  [[nodiscard]] Result showInfoPopup(const char* l1, const char* l2,
+  Submitted showInfoPopup(const char* l1, const char* l2,
                                      const char* l3) override;
 
 #if AFFA_ENABLE_BIGMENU
@@ -217,7 +217,7 @@ class CarminatDisplay final : public AffaDisplayBase {
   // two unrelated fields; see showMenuIcon() above and the swept table in
   // CarminatConstants.h. THE THUMB MATTERS MOST HERE: this is the builder that scrolls a
   // long list, and `firstVisible` moves the viewport without moving the scrollbar.
-  [[nodiscard]] Result showMenuN(uint8_t* scratch, uint16_t cap, const char* title,
+  Submitted showMenuN(uint8_t* scratch, uint16_t cap, const char* title,
                                  const char* const* items, uint8_t count,
                                  uint8_t firstVisible = 0, uint8_t selected = 0,
                                  uint8_t scrollMask = 0,
@@ -227,7 +227,7 @@ class CarminatDisplay final : public AffaDisplayBase {
   // Move the selection inside a list already on screen — eight bytes instead of the whole
   // screen. highlightItem() is the two-row form and refuses anything past row 1; this takes
   // an ITEM INDEX, and the panel scrolls its two-row viewport to wherever it lands.
-  [[nodiscard]] Result selectMenuItem(uint8_t index);
+  Submitted selectMenuItem(uint8_t index);
 #endif
 
 #if AFFA_ENABLE_NAV
@@ -241,19 +241,19 @@ class CarminatDisplay final : public AffaDisplayBase {
   // The pane is a LAYER. It survives a menu, an info menu draws alongside it, and it can be
   // replaced underneath an open popup — so this is a widget you set once and update, not a
   // screen you switch to. [BENCH 2026-08-05]
-  [[nodiscard]] Result showNavBitmap(const uint8_t* bitmap);
+  Submitted showNavBitmap(const uint8_t* bitmap);
 
   // `25 00 00 00` / `25 00 03 00` — the OEM alternates these at 820 ms while the nav screen
   // is up, with nothing else on the bus. Almost certainly the blink of a flashing element.
   // Four bytes, verbatim from capture; what it actually does is NOT confirmed on glass.
-  [[nodiscard]] Result navTick(bool phase);
+  Submitted navTick(bool phase);
 #endif
 
   // The offset-taking form of showInfoPopup, exposed because the three row slots and the
   // format prefix are the only part of this screen still being reverse-engineered. The
   // defaults reproduce the OEM settings list byte for byte. Sends ONE MESSAGE PER ROW —
   // three queue slots, and they deliberately do not coalesce against each other.
-  [[nodiscard]] Result showInfoMenu(const char* row0, const char* row1, const char* row2,
+  Submitted showInfoMenu(const char* row0, const char* row1, const char* row2,
                                     uint8_t offset0 = carminat::kInfoOffset0,
                                     uint8_t offset1 = carminat::kInfoOffset1,
                                     uint8_t offset2 = carminat::kInfoOffset2,
@@ -308,7 +308,7 @@ class CarminatDisplay final : public AffaDisplayBase {
 
  private:
   // enqueue() + "translate kNoTicket into the reason". Every builder ends in this.
-  [[nodiscard]] Result submit(uint16_t funcId, const uint8_t* data, uint8_t len,
+  Submitted submit(uint16_t funcId, const uint8_t* data, uint8_t len,
                               RenderSlot slot, bool coalesce = (AFFA_TX_COALESCE != 0),
                               Priority priority = Priority::Normal,
                               bool reassertAfterSession = false);
