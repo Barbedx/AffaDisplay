@@ -617,6 +617,103 @@ void test_first_send_after_a_resync_registers_both_functions_in_order(void) {
 
 // ---------------------------------------------------------------------------
 
+#if AFFA_ENABLE_NAV
+// ---------------------------------------------------------------------------
+// The nav bitmap header — fourteen bytes, ten of them unmeasured
+// ---------------------------------------------------------------------------
+// showNavBitmap() sent carminat::kNavHeader and no caller could reach it, which is the same
+// shape of defect as the list screen's gutter glyph and scrollbar: a capability that does
+// not exist as far as this library is concerned because the byte that selects it is welded
+// into the builder. Owner, 2026-08-08: a stripe appears on the nav pane after a display
+// power-cycle, a setText and then a bitmap, and no capture holds a second mode.
+//
+// These tests do not claim to know what any byte MEANS. They pin two things a sweep needs:
+// the default is still the captured header byte for byte, and each supplied byte lands where
+// it was put and nowhere else.
+
+namespace {
+// Reassemble the 16-byte prefix (2 PCI + 14 header) out of the first three transmitted
+// frames of the 0x1F1 transfer, then drain the rest of the image.
+void takeNavPrefix(LoopbackLink<256>& link, uint8_t out[16]) {
+  Frame f;
+  uint8_t n = 0;
+  bool first = true;
+  while (link.takeSent(f)) {
+    if (f.id != carminat::kIdNav) continue;
+    // Frame 0 carries two PCI bytes then payload; a continuation carries one PCI byte.
+    for (uint8_t i = first ? 0 : 1; i < f.len && n < 16; ++i) out[n++] = f.data[i];
+    first = false;
+  }
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(16, n, "the nav transfer must carry a 16-byte prefix");
+}
+
+void expectHeader(const uint8_t got[16], const uint8_t want[14], const char* what) {
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x11, got[0], what);   // FF, declared length high nibble
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x2E, got[1], what);   // 302 low byte
+  TEST_ASSERT_EQUAL_HEX8_ARRAY_MESSAGE(want, got + 2, 14, what);
+}
+}  // namespace
+
+void test_showNavBitmap_sends_the_captured_header_verbatim(void) {
+  // THE REGRESSION GUARD. The plain call must not have moved a byte when the header became
+  // reachable: what renders on the bench is what was captured.
+  Rig r; r.up();
+  static const uint8_t kImage[carminat::kNavBitmapBytes] = {0};
+  ASSERT_RESULT(Ok, r.d.showNavBitmap(kImage));
+  pumpUntilIdle(r.d);
+
+  uint8_t got[16];
+  takeNavPrefix(r.link, got);
+  expectHeader(got, carminat::kNavHeader, "showNavBitmap [CAP-VERBATIM]");
+}
+
+void test_each_nav_header_byte_moves_its_own_byte_and_nothing_else(void) {
+  // The check that would have caught the list screen's "one icon pair" misreading: sweep
+  // each byte ALONE and assert the other thirteen did not move. Three co-varying captures
+  // are not a field (see the 2026-08-07 entry in CHANGELOG.md).
+  static const uint8_t kImage[carminat::kNavBitmapBytes] = {0};
+
+  // [12] and [13] are the geometry and are deliberately not swept: the declared ISO-TP
+  // length is computed from kNavBitmapBytes, so changing them would describe a payload that
+  // is not there. Every other byte is fair game.
+  static const uint8_t kSweep[] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+
+  for (const uint8_t idx : kSweep) {
+    Rig r; r.up();
+
+    uint8_t hdr[14];
+    std::memcpy(hdr, carminat::kNavHeader, sizeof(hdr));
+    hdr[idx] = static_cast<uint8_t>(hdr[idx] ^ 0xFF);   // something it certainly was not
+
+    ASSERT_RESULT(Ok, r.d.showNavBitmapWithHeader(hdr, kImage));
+    pumpUntilIdle(r.d);
+
+    uint8_t got[16];
+    takeNavPrefix(r.link, got);
+
+    char msg[96];
+    std::snprintf(msg, sizeof(msg), "nav header byte [%u] must reach the wire", idx);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(hdr[idx], got[2 + idx], msg);
+
+    for (uint8_t i = 0; i < 14; ++i) {
+      if (i == idx) continue;
+      std::snprintf(msg, sizeof(msg), "sweeping [%u] must not move [%u]", idx, i);
+      TEST_ASSERT_EQUAL_HEX8_MESSAGE(carminat::kNavHeader[i], got[2 + i], msg);
+    }
+    // And the declared length is unaffected by anything in the header.
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x11, got[0], "the PCI must not move");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x2E, got[1], "nor the declared length");
+  }
+}
+
+void test_showNavBitmapWithHeader_refuses_a_null_header(void) {
+  Rig r; r.up();
+  static const uint8_t kImage[carminat::kNavBitmapBytes] = {0};
+  ASSERT_RESULT(BadArgument, r.d.showNavBitmapWithHeader(nullptr, kImage));
+  ASSERT_RESULT(BadArgument, r.d.showNavBitmapWithHeader(carminat::kNavHeader, nullptr));
+}
+#endif  // AFFA_ENABLE_NAV
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -855,5 +952,10 @@ int main(int, char**) {
   RUN_TEST(test_selectBoxButton_is_a_three_byte_single_frame);
   RUN_TEST(test_showInfoPopup_is_three_messages_space_padded);
   RUN_TEST(test_first_send_after_a_resync_registers_both_functions_in_order);
+#if AFFA_ENABLE_NAV
+  RUN_TEST(test_showNavBitmap_sends_the_captured_header_verbatim);
+  RUN_TEST(test_each_nav_header_byte_moves_its_own_byte_and_nothing_else);
+  RUN_TEST(test_showNavBitmapWithHeader_refuses_a_null_header);
+#endif
   return UNITY_END();
 }

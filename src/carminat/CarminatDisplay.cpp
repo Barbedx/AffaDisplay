@@ -445,14 +445,19 @@ Submitted CarminatDisplay::showMenuN(uint8_t* scratch, uint16_t cap, const char*
 // RAM at rest: 16 bytes of stack per call, and 288 bytes that stay in the caller's flash.
 // See AffaDisplayBase::enqueueSplit.
 Submitted CarminatDisplay::showNavBitmap(const uint8_t* bitmap) {
-  if (!bitmap) return Submitted::refused(Result::BadArgument);
+  return showNavBitmapWithHeader(kNavHeader, bitmap);
+}
+
+Submitted CarminatDisplay::showNavBitmapWithHeader(const uint8_t* header,
+                                                   const uint8_t* bitmap) {
+  if (!header || !bitmap) return Submitted::refused(Result::BadArgument);
 
   uint8_t prefix[2 + sizeof(kNavHeader)];
   constexpr uint16_t kDeclared = sizeof(kNavHeader) + kNavBitmapBytes;   // 302
   static_assert(kDeclared == 302, "the OEM declares 302 bytes on 0x1F1");
   prefix[0] = static_cast<uint8_t>(kPciFirstFrame | (kDeclared >> 8));   // 0x11
   prefix[1] = static_cast<uint8_t>(kDeclared & 0xFF);                    // 0x2E
-  std::memcpy(prefix + 2, kNavHeader, sizeof(kNavHeader));
+  std::memcpy(prefix + 2, header, sizeof(kNavHeader));
 
   TxOptions opt;                    // RenderSlot::None: enqueueSplit refuses anything else,
   opt.coalesce = false;             // and a borrowed image must never be replaced in place

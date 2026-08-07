@@ -361,6 +361,17 @@ must not move a byte at any point — **no step in this plan changes the wire.**
    its HTTP handlers while `foreignPolls` and `cbOverruns` both stay at zero — which is
    §1.2's race, now impossible rather than merely unobserved.
 
+   **Two console features the demo owes, both requested by the owner 2026-08-08:**
+   * **A nav-header sweep card.** `showNavBitmapWithHeader()` exposes the fourteen bytes;
+     ten are unmeasured, and the reported symptom — a stripe on the nav pane after a display
+     power-cycle, a `setText`, then a bitmap — has no capture behind it. The card needs ±1
+     stepping per byte and a one-click "restore captured", because a sweep whose baseline is
+     lost is a sweep that proves nothing.
+   * **A wire preview before every send.** The menu icon/thumb cards already show the bytes
+     they are about to put on the bus; it should be the rule, not one card's feature. It is
+     also what makes a sweep safe to run against glass: you see what you are about to change
+     before it changes.
+
 9. **Docs.** `docs/API.md` §4 (the threading contract becomes one mode with an opt-out),
    §3b.4 (`Submitted`), the knob table; `README.md`; `openspec/specs/owned-task/spec.md` and
    `render-queue/spec.md`; `CHANGELOG.md` with every BREAKING item and its migration line.

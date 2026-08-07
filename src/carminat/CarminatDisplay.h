@@ -244,6 +244,30 @@ class CarminatDisplay final : public AffaDisplayBase {
   // screen you switch to. [BENCH 2026-08-05]
   Submitted showNavBitmap(const uint8_t* bitmap);
 
+  // THE SAME TRANSFER WITH THE HEADER EXPOSED — 14 bytes the caller supplies, in place of
+  // carminat::kNavHeader. `bitmap` is still the 288-byte image and is still BORROWED.
+  //
+  // WHY RAW BYTES AND NOT NAMED PARAMETERS. Ten of those fourteen are UNMEASURED:
+  //
+  //   [2] [3]    `00 25` — unknown, possibly one 16-bit field
+  //   [4..10]    `41 42 43 44 45 46 00` — a seven-byte slot holding "ABCDEF\0" in the
+  //              capture, and CONFIRMED NOT TO BE TEXT: ASCII written here draws nothing
+  //   [11]       `01` — unknown, format or bit depth
+  //
+  // showMenuIcon() got named parameters because a bench sweep had already established what
+  // its two bytes DO. Naming these would be inventing vocabulary for bytes nobody has
+  // measured, which is the mistake docs/PROTOCOL-NOTES.md keeps warning about. When a sweep
+  // settles one, it earns a name and a constant, exactly as kMenuIcon* did.
+  //
+  // WHAT PROMPTED IT (owner, 2026-08-08): a stripe appears on the nav pane after a display
+  // power-cycle followed by setText and then a bitmap, and no capture holds a second mode.
+  // A byte in this header is the first suspect and there was no way to ask.
+  //
+  // [12] [13] are the geometry and MUST stay 48/48: the declared ISO-TP length is computed
+  // from kNavBitmapBytes, so a header claiming a different size describes a payload that is
+  // not there. Sweep [2], [3], [4..10] and [11]; leave the last two alone.
+  Submitted showNavBitmapWithHeader(const uint8_t* header, const uint8_t* bitmap);
+
   // `25 00 00 00` / `25 00 03 00` — the OEM alternates these at 820 ms while the nav screen
   // is up, with nothing else on the bus. Almost certainly the blink of a flashing element.
   // Four bytes, verbatim from capture; what it actually does is NOT confirmed on glass.
