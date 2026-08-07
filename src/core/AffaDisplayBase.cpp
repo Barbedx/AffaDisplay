@@ -192,7 +192,6 @@ void AffaDisplayBase::pumpRx() {
     const uint32_t ov = _link.stats().ringOverflow;
     if (ov != _lastOverflow) {
       _lastOverflow = ov;
-      reportLinkError(LinkErrorKind::RingOverflow, ov);
       AFFA_LOGW(kTag, "RX ring overflow, total %lu — poll() too slow or ring too small",
                 static_cast<unsigned long>(ov));
     }
@@ -339,7 +338,7 @@ void AffaDisplayBase::pumpLink() {
   // would put the "re-issue it yourself" burden straight back where this release took it
   // from.
   _lossReasonNext = LossReason::LinkRestarted;
-  setSync(SyncState::Failed | SyncState::Start, EventKind::PeerLost);
+  setSync(SyncState::Failed | SyncState::Start);
   dropRegistrations();
   // A newly installed controller must not resurrect an old Carminat session by itself.
   // The panel owns the opening message; wait for its next 61 11 and keep this node silent
@@ -406,15 +405,11 @@ void AffaDisplayBase::routeKey(Key k, KeyEdge e) {
 #endif
 
   // Keys the menu did not consume fall through to the application.
+  //
+  // This used to be followed by a second delivery of the same key to the Layer 2 event
+  // sink — which fired whether or not the menu had consumed it, so the two disagreed by
+  // design. With that sink gone there is one key delivery, and KeyCb is it.
   if (!consumed && _keyCb) _keyCb(k, e, _keyCtx);
-
-  // The event fires whether or not the menu consumed the key, and always AFTER the menu
-  // has had it, so ev.key is what arrived rather than what was left over.
-  Event ev;
-  ev.kind     = EventKind::Key;
-  ev.key.key  = k;
-  ev.key.edge = e;
-  emit(ev);
 }
 
 Result AffaDisplayBase::transmitKey(Key k, KeyEdge e) {
@@ -458,7 +453,7 @@ Result AffaDisplayBase::pressKey(Key k, KeyEdge e, KeySource src) {
   if (hasSource(src, KeySource::Wire)) wire = transmitKey(k, e);
 
   if (hasSource(src, KeySource::Local)) {
-    bool observable = (_keyCb != nullptr) || (_evCb != nullptr);
+    bool observable = (_keyCb != nullptr);
 #if AFFA_ENABLE_MENU
     observable = observable || _hotkeyOn || menuOpen();
 #endif

@@ -1,13 +1,14 @@
-// The three-layer observation seam.
+// The observation seam — ONE LAYER, as of 2.0, plus the callbacks that ship with it.
 //
-// Layer 0 — one frame tap, every frame in and out, in wire order.
-// Layer 1 — a fixed table of FrameMatch subscriptions, purely observational.
-// Layer 2 — decoded protocol events.
+// There were three. Layer 1 was a fixed table of FrameMatch subscriptions and Layer 2 was a
+// decoded event sink; both were deleted, and the evidence is in the comment above Direction
+// in core/AffaTypes.h — across nineteen shipped examples neither was called once, while
+// Layer 0 was called by seven.
 //
-// The two silent failure modes this suite exists to catch: a stale SubHandle unsubscribing
-// the slot's NEXT owner (the failure mode of a bare index, and it is silent), and a full
-// table returning kNoSub to a caller who ignored the return value — which is a subscription
-// that never fires and looks exactly like a decoder bug.
+// WHAT THIS SUITE NOW PROVES, and it is the claim the deletion rests on: everything Layer 1
+// did is three lines inside a Layer 0 tap. The two re-entrancy tests below used to hook a
+// transmitted frame with `subscribe(exactId(0x151, Direction::Tx), cb)`. They now hook it
+// with `onFrame(cb)` and an `if` — same assertions, same failures caught, one seam.
 
 #include "../affa_test_support.h"
 
@@ -25,14 +26,6 @@ namespace {
 // Recorders
 // ---------------------------------------------------------------------------
 
-struct Counters {
-  int hits[8] = {0};
-};
-Counters g_c;
-
-template <int N>
-void hit(const Frame&, void*) { ++g_c.hits[N]; }
-
 int g_tapRx = 0, g_tapTx = 0;
 uint32_t g_tapLastId = 0;
 void tapAll(const Frame& f, Direction d, void*) {
@@ -42,36 +35,22 @@ void tapAll(const Frame& f, Direction d, void*) {
 int g_tap2 = 0;
 void tapSecond(const Frame&, Direction, void*) { ++g_tap2; }
 
-struct EventLog {
-  int sync = 0, registered = 0, peerLost = 0, key = 0;
-  int txComplete = 0, linkError = 0;
-  SyncState prev = SyncState::None, now = SyncState::None;
-  Key       lastKey = Key::Load;
-  KeyEdge   lastEdge = KeyEdge::Click;
+// The two callbacks that DO ship with the library, recorded so the tests below can assert
+// when they fire rather than that they exist.
+struct CbLog {
+  int       sync       = 0;
+  SyncState now        = SyncState::None;
+  int       completes  = 0;
   TxTicket  lastTicket = kNoTicket;
   Result    lastResult = Result::Ok;
-  LinkErrorKind lastError = LinkErrorKind::RingOverflow;
-  int       ringOverflows = 0, txDrops = 0;
 };
-EventLog g_ev;
+CbLog g_cb;
 
-void record(const Event& e, void*) {
-  switch (e.kind) {
-    case EventKind::SyncChanged:
-      ++g_ev.sync; g_ev.prev = e.sync.prev; g_ev.now = e.sync.now; break;
-    case EventKind::Registered:    ++g_ev.registered; break;
-    case EventKind::PeerLost:      ++g_ev.peerLost; break;
-    case EventKind::Key:
-      ++g_ev.key; g_ev.lastKey = e.key.key; g_ev.lastEdge = e.key.edge; break;
-    case EventKind::TxComplete:
-      ++g_ev.txComplete; g_ev.lastTicket = e.tx.ticket; g_ev.lastResult = e.tx.result; break;
-    case EventKind::LinkError:
-      ++g_ev.linkError;
-      g_ev.lastError = e.error.kind;
-      if (e.error.kind == LinkErrorKind::RingOverflow) ++g_ev.ringOverflows;
-      if (e.error.kind == LinkErrorKind::TxDropped)    ++g_ev.txDrops;
-      break;
-  }
+void recordSync(SyncState s, void*) { ++g_cb.sync; g_cb.now = s; }
+void recordComplete(TxTicket t, Result r, void*) {
+  ++g_cb.completes;
+  g_cb.lastTicket = t;
+  g_cb.lastResult = r;
 }
 
 struct Rig {
@@ -99,263 +78,15 @@ struct Rig {
   }
 };
 
-FrameMatch exactId(uint32_t id, Direction dir = Direction::Rx) {
-  FrameMatch m{};
-  m.id     = id;
-  m.idMask = 0x7FF;
-  m.dir    = dir;
-  return m;
-}
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// Layer 1 — matching
-// ---------------------------------------------------------------------------
-
-void test_a_default_match_is_inert_rather_than_a_firehose(void) {
-  // A DEFAULT-CONSTRUCTED FrameMatch matches id 0x000 inbound and nothing else. AFFA uses
-  // no such id, so a half-filled match fires never instead of on everything.
-  Rig r;
-  r.sync();
-  g_c = Counters{};
-
-  FrameMatch m{};
-  TEST_ASSERT_TRUE(r.d.subscribe(m, &hit<0>, nullptr).valid());
-  r.link.inject(mk(0x151, {1, 2, 3, 4, 5, 6, 7, 8}));
-  r.link.inject(mk(0x1C1, {1, 2, 3, 4, 5, 6, 7, 8}));
-  r.d.poll();
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_c.hits[0], "an unfilled match must be inert");
-
-  // Matching every id is the explicit opt-in idMask = 0.
-  FrameMatch any{};
-  any.idMask = 0;
-  TEST_ASSERT_TRUE(r.d.subscribe(any, &hit<1>, nullptr).valid());
-  r.link.inject(mk(0x151, {1, 2, 3, 4, 5, 6, 7, 8}));
-  r.link.inject(mk(0x1C1, {1, 2, 3, 4, 5, 6, 7, 8}));
-  r.d.poll();
-  TEST_ASSERT_EQUAL_INT_MESSAGE(2, g_c.hits[1], "idMask = 0 is 'any id'");
-}
-
-void test_the_id_mask_selects_a_range(void) {
-  Rig r;
-  r.sync();
-  g_c = Counters{};
-
-  FrameMatch m{};
-  m.id     = 0x150;
-  m.idMask = 0x7F0;               // 0x150 .. 0x15F
-  m.dir    = Direction::Rx;
-  TEST_ASSERT_TRUE(r.d.subscribe(m, &hit<0>, nullptr).valid());
-
-  r.link.inject(mk(0x151, {0}));
-  r.link.inject(mk(0x15F, {0}));
-  r.link.inject(mk(0x161, {0}));  // outside the range
-  r.d.poll();
-  TEST_ASSERT_EQUAL_INT(2, g_c.hits[0]);
-}
-
-void test_the_payload_mask_selects_bytes_and_bits(void) {
-  Rig r;
-  r.sync();
-  g_c = Counters{};
-
-  // The example from docs/API.md: the exact frame that armed the legacy password sequence.
-  FrameMatch m = exactId(0x151);
-  const uint8_t want[8] = {0x21, 0x20, 0x20, 0xB0, 0x30, 0x30, 0x30, 0x20};
-  std::memcpy(m.data, want, 8);
-  std::memset(m.dataMask, 0xFF, 8);
-  m.len = 8;
-  TEST_ASSERT_TRUE(r.d.subscribe(m, &hit<0>, nullptr).valid());
-
-  // Two bytes matched, the rest don't-care.
-  FrameMatch loose = exactId(0x151);
-  loose.data[0]     = 0x10;
-  loose.dataMask[0] = 0xFF;
-  loose.data[2]     = 0x21;
-  loose.dataMask[2] = 0xFF;
-  loose.len         = 3;
-  TEST_ASSERT_TRUE(r.d.subscribe(loose, &hit<1>, nullptr).valid());
-
-  // A BIT mask inside one byte: the top nibble of the ISO-TP PCI.
-  FrameMatch bits = exactId(0x151);
-  bits.data[0]     = 0x20;
-  bits.dataMask[0] = 0xF0;
-  bits.len         = 1;
-  TEST_ASSERT_TRUE(r.d.subscribe(bits, &hit<2>, nullptr).valid());
-
-  r.link.inject(mk(0x151, {0x21, 0x20, 0x20, 0xB0, 0x30, 0x30, 0x30, 0x20}));
-  r.link.inject(mk(0x151, {0x21, 0x20, 0x20, 0xB0, 0x30, 0x30, 0x30, 0x21}));  // 1 byte off
-  r.link.inject(mk(0x151, {0x10, 0x5A, 0x21, 0x01, 0x7E, 0x80, 0x00, 0x00}));  // a menu FF
-  r.link.inject(mk(0x151, {0x2C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}));
-  r.d.poll();
-
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_c.hits[0], "a full 8-byte match is exact");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_c.hits[1], "byte 1 is don't-care under the mask");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(3, g_c.hits[2], "0x2n continuations, by top nibble");
-}
-
-void test_a_short_frame_never_matches_a_payload_rule(void) {
-  Rig r;
-  r.sync();
-  g_c = Counters{};
-
-  FrameMatch m = exactId(0x3CF);
-  m.data[0]     = 0x61;
-  m.dataMask[0] = 0xFF;
-  m.data[2]     = 0x01;
-  m.dataMask[2] = 0xFF;
-  m.len         = 3;
-  TEST_ASSERT_TRUE(r.d.subscribe(m, &hit<0>, nullptr).valid());
-
-  Frame shortDlc = mk(0x3CF, {0x61, 0x11, 0x01, 0, 0, 0, 0, 0});
-  shortDlc.len = 2;
-  r.link.inject(shortDlc);
-  r.d.poll();
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_c.hits[0],
-                                "data[2] was never transmitted, so it cannot match");
-
-  r.link.inject(mk(0x3CF, {0x61, 0x11, 0x01, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
-  r.d.poll();
-  TEST_ASSERT_EQUAL_INT(1, g_c.hits[0]);
-}
-
-void test_direction_selects_which_side_of_the_bus(void) {
-  Rig r;
-  r.up();
-  g_c = Counters{};
-
-  TEST_ASSERT_TRUE(r.d.subscribe(exactId(0x151, Direction::Rx),   &hit<0>, nullptr).valid());
-  TEST_ASSERT_TRUE(r.d.subscribe(exactId(0x151, Direction::Tx),   &hit<1>, nullptr).valid());
-  TEST_ASSERT_TRUE(r.d.subscribe(exactId(0x151, Direction::Both), &hit<2>, nullptr).valid());
-
-  r.link.inject(mk(0x151, {0x10, 0x5A, 0x21, 0x01, 0x7E, 0x80, 0x00, 0x00}));  // inbound
-  ASSERT_RESULT(Ok, r.d.setTime("1234"));                                       // outbound
-  pumpUntilIdle(r.d);
-
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_c.hits[0], "Rx sees only what the other node sent");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_c.hits[1], "Tx sees only what we sent");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(2, g_c.hits[2], "Both sees the whole channel");
-}
-
-void test_subscribe_refuses_an_unsatisfiable_match(void) {
-  Rig r;
-  r.sync();
-
-  FrameMatch bad = exactId(0x151);
-  bad.len = 9;                                     // longer than any CAN frame
-  TEST_ASSERT_FALSE(r.d.subscribe(bad, &hit<0>, nullptr).valid());
-
-  FrameMatch noDir = exactId(0x151);
-  noDir.dir = static_cast<Direction>(0);            // matches nothing, ever
-  TEST_ASSERT_FALSE(r.d.subscribe(noDir, &hit<0>, nullptr).valid());
-
-  TEST_ASSERT_FALSE(r.d.subscribe(exactId(0x151), nullptr, nullptr).valid());
-  TEST_ASSERT_EQUAL_UINT8(0, r.d.subscriptions());
-}
-
-// ---------------------------------------------------------------------------
-// Layer 1 — handles and the table
-// ---------------------------------------------------------------------------
-
-void test_a_stale_handle_cannot_unsubscribe_the_slots_next_owner(void) {
-  // The silent failure mode of a bare index: hand out slot 0, free it, hand slot 0 to
-  // somebody else, then let the first owner's forgotten handle free the second owner's
-  // subscription. The generation counter is what makes that impossible.
-  Rig r;
-  r.sync();
-  g_c = Counters{};
-
-  const SubHandle first = r.d.subscribe(exactId(0x151), &hit<0>, nullptr);
-  TEST_ASSERT_TRUE(first.valid());
-  TEST_ASSERT_TRUE(r.d.unsubscribe(first));
-  TEST_ASSERT_FALSE_MESSAGE(r.d.unsubscribe(first), "a handle cannot be redeemed twice");
-
-  const SubHandle second = r.d.subscribe(exactId(0x151), &hit<1>, nullptr);
-  TEST_ASSERT_TRUE(second.valid());
-  TEST_ASSERT_NOT_EQUAL_MESSAGE(first.v, second.v,
-                                "the reused slot must hand out a DIFFERENT handle");
-
-  TEST_ASSERT_FALSE_MESSAGE(r.d.unsubscribe(first),
-                            "the stale handle must not free the slot's new owner");
-  TEST_ASSERT_EQUAL_UINT8(1, r.d.subscriptions());
-
-  r.link.inject(mk(0x151, {0}));
-  r.d.poll();
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_c.hits[0], "the freed subscription is gone");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_c.hits[1], "and the live one still fires");
-}
-
-void test_a_full_table_returns_kNoSub_without_disturbing_the_others(void) {
-  Rig r;
-  r.sync();
-  g_c = Counters{};
-
-  SubHandle h[AFFA_MAX_SUBSCRIPTIONS];
-  for (uint8_t i = 0; i < AFFA_MAX_SUBSCRIPTIONS; ++i) {
-    h[i] = r.d.subscribe(exactId(0x151), &hit<0>, nullptr);
-    TEST_ASSERT_TRUE(h[i].valid());
-  }
-  TEST_ASSERT_EQUAL_UINT8(AFFA_MAX_SUBSCRIPTIONS, r.d.subscriptions());
-
-  const SubHandle overflow = r.d.subscribe(exactId(0x1C1), &hit<1>, nullptr);
-  TEST_ASSERT_FALSE_MESSAGE(overflow.valid(), "a full table returns kNoSub");
-  TEST_ASSERT_EQUAL_UINT16(kNoSub.v, overflow.v);
-  TEST_ASSERT_EQUAL_UINT8_MESSAGE(AFFA_MAX_SUBSCRIPTIONS, r.d.subscriptions(),
-                                  "and does not consume or corrupt a slot");
-
-  r.link.inject(mk(0x151, {0}));
-  r.link.inject(mk(0x1C1, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
-  r.d.poll();
-  TEST_ASSERT_EQUAL_INT_MESSAGE(AFFA_MAX_SUBSCRIPTIONS, g_c.hits[0],
-                                "every existing subscription still fires");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_c.hits[1], "the rejected one never fires — check valid()");
-
-  // Freeing one makes room again.
-  TEST_ASSERT_TRUE(r.d.unsubscribe(h[3]));
-  TEST_ASSERT_TRUE(r.d.subscribe(exactId(0x1C1), &hit<1>, nullptr).valid());
-  drain(r.link);
-  r.link.inject(mk(0x1C1, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
-  r.d.poll();
-  TEST_ASSERT_EQUAL_INT(1, g_c.hits[1]);
-}
-
-namespace {
-SubHandle g_victim;
-CarminatDisplay* g_display = nullptr;
-void unsubscribeVictim(const Frame&, void*) {
-  ++g_c.hits[0];
-  g_display->unsubscribe(g_victim);
-}
-}  // namespace
-
-void test_unsubscribing_from_inside_a_callback_is_well_defined(void) {
-  // subscribe()/unsubscribe() are legal from inside a FrameCb. A slot freed mid-walk is
-  // SKIPPED rather than mis-dispatched, and a slot added mid-walk does not receive the
-  // frame currently being dispatched.
-  Rig r;
-  r.sync();
-  g_c = Counters{};
-  g_display = &r.d;
-
-  TEST_ASSERT_TRUE(r.d.subscribe(exactId(0x151), &unsubscribeVictim, nullptr).valid());
-  g_victim = r.d.subscribe(exactId(0x151), &hit<1>, nullptr);
-  TEST_ASSERT_TRUE(g_victim.valid());
-
-  r.link.inject(mk(0x151, {0}));
-  r.d.poll();
-  TEST_ASSERT_EQUAL_INT(1, g_c.hits[0]);
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_c.hits[1], "a slot freed mid-walk is skipped");
-}
-
-// ---------------------------------------------------------------------------
-// Layer 1 — re-entrancy from a Direction::Tx callback
+// Re-entrancy from a transmitted frame
 //
-// docs/API.md §4.2 permits rendering from a FrameCb and §4.3 permits enqueue(),
-// abortPending() and abortAll() from ANY callback. A Direction::Tx FrameCb fires from
-// inside observe(), which txFrame() calls from inside pumpTx() — i.e. while the job that
-// produced the frame is sitting at _queue[0] and the transmit pump still holds a
-// reference to it. Everything that decides whether a job is preemptable keys off
+// docs/API.md §4.3 permits enqueue(), abortPending() and abortAll() from ANY callback. The
+// tap fires from inside observe(), which txFrame() calls from inside pumpTx() — i.e. while
+// the job that produced the frame is sitting at _queue[0] and the transmit pump still holds
+// a reference to it. Everything that decides whether a job is preemptable keys off
 // TxJob::started, so `started` MUST already be true by the time that callback can run.
 // ---------------------------------------------------------------------------
 
@@ -369,12 +100,21 @@ struct TxReentry {
 };
 TxReentry g_re;
 
-void abortFromTxCallback(const Frame&, void*) {
+// THE THREE LINES THAT REPLACED LAYER 1. A direction test and an id test, written where the
+// frame is, instead of a FrameMatch built and stored in a table that was scanned twice per
+// frame to reach exactly this comparison.
+inline bool ourTxFrame(const Frame& f, Direction d) {
+  return d == Direction::Tx && f.id == 0x151;
+}
+
+void abortFromTxCallback(const Frame& f, Direction d, void*) {
+  if (!ourTxFrame(f, d)) return;
   if (++g_re.hits != 1) return;              // only on the very first transmitted frame
   g_re.aborted = g_re.d->abortPending();
 }
 
-void renderFromTxCallback(const Frame&, void*) {
+void renderFromTxCallback(const Frame& f, Direction d, void*) {
+  if (!ourTxFrame(f, d)) return;
   if (++g_re.hits != 1) return;
   g_re.second = g_re.d->showMenu("XXX", "YYY", "ZZZ").result;
 }
@@ -393,10 +133,9 @@ void test_abortPending_from_a_tx_callback_spares_the_frame_it_is_watching(void) 
   ASSERT_RESULT(Ok, r.d.setTime("1234"));                 // queued behind it
   TEST_ASSERT_EQUAL_UINT8(1, r.d.queued());
 
-  TEST_ASSERT_TRUE(
-      r.d.subscribe(exactId(0x151, Direction::Tx), &abortFromTxCallback, nullptr).valid());
+  r.d.onFrame(&abortFromTxCallback, nullptr);
 
-  r.d.poll();   // pumpTx sends the menu's frame 0; the Tx callback fires inside that send
+  r.d.poll();   // pumpTx sends the menu's frame 0; the tap fires inside that send
 
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_re.hits, "the Tx callback must have fired");
   TEST_ASSERT_EQUAL_UINT8_MESSAGE(
@@ -405,6 +144,7 @@ void test_abortPending_from_a_tx_callback_spares_the_frame_it_is_watching(void) 
       "wire and abortPending() must not touch it");
   TEST_ASSERT_TRUE_MESSAGE(r.d.busy(), "the in-flight menu survives its own Tx callback");
 
+  r.d.onFrame(nullptr, nullptr);            // stop counting; the drain below is not the test
   pumpUntilIdle(r.d);
   TEST_ASSERT_EQUAL_UINT16_MESSAGE(menu, r.d.lastTicket(),
                                    "and completes, rather than being reported Aborted");
@@ -423,8 +163,7 @@ void test_a_render_from_a_tx_callback_cannot_coalesce_into_the_frame_on_the_wire
   ASSERT_RESULT(Ok, r.d.showMenu("ONE", "TWO", "SIX"));
   TEST_ASSERT_EQUAL_UINT8(0, r.d.queued());
 
-  TEST_ASSERT_TRUE(
-      r.d.subscribe(exactId(0x151, Direction::Tx), &renderFromTxCallback, nullptr).valid());
+  r.d.onFrame(&renderFromTxCallback, nullptr);
 
   r.d.poll();
 
@@ -436,7 +175,7 @@ void test_a_render_from_a_tx_callback_cannot_coalesce_into_the_frame_on_the_wire
 }
 
 // ---------------------------------------------------------------------------
-// Layer 0 — the tap
+// The tap
 // ---------------------------------------------------------------------------
 
 void test_the_tap_sees_both_directions_and_only_one_tap_exists(void) {
@@ -483,152 +222,63 @@ void test_a_refused_transmission_is_never_observed(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Layer 2 — events
+// The callbacks that ship with the library
 // ---------------------------------------------------------------------------
 
-void test_sync_registered_and_txcomplete_fire_at_the_right_moment(void) {
+// This asserted the same three moments through the Layer 2 event sink until 2.0. The sink
+// carried nothing SyncCb and CompleteCb did not already carry — SyncChanged duplicated
+// SyncCb, TxComplete duplicated CompleteCb byte for byte — so the assertions moved onto the
+// callbacks that were always the real delivery, and the sink went.
+void test_registration_latches_once_and_only_payload_tickets_complete(void) {
   Rig r;
-  g_ev = EventLog{};
+  g_cb = CbLog{};
   r.d.begin();
-  r.d.onEvent(&record, nullptr);
+  r.d.onSync(&recordSync, nullptr);
+  r.d.onComplete(&recordComplete, nullptr);
   // Armed here, not after the burst: the opening itself emits the 0x70 probes with the final
   // B0, so an emulator armed later would leave the first one waiting for an ACK for ever.
-  // It still cannot latch FUNCSREG early — the self-ACK is credited on the following poll.
   r.d.setSelfAck(true);
 
-  // begin() writes SyncState::Failed DIRECTLY rather than transitioning to it: firing a
-  // callback from inside setup() would surprise every application.
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_ev.sync, "begin() is a reset, not a transition");
+  // begin() writes SyncState::Failed DIRECTLY rather than transitioning to it — firing a
+  // callback from inside setup() would surprise every application — so nothing has fired.
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_cb.sync, "begin() is a reset, not a transition");
 
-  // The panel has to ask TWICE: the first `61 11 00` only puts our bare `BA` announce on the
-  // wire and is answered with nothing else, and the burst answers its NEXT request. [CAP]
-  // 4/4, and the transcript is in affa_test_support.h — SyncProfile::helloRequiresAnnounce.
-  // Neither request is a state transition, which is what the event count below pins.
-  affatest::carminatOpeningRequest(r.d, r.link);
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_ev.sync, "auth remains closed before B0 #3");
-  r.clk.advance(carminat::kHelloFirstDelayMs);
-  r.d.poll();                                  // B0 #1
-  // The display opens its OWN channel between B0#1 and B0#2 ([CAP] 4/4, 0.81-1.55 ms behind
-  // it), and our 0x70 probes are gated on having seen it. Without this the session never
-  // registers and the Registered event under test never fires.
-  r.link.inject(mk(0x1C1, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
-  r.clk.advance(carminat::kHelloFrameGapMs);
-  r.d.poll();                                  // 5C1 74 reflex, then B0 #2
-  r.clk.advance(carminat::kHelloFrameGapMs);
-  r.d.poll();                                  // B0 #3
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_ev.sync, "the handshake is one transition");
-  TEST_ASSERT_TRUE(hasFlag(g_ev.prev, SyncState::Failed));
-  TEST_ASSERT_FALSE(hasFlag(g_ev.now, SyncState::Failed));
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_ev.registered, "FUNCSREG has not latched yet");
+  affatest::completeCarminatAuth(r.d, r.link, r.clk);
+  TEST_ASSERT_TRUE(r.d.synced());
+  TEST_ASSERT_FALSE_MESSAGE(r.d.registered(), "FUNCSREG has not latched yet");
+  const int syncsBeforeRegistration = g_cb.sync;
+  TEST_ASSERT_TRUE_MESSAGE(syncsBeforeRegistration > 0, "the opening moved the state word");
 
-  r.d.setSelfAck(true);
   const Submitted power = r.d.setPower(true);
   ASSERT_RESULT(Ok, power);
-  const TxTicket t = power.ticket;
-  TEST_ASSERT_NOT_EQUAL(kNoTicket, t);
   affatest::settleCarminatRegistration(r.d, r.clk);
   pumpUntilIdle(r.d);
 
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_ev.registered, "Registered fires once, on the latch");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(2, g_ev.sync,
-                                "and it is ALSO a SyncChanged — the extra event is additional");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_ev.txComplete, "one payload ticket completed");
-  TEST_ASSERT_EQUAL_UINT16_MESSAGE(t, g_ev.lastTicket,
+  TEST_ASSERT_TRUE_MESSAGE(r.d.registered(), "FUNCSREG latches");
+  TEST_ASSERT_TRUE_MESSAGE(g_cb.sync > syncsBeforeRegistration,
+                           "and the latch is itself a state change SyncCb reports");
+  TEST_ASSERT_TRUE(hasFlag(g_cb.now, SyncState::FuncsReg));
+
+  // THE POINT OF THE TICKET ASSERTIONS: the two 0x70 registration probes go out on the same
+  // wire as the payload and are acknowledged the same way, but they carry kNoTicket and are
+  // invisible to the application. One completion, and it is the setPower.
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_cb.completes, "one payload ticket completed");
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(power.ticket, g_cb.lastTicket,
                                    "registration jobs carry kNoTicket and are invisible");
-  ASSERT_RESULT(Ok, g_ev.lastResult);
-}
-
-void test_peerlost_fires_on_the_deadline_and_says_so_twice(void) {
-  Rig r;
-  r.up();
-  g_ev = EventLog{};
-  r.d.onEvent(&record, nullptr);
-
-  r.clk.t = AFFA_PEER_TIMEOUT_MS + 1;
-  r.d.poll();
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_ev.peerLost, "PeerLost");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_ev.sync, "and the SyncChanged that carries the state");
-  TEST_ASSERT_TRUE(hasFlag(g_ev.now, SyncState::Failed));
-  TEST_ASSERT_FALSE_MESSAGE(hasFlag(g_ev.now, SyncState::FuncsReg),
-                            "FUNCSREG is dropped with the peer");
-}
-
-void test_the_key_event_fires_whether_or_not_the_menu_consumed_it(void) {
-  Rig r;
-  r.up();
-  g_ev = EventLog{};
-  r.d.onEvent(&record, nullptr);
-
-  r.link.inject(mk(0x1C1, {0x03, 0x89, 0x00, 0x05, 0xA3, 0xA3, 0xA3, 0xA3}));
-  r.d.poll();
-  TEST_ASSERT_EQUAL_INT(1, g_ev.key);
-  TEST_ASSERT_EQUAL_HEX16(0x0005, static_cast<uint16_t>(g_ev.lastKey));
-  TEST_ASSERT_TRUE(g_ev.lastEdge == KeyEdge::Click);
-
-  // A key that OPENS the menu is consumed by the menu and still fires the event, because
-  // ev.key is what ARRIVED rather than what was left over.
-  MenuItem it{};
-  it.label = "Item";
-  r.d.getMenu().addItem(it);
-  r.link.inject(mk(0x1C1, {0x03, 0x89, 0x00, 0xC0, 0xA3, 0xA3, 0xA3, 0xA3}));
-  r.d.poll();
-  TEST_ASSERT_TRUE_MESSAGE(r.d.getMenu().isOpen(), "hold-Load is the OEM open gesture");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(2, g_ev.key, "the consumed key still fires the event");
-  pumpUntilIdle(r.d);
-  drain(r.link);
-}
-
-void test_linkerror_reports_a_dropped_transmission(void) {
-  Rig r;
-  // THE HEARTBEAT IS THE FRAME THAT GETS DROPPED HERE, and it does not exist until the
-  // session is fully open. [CAP] "aknowledge offed display.csv": the radio's first `3AF B9`
-  // is 15.3 ms after the display's `5F1 74` completed registration, with nothing at all on
-  // 0x3AF between B0#3 and it — so a rig that stops at the announce has nothing periodic to
-  // refuse. up() drives both 0x70 probes to their 74s, which arms the 500 ms B9 timer; the
-  // dead link then refuses the first one that comes due.
-  r.up();
-  g_ev = EventLog{};
-  r.d.onEvent(&record, nullptr);
-
-  r.link.setLive(false);
-  r.clk.advance(1000);
-  r.d.poll();
-  TEST_ASSERT_GREATER_OR_EQUAL_MESSAGE(1, g_ev.txDrops, "ICanLink::send() refused a frame");
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(LinkErrorKind::TxDropped),
-                          static_cast<uint8_t>(g_ev.lastError));
-}
-
-void test_linkerror_reports_a_ring_overflow(void) {
-  // Non-zero ringOverflow means frames were LOST: poll() is not being called often enough
-  // or the ring is too small. Both are the application's to fix, so it must be told.
-  //
-  // 0x151 is in the function table, so an inbound frame there is neither auto-ACKed nor
-  // answered — the traffic exists purely to overrun the ring.
-  LoopbackLink<4> link;
-  affatest::FakeClock clk;
-  CarminatDisplay d(link, clk);
-  g_ev = EventLog{};
-
-  d.begin();
-  d.onEvent(&record, nullptr);
-  for (int i = 0; i < 8; ++i) link.inject(mk(0x151, {0x10, 0x5A, 0x21, 0x01, 0, 0, 0, 0}));
-  d.poll();
-
-  TEST_ASSERT_GREATER_OR_EQUAL_MESSAGE(1, g_ev.ringOverflows, "the loss must be reported");
-  TEST_ASSERT_GREATER_OR_EQUAL(1u, d.stats().ringOverflow);
+  ASSERT_RESULT(Ok, g_cb.lastResult);
 }
 
 // ---------------------------------------------------------------------------
-// Layer 2b — onText, the inbound text callback
+// onText, the inbound text callback
 // ---------------------------------------------------------------------------
-// test_radiotext_and_screenchanged_have_no_emitter_yet was here. It asserted that two
-// declared EventKinds were never emitted, and existed to make the choice between wiring an
-// emitter and deleting the enumerators unavoidable. The choice was made twice: the two
-// enumerators went, and then inbound text came back as onText WITH the emitter these tests
-// exercise. UpdateListBase's protected onRadioText(bool) hook is a different thing and is
-// unaffected — a single-frame AUX heuristic on a subclass seam, not a published event.
+// It is the sniff seam: text ANOTHER node drew on the panel's text channel. It ships WITH
+// its emitter, which is the rule that outlived Layer 2 — that sink once declared RadioText
+// and ScreenChanged with nothing constructing either, so the API advertised two events that
+// could not arrive. UpdateListBase's protected onRadioText(bool) hook is a different thing
+// and is unaffected: a single-frame AUX heuristic on a subclass seam, not a published event.
 
 #if AFFA_ENABLE_ISOTP_RX
+namespace {
 int  g_textN = 0;
 char g_textLast[64];
 void recordText(const char* t, void*) {
@@ -644,6 +294,7 @@ void injectRenault(LoopbackLink<256>& link) {
   link.inject(mk(0x151, {0x21, 0x52, 0x45, 0x4E, 0x41, 0x55, 0x4C, 0x54}));
   link.inject(mk(0x151, {0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}));
 }
+}  // namespace
 
 void test_onText_delivers_a_reassembled_inbound_string(void) {
   Rig r; g_textN = 0; g_textLast[0] = '\0';
@@ -709,24 +360,11 @@ void tearDown(void) {}
 
 int main(int, char**) {
   UNITY_BEGIN();
-  RUN_TEST(test_a_default_match_is_inert_rather_than_a_firehose);
-  RUN_TEST(test_the_id_mask_selects_a_range);
-  RUN_TEST(test_the_payload_mask_selects_bytes_and_bits);
-  RUN_TEST(test_a_short_frame_never_matches_a_payload_rule);
-  RUN_TEST(test_direction_selects_which_side_of_the_bus);
-  RUN_TEST(test_subscribe_refuses_an_unsatisfiable_match);
-  RUN_TEST(test_a_stale_handle_cannot_unsubscribe_the_slots_next_owner);
-  RUN_TEST(test_a_full_table_returns_kNoSub_without_disturbing_the_others);
-  RUN_TEST(test_unsubscribing_from_inside_a_callback_is_well_defined);
   RUN_TEST(test_abortPending_from_a_tx_callback_spares_the_frame_it_is_watching);
   RUN_TEST(test_a_render_from_a_tx_callback_cannot_coalesce_into_the_frame_on_the_wire);
   RUN_TEST(test_the_tap_sees_both_directions_and_only_one_tap_exists);
   RUN_TEST(test_a_refused_transmission_is_never_observed);
-  RUN_TEST(test_sync_registered_and_txcomplete_fire_at_the_right_moment);
-  RUN_TEST(test_peerlost_fires_on_the_deadline_and_says_so_twice);
-  RUN_TEST(test_the_key_event_fires_whether_or_not_the_menu_consumed_it);
-  RUN_TEST(test_linkerror_reports_a_dropped_transmission);
-  RUN_TEST(test_linkerror_reports_a_ring_overflow);
+  RUN_TEST(test_registration_latches_once_and_only_payload_tickets_complete);
 #if AFFA_ENABLE_ISOTP_RX
   RUN_TEST(test_onText_delivers_a_reassembled_inbound_string);
   RUN_TEST(test_onText_does_not_fire_on_a_partial_message);

@@ -298,6 +298,8 @@ Net negative lines, which is the point.
 
 | gone | why |
 |---|---|
+| **Layer 1** — `subscribe` / `unsubscribe` / `subscriptions`, `FrameMatch`, `SubHandle`, `kNoSub`, `AFFA_MAX_SUBSCRIPTIONS` | **DONE.** ~256 B and a table walked twice per frame per direction, dispatching to nobody in nineteen examples. Everything it did is three lines inside a Layer 0 tap — `test_seam` now proves that, because its two re-entrancy tests were rewritten onto the tap and assert the same things |
+| **Layer 2** — `onEvent`, `Event`, `EventKind`, `EventCb`, `LinkErrorKind`, `emit()`, `reportLinkError()` | **DONE.** Every arm duplicated a callback that already existed: SyncChanged/Registered/PeerLost = `SyncCb`, TxComplete = `CompleteCb` byte for byte, Key = `KeyCb` (and disagreed with it — the event fired even when the menu had consumed the key), LinkError = counters already on `Stats`. `setSync()` loses the `extra` parameter that existed only to fire a second one |
 | `TxRequest`, `kNoRequest`, `RequestTable<N>` | one handle space |
 | `Op`, `applyCommand()`, the 14-case switch | the queue carries bytes |
 | `AffaTask`'s 14 render forwarders | the display is the surface |

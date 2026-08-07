@@ -31,8 +31,6 @@ void tapDir(const Frame&, Direction d, void*) {
   if (d == Direction::Rx) ++g_rx; else ++g_tx;
 }
 
-int g_subRx = 0;
-void countSubRx(const Frame&, void*) { ++g_subRx; }
 
 struct Rig {
   LoopbackLink<256> link;
@@ -181,34 +179,27 @@ void test_fromSelf_is_dropped_before_the_key_decoder(void) {
 // ---------------------------------------------------------------------------
 
 void test_a_self_frame_arriving_inbound_is_presented_as_Tx(void) {
-  // A `dir = Rx` subscription must mean "what the other node actually sent" on EVERY link,
-  // echoing or not. If an echo were presented as Rx, a sniffer would double-count the bus
-  // and a payload-matched subscription would fire on our own traffic.
+  // Direction::Rx must mean "what the other node actually sent" on EVERY link, echoing or
+  // not. If an echo were presented as Rx, a sniffer would double-count the bus and a tap
+  // that filters on Rx would fire on our own traffic.
   Rig r;
   r.up(true);                       // echoing
   r.d.onFrame(&tapDir, nullptr);
 
-  FrameMatch m{};
-  m.id     = 0x1C1;
-  m.idMask = 0x7FF;
-  m.dir    = Direction::Rx;
-  const SubHandle h = r.d.subscribe(m, &countSubRx, nullptr);
-  TEST_ASSERT_TRUE(h.valid());
-
   g_rx = g_tx = 0;
-  g_subRx = 0;
   ASSERT_RESULT(Ok, r.d.pressKey(Key::Pause, KeyEdge::Click, KeySource::Wire));
   pump(r.d, 4);
 
   // One transmit, then the same frame back off the echoing link — and BOTH are Tx.
   TEST_ASSERT_EQUAL_INT_MESSAGE(2, g_tx, "the transmit and its echo are both Direction::Tx");
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_rx, "nothing inbound happened on this bus");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_subRx, "a dir=Rx subscription must not see our echo");
 
-  // And a genuine inbound frame on the same id does fire it.
+  // And a genuine inbound frame on the same id IS Rx. This half used to be asserted through
+  // a `dir = Rx` Layer 1 subscription; the tap already carries the direction, which is why
+  // the subscription table it needed was never more than a filter somebody else could write.
   r.link.inject(mk(0x1C1, {0x03, 0x89, 0x00, 0x05, 0xA3, 0xA3, 0xA3, 0xA3}));
   r.d.poll();
-  TEST_ASSERT_EQUAL_INT(1, g_subRx);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_rx, "a frame the panel sent is Direction::Rx");
 }
 
 // ---------------------------------------------------------------------------

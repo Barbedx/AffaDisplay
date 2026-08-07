@@ -699,7 +699,7 @@ void AffaDisplayBase::finishJob(Result r, bool allowRetry) {
     if (r == Result::Ok) {
       if (!registrationQueued()) {
         _nextPayloadMs = _clock.millis() + _profile.payloadAfterRegistrationMs;
-        setSync(_sync | SyncState::FuncsReg, EventKind::Registered);
+        setSync(_sync | SyncState::FuncsReg);
         // THE WHOLE TABLE IS ACKED. Not Ready yet: the captured radio waits ~400 ms before
         // its first payload, and a render inside that window is a screen the panel takes
         // and does not draw. poll() promotes Settling -> Ready when the interval expires.
@@ -798,13 +798,9 @@ void AffaDisplayBase::completeTicket(TxTicket t, Result r) {
     }
   }
 
+  // One completion, one callback. The Layer 2 TxComplete event that used to follow carried
+  // byte-for-byte the same (ticket, result) pair to a second sink nobody installed.
   if (_cplCb) _cplCb(t, r, _cplCtx);
-
-  Event ev;
-  ev.kind      = EventKind::TxComplete;
-  ev.tx.ticket = t;
-  ev.tx.result = r;
-  emit(ev);
 }
 
 void AffaDisplayBase::failAllQueued(Result r) {

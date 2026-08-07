@@ -496,13 +496,10 @@
 #  define AFFA_PING_REPLY_MIN_MS 250
 #endif
 
-// Layer 1 FrameMatch table. sizeof(Sub) ~= 32 B, so 8 slots ~= 256 B and one linear scan
-// per frame per direction. subscribe() returns kNoSub once full — ignoring the return
-// value silently loses a subscription. 0 removes the table and the scan; Layers 0 and 2
-// are unaffected.
-#ifndef AFFA_MAX_SUBSCRIPTIONS
-#  define AFFA_MAX_SUBSCRIPTIONS 8
-#endif
+// AFFA_MAX_SUBSCRIPTIONS WAS HERE AND IS GONE. It sized the Layer 1 FrameMatch table —
+// ~256 B of static RAM and a linear scan of it per frame per direction — for an API that
+// nineteen shipped examples never called once. See the comment above Direction in
+// core/AffaTypes.h. The surviving observation seam, onFrame(), costs one pointer.
 
 // Menu capacity. addItem() returns -1 past the limit and the item is silently absent.
 #ifndef AFFA_MENU_MAX_ITEMS

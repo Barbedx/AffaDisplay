@@ -70,21 +70,12 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   void onSync(SyncCb cb, void* ctx);        // fires only on an actual state change
 
   // ---- observation seam ----------------------------------------------------
-  // Layer 0: every frame in and out, unfiltered, in wire order. One tap; a second call
-  // replaces it. On the path of EVERY frame — keep it to a ring push, never render from it.
+  // EVERY frame in and out, unfiltered, in wire order. One tap; a second call replaces it.
+  // On the path of EVERY frame — keep it to a ring push, never render from it.
+  //
+  // This is the whole seam now. See the comment above Direction in AffaTypes.h for what
+  // the other two layers were and why nineteen examples never called either.
   void onFrame(FrameTap cb, void* ctx);
-
-  // Layer 1: filtered raw subscription, fixed table, no allocation. Returns kNoSub when the
-  // table is full or the match is unsatisfiable — CHECK valid(), an ignored return is a
-  // subscription that silently never fires. Observational, never consuming. Do NOT depend
-  // on the relative order of two subscriptions. docs/API.md §7b.
-  [[nodiscard]] SubHandle subscribe(const FrameMatch& m, FrameCb cb, void* ctx);
-  bool      unsubscribe(SubHandle h);       // false if the handle is stale
-  uint8_t   subscriptions() const;          // slots in use, for diagnostics
-
-  // Layer 2: decoded protocol events. One sink; a second call replaces the first. Fires
-  // IN ADDITION TO KeyCb/CompleteCb/SyncCb, never instead of them.
-  void onEvent(EventCb cb, void* ctx);
 
 #if AFFA_ENABLE_ISOTP_RX
   // Text ANOTHER node drew on the panel's text channel: reassembled from its ISO-TP frames
@@ -379,10 +370,6 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // invents keys 0x640F and 0x3030.
   static bool decodeKeyFrame(const Frame& f, Key& out, KeyEdge& edge);
 
-  // For a panel publishing a decoded event of its own, through the SAME sink rather than a
-  // second callback beside it. No shipped panel uses it.
-  void emit(const Event& ev);
-
   ICanLink&          _link;
   IClock&            _clock;
   const SyncProfile& _profile;
@@ -426,17 +413,6 @@ class AffaDisplayBase : public IDisplay, public IPanel {
     uint8_t    data[AFFA_MAX_PAYLOAD]   = {0};
   };
 
-#if AFFA_MAX_SUBSCRIPTIONS > 0
-  // One subscription slot. `gen` is bumped on every unsubscribe so a stale SubHandle
-  // cannot unsubscribe the slot's next owner — the silent failure mode of a bare index.
-  struct Sub {
-    FrameMatch m;
-    FrameCb    cb   = nullptr;
-    void*      ctx  = nullptr;
-    uint8_t    gen  = 0;
-    bool       used = false;
-  };
-#endif
 
   // ALWAYS first in poll(), ahead even of pumpRx(): a controller that is down delivers no
   // frames, so there is nothing for pumpRx() to lose by being second, and every millisecond
@@ -460,7 +436,6 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // observe it; that preserves Tx callback re-entrancy without committing bytes when a
   // locally busy controller declined the offer.
   TxDisposition txFrame(Frame f, bool observeAccepted = true);
-  void reportLinkError(LinkErrorKind k, uint32_t count);
 
   bool handleSyncFrame(const Frame& f);
   bool handleAckFrame(const Frame& f);
@@ -546,8 +521,9 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   Submitted admit(TxTicket t, uint16_t funcId, const uint8_t* data, uint16_t len,
                   const TxOptions& opt, const uint8_t* ext, uint16_t prefixLen);
   // Stores the new state and fires SyncCb + EventKind::SyncChanged, but only on an actual
-  // change. `extra` fires additionally (Registered / PeerLost); pass SyncChanged for none.
-  void setSync(SyncState s, EventKind extra);
+  // change. It took an `extra` EventKind until 2.0, whose only job was to fire a second
+  // Layer 2 event beside the first; with that sink gone the parameter had no readers.
+  void setSync(SyncState s);
   TxTicket nextTicket();
 
   // Linear, not circular: insertIndexFor() splices into the middle for Priority::Urgent,
@@ -698,13 +674,9 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   CompleteCb _cplCb  = nullptr;   void* _cplCtx  = nullptr;
   SyncCb     _syncCb = nullptr;   void* _syncCtx = nullptr;
   FrameTap   _tap    = nullptr;   void* _tapCtx  = nullptr;
-  EventCb    _evCb   = nullptr;   void* _evCtx   = nullptr;
 #if AFFA_ENABLE_ISOTP_RX
   TextCb     _textCb = nullptr;   void* _textCtx = nullptr;
   isotp::Reassembler _textAsm;
-#endif
-#if AFFA_MAX_SUBSCRIPTIONS > 0
-  Sub        _subs[AFFA_MAX_SUBSCRIPTIONS];
 #endif
 #if AFFA_ENABLE_MENU
   Key        _hotkey     = Key::Load;      // the OEM default, replaceable

@@ -63,7 +63,7 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
         AFFA_LOGW(kTag, "61 11 %02X while registered - the panel voided us; reopening",
                   static_cast<unsigned>(f.data[2]));
         _lossReasonNext = LossReason::PanelVoided;
-        setSync(SyncState::Failed, EventKind::SyncChanged);
+        setSync(SyncState::Failed);
         invalidateInFlightForSession(now);
         // BACK TO Announced, NOT TO Silent. Our `BA` is long since on the wire and the
         // panel is answering it; this request is the one that draws the replacement burst,
@@ -201,7 +201,7 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
       }
       s |= SyncState::Start;
     }
-    setSync(s, EventKind::SyncChanged);
+    setSync(s);
     return true;
   }
 
@@ -501,7 +501,7 @@ void AffaDisplayBase::pumpHello(uint32_t now) {
     // never answered, because it never got our announce.
     if (_phase == Phase::HelloPending) {
       enterPhase(_peerChannelSeen ? Phase::Registering : Phase::AwaitPeerChannel);
-      setSync((_sync & ~SyncState::Failed & ~SyncState::Start), EventKind::SyncChanged);
+      setSync(_sync & ~SyncState::Failed & ~SyncState::Start);
     }
 
     // Registration is queued from pumpSync(), not here: it additionally waits for the
@@ -613,7 +613,7 @@ void AffaDisplayBase::pumpSync() {
     AFFA_LOGW(kTag, "peer lost: no 0x%02X ping within %d ms",
               static_cast<unsigned>(kSyncPeerAlive), static_cast<int>(AFFA_PEER_TIMEOUT_MS));
     _lossReasonNext = LossReason::PeerTimeout;
-    setSync(SyncState::Failed, EventKind::PeerLost);   // every other bit, FuncsReg
+    setSync(SyncState::Failed);   // every other bit, FuncsReg
                                                        // included, is dropped
     // Wait for its next 61 11 — but not for ever. A panel that went to sleep will never
     // send one, so the slow announce re-arms here and starts calling it back.
@@ -661,7 +661,7 @@ void AffaDisplayBase::pumpSync() {
   _nextSyncMs = now + syncIntervalMs();
 }
 
-void AffaDisplayBase::setSync(SyncState s, EventKind extra) {
+void AffaDisplayBase::setSync(SyncState s) {
   if (s == _sync) return;
   const SyncState prev = _sync;
   _sync = s;                                  // state first, callbacks second
@@ -694,17 +694,6 @@ void AffaDisplayBase::setSync(SyncState s, EventKind extra) {
   _lossReasonNext = LossReason::None;   // never leaks into the next, unrelated transition
 
   if (_syncCb) _syncCb(s, _syncCtx);
-
-  Event ev;
-  ev.kind      = EventKind::SyncChanged;
-  ev.sync.prev = prev;
-  ev.sync.now  = s;
-  emit(ev);
-
-  if (extra != EventKind::SyncChanged) {
-    ev.kind = extra;
-    emit(ev);
-  }
 
   // The handshake bits are logged only when they CHANGE. Logging them every pass buried
   // the one transition that mattered under a second of identical lines.

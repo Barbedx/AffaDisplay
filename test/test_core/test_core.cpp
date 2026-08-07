@@ -628,44 +628,6 @@ void test_key_delivery_does_not_wait_for_the_transmit_queue(void) {
   TEST_ASSERT_TRUE_MESSAGE(d.busy(), "and the in-flight job is untouched");
 }
 
-// ---------------------------------------------------------------------------
-// Observation seam
-// ---------------------------------------------------------------------------
-
-void test_subscription_matches_id_and_payload_under_a_mask(void) {
-  static int hits;
-  hits = 0;
-
-  LoopbackLink<> link;
-  FakeClock clk;
-  TestDisplay d(link, clk);
-  establishSync(d, link);
-
-  FrameMatch m{};
-  m.id     = 0x151;
-  m.idMask = 0x7FF;
-  m.dir    = Direction::Rx;
-  const uint8_t want[8] = {0x21, 0x20, 0x20, 0xB0, 0x30, 0x30, 0x30, 0x20};
-  std::memcpy(m.data, want, 8);
-  std::memset(m.dataMask, 0xFF, 8);
-  m.len = 8;
-
-  const SubHandle h = d.subscribe(m, [](const Frame&, void*) { ++hits; }, nullptr);
-  TEST_ASSERT_TRUE_MESSAGE(h.valid(), "an ignored kNoSub is a subscription that never fires");
-  TEST_ASSERT_EQUAL_UINT8(1, d.subscriptions());
-
-  link.inject(mk(0x151, {0x21, 0x20, 0x20, 0xB0, 0x30, 0x30, 0x30, 0x20}));
-  link.inject(mk(0x151, {0x21, 0x20, 0x20, 0xB0, 0x30, 0x30, 0x30, 0x21}));  // one byte off
-  link.inject(mk(0x1F1, {0x21, 0x20, 0x20, 0xB0, 0x30, 0x30, 0x30, 0x20}));  // wrong id
-  d.poll();
-  TEST_ASSERT_EQUAL_INT(1, hits);
-
-  TEST_ASSERT_TRUE(d.unsubscribe(h));
-  TEST_ASSERT_FALSE_MESSAGE(d.unsubscribe(h), "a stale handle must not free a reused slot");
-  link.inject(mk(0x151, {0x21, 0x20, 0x20, 0xB0, 0x30, 0x30, 0x30, 0x20}));
-  d.poll();
-  TEST_ASSERT_EQUAL_INT(1, hits);
-}
 
 void test_unsupported_calls_report_instead_of_pretending(void) {
   LoopbackLink<> link;
@@ -704,7 +666,6 @@ int main(int, char**) {
   RUN_TEST(test_auto_ack_answers_the_key_id_and_never_the_sync_id);
   RUN_TEST(test_self_sent_key_fires_exactly_once_on_an_echoing_link);
   RUN_TEST(test_key_delivery_does_not_wait_for_the_transmit_queue);
-  RUN_TEST(test_subscription_matches_id_and_payload_under_a_mask);
   RUN_TEST(test_unsupported_calls_report_instead_of_pretending);
   return UNITY_END();
 }

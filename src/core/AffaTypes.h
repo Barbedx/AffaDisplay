@@ -332,87 +332,38 @@ struct Stats {
 };
 
 // ---------------------------------------------------------------------------
-// The three-layer observation seam. Rationale and worked examples are in
-// docs/API.md §7b; the declarations live here because every layer speaks only in
-// types this header already owns.
+// The observation seam — ONE LAYER, as of 2.0.
 // ---------------------------------------------------------------------------
+// There were three. Layer 1 was a filtered subscription table (`subscribe()` /
+// `FrameMatch` / `SubHandle`) and Layer 2 was a decoded event sink (`onEvent()` /
+// `Event` / `EventKind`). Both are gone, and the evidence is why:
+//
+//   * across nineteen shipped examples, neither was called ONCE. Layer 0 was called
+//     by seven of them.
+//   * the one external consumer's written feedback names `onFrame()` Layer 0 as
+//     "exactly right" and asks for a ring built ON it. It does not mention Layers 1
+//     or 2 at all — what it wants is less API, not more.
+//   * Layer 1 was not free. It walked an AFFA_MAX_SUBSCRIPTIONS table TWICE for every
+//     frame in BOTH directions, plus ~256 B of static RAM, to dispatch to nobody.
+//   * everything Layer 1 did is three lines inside a Layer 0 tap: compare the id, look
+//     at the bytes. Everything Layer 2 reported is already in KeyCb, CompleteCb, SyncCb
+//     and Status.
+//
+// The rule that survives them is the one that mattered: a callback SHIPS WITH ITS
+// EMITTER. Layer 2 once declared `RadioText` and `ScreenChanged` with nothing
+// constructing either, so the API advertised two events that could not arrive.
 
 // Which way a frame went. A tap that cannot tell inbound from outbound is useless to a
-// sniffer, and a subscription that cannot say "only what the panel sent" would fire on
-// our own echo of the same id — 0x151 carries both.
+// sniffer — 0x151 carries both directions.
 //
 // A frame arriving through ICanLink::recv() with Frame::fromSelf set is our own
-// transmission coming back off a link that echoes. It is presented to Layer 0 and Layer 1
-// as Direction::Tx, never as Rx, so a `dir = Rx` subscription means "what the other node
-// actually sent" on every link, echoing or not.
+// transmission coming back off a link that echoes. It is presented to the tap as
+// Direction::Tx, never as Rx, so a tap that filters on Rx sees what the other node
+// actually sent, on every link, echoing or not.
 enum class Direction : uint8_t { Rx = 1, Tx = 2, Both = 3 };
 
-// Layer 0: every frame, in and out, unfiltered. One tap, replaces the previous.
+// EVERY frame, in and out, unfiltered, in wire order. One tap; a second call replaces it.
+// On the path of every frame — keep it to a ring push, and never render from it.
 using FrameTap = void (*)(const Frame& f, Direction d, void* ctx);
-
-// Layer 1: filtered raw subscription.
-using FrameCb  = void (*)(const Frame& f, void* ctx);
-
-// Match an id under a mask, then optionally match payload bytes under a mask.
-// A DEFAULT-CONSTRUCTED FrameMatch matches id 0x000 inbound and nothing else: AFFA uses
-// no such id, so a half-filled match is inert rather than a firehose. Matching every id
-// is the explicit opt-in idMask = 0.
-struct FrameMatch {
-  uint32_t  id       = 0;        // frame id to match
-  uint32_t  idMask   = 0x7FF;    // 0x7FF exact, 0 = any id
-  uint8_t   data[8]     = {0};   // expected bytes
-  uint8_t   dataMask[8] = {0};   // which of those bytes must match (0 = don't care)
-  uint8_t   len      = 0;        // significant bytes of data[]/dataMask[]; 0 = id only
-  Direction dir      = Direction::Rx;
-};
-
-// Opaque, non-zero when valid. Encodes slot index and a generation counter, so a stale
-// handle from a slot that was freed and reused cannot unsubscribe the new owner — the
-// failure mode of a bare index, and it is silent.
-struct SubHandle {
-  uint16_t v = 0;
-  bool valid() const { return v != 0; }
-};
-inline constexpr SubHandle kNoSub{};
-
-// Layer 2: decoded protocol events.
-enum class EventKind : uint8_t {
-  SyncChanged,   // ev.sync   — the state word changed
-  Registered,    // ev.sync   — FUNCSREG latched
-  PeerLost,      // ev.sync   — the peer-alive deadline expired
-  Key,           // ev.key    — decoded from the wire OR from pressKey/nav with a source
-                 //             that includes Local
-  TxComplete,    // ev.tx     — same information as CompleteCb
-  LinkError,     // ev.error  — ring overflow, dropped TX, controller error
-};
-// RadioText and ScreenChanged were declared here with nothing constructing either, so the
-// API advertised two events that could not arrive. Inbound text came back as
-// AffaDisplayBase::onText() — a callback WITH its emitter, which is the only honest order.
-// Anything added here follows the same rule.
-
-enum class LinkErrorKind : uint8_t {
-  RingOverflow,     // Stats::ringOverflow advanced: frames were LOST
-  TxDropped,        // ICanLink::send() refused a frame
-  ControllerError,  // the driver's own error counters advanced
-};
-
-// A tagged union, not std::variant and not a hierarchy: POD built on the poll() stack,
-// copied nowhere, allocated never.
-//
-// It carried `text` and `screen` arms for the two removed enumerators. Their delicacy is
-// why inbound text came back as onText() instead: a pointer into library storage is valid
-// ONLY for the duration of the callback, and that rule is easier to state on a callback
-// than to enforce on an arm of a union anyone may copy.
-struct Event {
-  EventKind kind;
-  union {
-    struct { SyncState prev; SyncState now; }            sync;
-    struct { Key key; KeyEdge edge; }                    key;
-    struct { TxTicket ticket; Result result; }           tx;
-    struct { LinkErrorKind kind; uint32_t count; }       error;
-  };
-};
-
-using EventCb = void (*)(const Event& ev, void* ctx);
 
 } // namespace affa
