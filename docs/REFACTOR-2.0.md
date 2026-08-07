@@ -352,11 +352,12 @@ must not move a byte at any point — **no step in this plan changes the wire.**
    forwarders.
    *Proved by:* it does not build if anything still refers to them, which is the intent.
 
-8. **Migrate the examples — all nineteen.** This is not cleanup, it is the deliverable:
-   the examples are what consumers copy, and thirteen of them currently teach the unsafe
-   pattern. `17_mediascreen` first, because its HTTP handlers are §1.2.
-   *Proved by:* every env builds; `17_mediascreen` on the bench, driving the web UI while
-   watching `foreignPolls` stay at zero and `cbOverruns` stay at zero.
+8. **Collapse nineteen examples to three, and migrate those.** See §5.1 — this is not
+   cleanup, it is the deliverable, because the examples are what consumers copy and thirteen
+   of them currently teach the unsafe pattern.
+   *Proved by:* every surviving env builds; the demo on the bench, driving the web UI from
+   its HTTP handlers while `foreignPolls` and `cbOverruns` both stay at zero — which is
+   §1.2's race, now impossible rather than merely unobserved.
 
 9. **Docs.** `docs/API.md` §4 (the threading contract becomes one mode with an opt-out),
    §3b.4 (`Submitted`), the knob table; `README.md`; `openspec/specs/owned-task/spec.md` and
@@ -369,6 +370,32 @@ must not move a byte at any point — **no step in this plan changes the wire.**
 badly, the suspect list is one branch long — which is the lesson `docs/REFACTOR-PLAN.md` §"why
 step 4 was not done with 2 and 3" paid for the first time.
 
+### 5.1 The examples: nineteen become three
+
+**DECIDED 2026-08-07 (owner).** Nineteen envs and ~18 400 lines of examples, of which one
+already covers nearly the whole surface. The survivors:
+
+| | what it is | why it lives |
+|---|---|---|
+| `01_quickstart` | **new**, ~100 lines: link, display, `begin()`, `setText` — and **no `poll()` anywhere** | the shortest honest answer to "how do I use this", and the shape every consumer should copy |
+| `02_demo` | `17_mediascreen`, extended until every endpoint is exposed | the full spectrum: both families, the web console, the wire log, OTA |
+| `03_bringup` | `01_bringup` | **a tool, not a demo.** First flash of a bare board, recovery, OTA. It has to work when the demo is what is broken |
+
+Plus `09_golden` **temporarily**, through step 10: it is already on the owned task and it is
+the cheapest check that the opening still completes, so it is the reference the soak measures
+regression against. Once the soak is green its instrumentation — `sessionsLost`,
+`/deregistered.txt`, the driver counters — moves onto the demo's status page and it goes.
+
+The sixteen that go are genuinely redundant, and the two that looked load-bearing are not:
+
+* **The UpdateList family keeps its coverage.** `17_mediascreen` already selects between
+  `Family::Carminat` and `Family::UpdateList` at boot, so deleting `10_updatelist` and
+  `12_ulclock` costs no family. What the demo does *not* yet expose is UpdateList's own
+  surface — `setScrollText`, `setScrollActive`, `reassert`, the AMS hotkey — and step 8 owes
+  those endpoints before those two examples are deleted, not after.
+* **The nav pane keeps its lab.** `showNavBitmap` / `navTick` are already on the demo's
+  console with a live image upload, which is what `16_navlab` existed to provide.
+
 ---
 
 ## 6. Decided, 2026-08-07 (owner)
@@ -379,6 +406,7 @@ step 4 was not done with 2 and 3" paid for the first time.
 | callbacks | **synchronous**, plus per-callback budget and the culprit's name |
 | compatibility | **clean 2.0** — one handle, one contract, no deprecation window |
 | the menu widget (§2.1) | **unembedded**, not deleted — it moves to `widget/`, the application owns it |
+| the examples (§5.1) | **nineteen become three** — quickstart, full demo, bringup |
 | process | plan in `docs/`, then code |
 
 ---
