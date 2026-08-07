@@ -693,7 +693,10 @@ void AffaDisplayBase::setSync(SyncState s) {
   }
   _lossReasonNext = LossReason::None;   // never leaks into the next, unrelated transition
 
-  if (_syncCb) _syncCb(s, _syncCtx);
+  if (_syncCb) {
+    CbTimer t(*this, CbKind::Sync);
+    _syncCb(s, _syncCtx);
+  }
 
   // The handshake bits are logged only when they CHANGE. Logging them every pass buried
   // the one transition that mattered under a second of identical lines.

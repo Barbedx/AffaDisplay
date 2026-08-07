@@ -96,6 +96,12 @@ struct Status {
                                   // at t=0 is WiFi associating; a peak that keeps moving is
                                   // a callback. Without the timestamp both look identical.
   uint32_t  postDropped    = 0;   // renders refused because the dispatch ring was full
+  // WHICH CALLBACK BLOCKED, and how long for. `pollLateMaxUs` above says an iteration was
+  // slow; these say whose fault it was. Print both.
+  CbKind    slowestCb      = CbKind::None;
+  uint32_t  slowestCbMs    = 0;
+  uint32_t  slowestCbAtMs  = 0;
+  uint32_t  cbOverruns     = 0;
   uint32_t  foreignPolls   = 0;   // poll() called by a task that is not the owner
   uint32_t  stackFreeBytes = 0;   // uxTaskGetStackHighWaterMark, for sizing AFFA_TASK_STACK
 };

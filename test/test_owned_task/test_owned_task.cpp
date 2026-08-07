@@ -47,6 +47,11 @@ class WireDisplay final : public AffaDisplayBase {
   WireDisplay(ICanLink& l, IClock& c) : AffaDisplayBase(l, c, kProfile, kFuncIds, 2) {}
   bool supports(Feature) const override { return true; }
 
+  // NAME HIDING, not decoration — the same line CarminatDisplay carries and for the same
+  // reason: the protected `bool onFrame(const Frame&)` below hides EVERY base member called
+  // onFrame, including the public tap `void onFrame(FrameTap, void*)`.
+  using AffaDisplayBase::onFrame;
+
   // ONE FRAME, deliberately: with LoopbackLink's auto-ACK answering DONE to everything, a
   // multi-frame message completes at frame 0 and its continuations never reach the wire.
   // Eight payload bytes keeps the whole message visible to an ordering assertion.
@@ -62,6 +67,17 @@ class WireDisplay final : public AffaDisplayBase {
  protected:
   uint8_t  packetFiller() const override { return 0x00; }
   uint16_t keyTxId()      const override { return 0x1C1; }
+
+  // Route a key frame the way a real panel class does. Without this a `03 89` on 0x1C1 is
+  // acknowledged and then dropped, so KeyCb never fires — which is exactly how the first
+  // draft of the callback-attribution test below managed to measure nothing at all.
+  bool onFrame(const Frame& f) override {
+    if (f.id != 0x1C1) return false;
+    Key k; KeyEdge e;
+    if (!decodeKeyFrame(f, k, e)) return false;
+    routeKey(k, e);
+    return true;
+  }
 };
 
 // The poll-owner seam, driven by hand. On the target this is xTaskGetCurrentTaskHandle();
@@ -609,6 +625,117 @@ void test_with_no_owner_registered_every_task_takes_the_direct_path(void) {
   g_currentTask = nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// A blocking callback names itself
+// ---------------------------------------------------------------------------
+// It cannot be prevented — callbacks fire inside poll() by design, because that is what
+// bounds key latency by the poll period alone. What used to happen instead was
+// `pollLateMaxUs = 340000` and a whole application to search. These pin the missing word.
+
+#if AFFA_CALLBACK_BUDGET_MS > 0
+namespace {
+FakeClock* g_slowClock = nullptr;
+uint32_t   g_stallMs   = 0;
+
+// A callback that "blocks": the FakeClock is the only clock the library reads, so moving it
+// forward inside the callback IS a stall, exactly as the library measures one.
+void stallingKey(Key, KeyEdge, void*) { if (g_slowClock) g_slowClock->advance(g_stallMs); }
+void stallingTap(const Frame&, Direction, void*) {
+  if (g_slowClock) g_slowClock->advance(g_stallMs);
+}
+}  // namespace
+
+void test_a_blocking_callback_is_named_not_merely_counted(void) {
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  g_slowClock = &clk;
+
+  d.onKey(&stallingKey, nullptr);
+  bringUpSync(d, link, clk);
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, d.callbackOverruns(), "nothing has overrun yet");
+
+  // A key arrives and the application sits in its KeyCb for well over the budget.
+  g_stallMs = AFFA_CALLBACK_BUDGET_MS * 4;
+  link.inject(affatest::mk(0x1C1, {0x03, 0x89, 0x00, 0x05, 0xA3, 0xA3, 0xA3, 0xA3}));
+  d.poll();
+
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, d.callbackOverruns(), "the overrun is counted");
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(static_cast<uint8_t>(CbKind::Key),
+                                  static_cast<uint8_t>(d.slowestCallback()),
+                                  "and ATTRIBUTED — this is the whole point");
+  TEST_ASSERT_TRUE(d.slowestCallbackMs() >= g_stallMs);
+  TEST_ASSERT_EQUAL_STRING("KeyCb", cbName(d.slowestCallback()));
+
+  // THE TIMESTAMP IS NOT DECORATION. A peak at t=0 is WiFi associating and is nothing to
+  // fix; a peak whose timestamp keeps moving is a callback that blocks every time. Without
+  // it the two are the same number.
+  TEST_ASSERT_TRUE_MESSAGE(d.slowestCallbackAtMs() > 0, "when it happened is recorded too");
+
+  g_slowClock = nullptr;
+  g_stallMs   = 0;
+}
+
+void test_the_worst_callback_wins_not_the_most_recent(void) {
+  // A 400 ms callback that fired once at boot is the interesting one. Keeping only the most
+  // recent would let a run of merely-slow ones bury it before anybody looked.
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  g_slowClock = &clk;
+
+  d.onFrame(&stallingTap, nullptr);
+  bringUpSync(d, link, clk);
+
+  g_stallMs = AFFA_CALLBACK_BUDGET_MS * 10;          // the bad one, first
+  link.inject(affatest::mk(0x1C1, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
+  d.poll();
+  const uint32_t worst = d.slowestCallbackMs();
+  TEST_ASSERT_TRUE(worst >= g_stallMs);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CbKind::FrameTap),
+                          static_cast<uint8_t>(d.slowestCallback()));
+
+  g_stallMs = AFFA_CALLBACK_BUDGET_MS + 1;           // several merely-slow ones after
+  for (int i = 0; i < 5; ++i) {
+    link.inject(affatest::mk(0x1C1, {0x70, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3, 0xA3}));
+    d.poll();
+  }
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(worst, d.slowestCallbackMs(),
+                                   "the peak survives a run of smaller ones");
+
+  // …and it is cleared deliberately, never by being read.
+  d.resetCallbackPeak();
+  TEST_ASSERT_EQUAL_UINT32(0, d.slowestCallbackMs());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CbKind::None),
+                          static_cast<uint8_t>(d.slowestCallback()));
+  TEST_ASSERT_TRUE_MESSAGE(d.callbackOverruns() > 0,
+                           "the running count is NOT reset with the peak");
+
+  g_slowClock = nullptr;
+  g_stallMs   = 0;
+}
+
+void test_a_callback_inside_the_budget_is_not_reported(void) {
+  LoopbackLink<> link;
+  FakeClock clk;
+  WireDisplay d(link, clk);
+  g_slowClock = &clk;
+
+  d.onKey(&stallingKey, nullptr);
+  bringUpSync(d, link, clk);
+
+  g_stallMs = AFFA_CALLBACK_BUDGET_MS - 1;           // just inside
+  link.inject(affatest::mk(0x1C1, {0x03, 0x89, 0x00, 0x05, 0xA3, 0xA3, 0xA3, 0xA3}));
+  d.poll();
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, d.callbackOverruns(), "the budget is a threshold");
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CbKind::None),
+                          static_cast<uint8_t>(d.slowestCallback()));
+
+  g_slowClock = nullptr;
+  g_stallMs   = 0;
+}
+#endif  // AFFA_CALLBACK_BUDGET_MS > 0
+
 void test_begun_reports_whether_begin_has_run() {
   LoopbackLink<> link;
   FakeClock clk;
@@ -643,6 +770,11 @@ int main(int, char**) {
   RUN_TEST(test_a_full_dispatch_ring_refuses_at_the_call_and_counts_it);
   RUN_TEST(test_a_call_on_the_owning_task_never_touches_the_ring);
   RUN_TEST(test_with_no_owner_registered_every_task_takes_the_direct_path);
+#if AFFA_CALLBACK_BUDGET_MS > 0
+  RUN_TEST(test_a_blocking_callback_is_named_not_merely_counted);
+  RUN_TEST(test_the_worst_callback_wins_not_the_most_recent);
+  RUN_TEST(test_a_callback_inside_the_budget_is_not_reported);
+#endif
   RUN_TEST(test_begun_reports_whether_begin_has_run);
   return UNITY_END();
 }

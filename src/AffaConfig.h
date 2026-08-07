@@ -167,18 +167,35 @@
 #endif
 
 // src/rtos/ — the library creates and owns a FreeRTOS task that calls poll(), and the
-// application never calls poll() at all. Render calls then become legal FROM ANY TASK,
-// because they are copied into a command queue that the owned task drains. docs/API.md §4b.
+// application never calls poll() at all.
 //
-// OFF BY DEFAULT, and deliberately not defaulted on for ARDUINO_ARCH_ESP32: turning it on
+// ON BY DEFAULT FOR ESP32 SINCE 2.0, and the reversal is the whole point of the refactor.
+//
+// It defaulted to 0 through 1.x on an argument that was correct at the time: turning it on
 // changes WHICH TASK a consumer's callbacks run on, which is observable behaviour, so it
-// stays something you ask for.
+// should be asked for rather than imposed (docs/CR-0.3.0-OWNED-TASK.md §11.1 deferred the
+// decision explicitly — "revisit for 1.0"). What that produced is countable: THIRTEEN OF
+// NINETEEN shipped examples turned it off and pumped poll() from loop(), including the one
+// whose HTTP handlers then raced the queue.
 //
-// The #error below is the one that used to be unconditional. It still fires for every
-// non-FreeRTOS target — src/rtos/ is the one directory a port omits — it just no longer
-// fires for the targets that can actually honour the flag.
+// The reason they turned it off is gone. Until 2.0 the owned task published its own render
+// surface covering ten of twenty-two calls, so anything richer forced the application back
+// onto the raw display — at which point the task was an extra object with a second
+// vocabulary. The display is the thread-safe surface now, whichever task calls it, so the
+// task costs a consumer nothing but the two lines that start it.
+//
+// A build that genuinely wants to own poll() itself still says so: -D AFFA_ENABLE_TASK=0,
+// and the contract reverts to the original one — poll() from exactly one task, render from
+// that task too.
+//
+// The #error below still fires for every non-FreeRTOS target; src/rtos/ is the one
+// directory a port omits.
 #ifndef AFFA_ENABLE_TASK
-#  define AFFA_ENABLE_TASK 0
+#  if defined(ESP_PLATFORM) || defined(ARDUINO_ARCH_ESP32)
+#    define AFFA_ENABLE_TASK 1
+#  else
+#    define AFFA_ENABLE_TASK 0
+#  endif
 #endif
 #if AFFA_ENABLE_TASK && !defined(ESP_PLATFORM) && !defined(ARDUINO_ARCH_ESP32)
 #  error "AffaDisplay: AFFA_ENABLE_TASK=1 needs a FreeRTOS target (ESP_PLATFORM / ARDUINO_ARCH_ESP32). src/rtos/ is the only part of this library that is not portable; on any other target call poll() from exactly one task of your own (docs/API.md §4)."
@@ -494,6 +511,22 @@
 // paced. 250 keeps the reply comfortably inside the panel's ~1 s expectation.
 #ifndef AFFA_PING_REPLY_MIN_MS
 #  define AFFA_PING_REPLY_MIN_MS 250
+#endif
+
+// HOW LONG A CALLBACK MAY RUN BEFORE THE LIBRARY NAMES IT, in milliseconds.
+//
+// Callbacks fire inside poll(), on the poll task, and that is deliberate: it is what bounds
+// key latency by the poll period ALONE rather than by a queue. The price is that a callback
+// which blocks blocks the protocol, and no amount of design prevents an application from
+// writing one. So it is measured, and — since 2.0 — ATTRIBUTED.
+//
+// The number matters less than the attribution. 16 ms is AFFA_TASK_LATE_FACTOR periods at
+// the default 2 ms, i.e. the same threshold the owned task already used to call an iteration
+// late; what is new is that the log line says WHICH callback rather than "a callback".
+//
+// 0 compiles the timing out entirely — no clock reads on the callback path, no fields.
+#ifndef AFFA_CALLBACK_BUDGET_MS
+#  define AFFA_CALLBACK_BUDGET_MS 16
 #endif
 
 // CROSS-TASK DISPATCH SLOTS. Once a poll owner is registered, a render called from any other

@@ -77,6 +77,22 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   uint32_t dispatchDropped() const;
   uint8_t  dispatchQueued() const;   // posted and not yet drained
 
+  // ---- which callback blocked ----------------------------------------------
+  // A callback runs inside poll(), so one that blocks blocks the protocol. That cannot be
+  // prevented — it is the same property that bounds key latency by the poll period — so it
+  // is attributed instead: the WORST one seen, by name, with how long and when.
+  //
+  // WHY THE TIMESTAMP IS NOT OPTIONAL. A peak at t=0 is WiFi associating inside a SyncCb and
+  // is nothing to fix; a peak whose timestamp keeps moving is a callback that blocks every
+  // time. Without `slowestCallbackAtMs()` the two are the same number.
+  //
+  // Zeroed by AFFA_CALLBACK_BUDGET_MS = 0, which compiles the measurement out.
+  CbKind   slowestCallback()     const;
+  uint32_t slowestCallbackMs()   const;
+  uint32_t slowestCallbackAtMs() const;
+  uint32_t callbackOverruns()    const;   // times ANY callback exceeded the budget
+  void     resetCallbackPeak();
+
   // Has begin() run? AffaTask::start() refuses on false — a task that starts polling a
   // display that was never begun transmits nothing and reports no reason.
   bool begun() const;
@@ -541,6 +557,27 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // True on the owning task, and true for everyone when no owner is registered.
   bool onPollOwner() const;
 
+  // ---- callback attribution -------------------------------------------------
+  // Record one callback's duration. Called by CbTimer; not otherwise interesting.
+  void noteCallback(CbKind k, uint32_t ms);
+
+  // SCOPED, so that a callback which returns early — or through any path at all — is still
+  // measured. Compiles to nothing when AFFA_CALLBACK_BUDGET_MS is 0: no clock read on the
+  // callback path, no members, no code.
+  class CbTimer {
+   public:
+#if AFFA_CALLBACK_BUDGET_MS > 0
+    CbTimer(AffaDisplayBase& d, CbKind k) : _d(d), _k(k), _t0(d._clock.millis()) {}
+    ~CbTimer() { _d.noteCallback(_k, _d._clock.millis() - _t0); }
+   private:
+    AffaDisplayBase& _d;
+    CbKind           _k;
+    uint32_t         _t0;
+#else
+    CbTimer(AffaDisplayBase&, CbKind) {}
+#endif
+  };
+
   // Drain what other tasks posted. Owner only; called from poll().
   void pumpDispatch();
   // Stores the new state and fires SyncCb + EventKind::SyncChanged, but only on an actual
@@ -670,6 +707,15 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   void*     _pollOwner   = nullptr;   // null = unchecked (caller-owned mode)
   TaskIdFn  _pollOwnerFn = nullptr;
   uint32_t  _foreignPolls = 0;  // poll() calls from a task that is not the owner
+#if AFFA_CALLBACK_BUDGET_MS > 0
+  // The WORST callback seen, not the last: a slow one that happened once at boot must not be
+  // scrolled away by a hundred fast ones. Reset deliberately, never sampled-and-cleared.
+  CbKind    _slowestCb     = CbKind::None;
+  uint32_t  _slowestCbMs   = 0;
+  uint32_t  _slowestCbAtMs = 0;
+  uint32_t  _cbOverruns    = 0;
+  uint32_t  _cbLogMs       = 0;   // rate limit: one line per second, or the storm hides it
+#endif
   // Sessions the panel has taken away since begin(). See sessionsLost().
   RenderSlot _lastRendered     = RenderSlot::None;
   uint32_t   _lastRenderedMs   = 0;

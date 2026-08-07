@@ -204,6 +204,10 @@ void AffaTask::publish(uint32_t iterUs) {
   s.pollLateMaxUs  = _pollLateMaxUs;
   s.pollLateAtMs   = _pollLateAtMs;
   s.postDropped    = dropped;
+  s.slowestCb      = _d->slowestCallback();
+  s.slowestCbMs    = _d->slowestCallbackMs();
+  s.slowestCbAtMs  = _d->slowestCallbackAtMs();
+  s.cbOverruns     = _d->callbackOverruns();
   s.foreignPolls   = _d->foreignPolls();
   s.stackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
 
@@ -233,6 +237,7 @@ Status AffaTask::status() const {
 void AffaTask::resetPeaks() {
   _pollLateMaxUs = 0;
   _pollLateAtMs  = 0;
+  if (_d) _d->resetCallbackPeak();
 }
 
 }  // namespace rtos

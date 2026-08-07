@@ -366,4 +366,36 @@ enum class Direction : uint8_t { Rx = 1, Tx = 2, Both = 3 };
 // On the path of every frame — keep it to a ring push, and never render from it.
 using FrameTap = void (*)(const Frame& f, Direction d, void* ctx);
 
+// WHICH CALLBACK, when one of them blocks.
+//
+// A callback that blocks blocks the library — it runs inside poll(), on the poll owner's
+// task, by design, because that is what bounds key latency by the poll period alone. It
+// cannot be prevented. What it CAN be is attributable.
+//
+// Until 2.0 the only evidence was `Status::pollLateMaxUs`: "an iteration took 340 ms". That
+// says something is wrong and nothing about where. The three incidents in
+// docs/CR-0.3.0-OWNED-TASK.md §2 all presented as "the panel is frozen" with every error
+// counter at zero, and the search each time was the whole application. This is the missing
+// word in that sentence.
+enum class CbKind : uint8_t {
+  None = 0,
+  Key,        // onKey       — fires inside pumpRx, before any transmit pumping
+  Sync,       // onSync      — a state-word change
+  Complete,   // onComplete  — a render's delivery verdict
+  FrameTap,   // onFrame     — EVERY frame, both directions; the easiest one to make slow
+  Text,       // onText      — a reassembled inbound string
+};
+
+inline const char* cbName(CbKind k) {
+  switch (k) {
+    case CbKind::None:     return "none";
+    case CbKind::Key:      return "KeyCb";
+    case CbKind::Sync:     return "SyncCb";
+    case CbKind::Complete: return "CompleteCb";
+    case CbKind::FrameTap: return "FrameTap";
+    case CbKind::Text:     return "TextCb";
+  }
+  return "?";
+}
+
 } // namespace affa

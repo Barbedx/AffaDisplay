@@ -416,7 +416,9 @@ void AffaDisplayBase::routeKey(Key k, KeyEdge e) {
   // two deliveries of the same press disagreed by design. The sink is gone and so is the
   // menu; a key press reaches the application, and what the application does with it —
   // including handing it to affa::CarminatMenu::routeKey() — is above this line.
-  if (_keyCb) _keyCb(k, e, _keyCtx);
+  if (!_keyCb) return;
+  CbTimer t(*this, CbKind::Key);
+  _keyCb(k, e, _keyCtx);
 }
 
 Result AffaDisplayBase::transmitKey(Key k, KeyEdge e) {

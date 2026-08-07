@@ -893,7 +893,10 @@ void AffaDisplayBase::completeTicket(TxTicket t, Result r) {
 
   // One completion, one callback. The Layer 2 TxComplete event that used to follow carried
   // byte-for-byte the same (ticket, result) pair to a second sink nobody installed.
-  if (_cplCb) _cplCb(t, r, _cplCtx);
+  if (_cplCb) {
+    CbTimer g(*this, CbKind::Complete);
+    _cplCb(t, r, _cplCtx);
+  }
 }
 
 void AffaDisplayBase::failAllQueued(Result r) {
