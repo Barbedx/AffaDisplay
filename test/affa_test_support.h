@@ -212,11 +212,6 @@ inline void settleCarminatRegistration(D& d, FakeClock& clk) {
 // Pumping
 // ---------------------------------------------------------------------------
 
-template <class D>
-inline void pump(D& d, int polls) {
-  for (int i = 0; i < polls; ++i) d.poll();
-}
-
 // Polls until the transmit queue is empty. It is a bounded loop with a loud failure: a
 // test that silently stopped pumping would assert against a half-transmitted message.
 template <class D>

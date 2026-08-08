@@ -37,8 +37,8 @@ What the one capture shows is the radio driving throughout:
 
 So the trigger is either the `69` or nothing at all — our own request being enough.
 **Which of the two is not decidable from one sample.** It is recorded rather than guessed,
-and `test_the_opening_cannot_complete_because_nothing_triggers_the_hello` deliberately
-passes on the broken behaviour so that fixing it has to be a decision, not an accident.
+**and as of 2026-08-08 nothing guards it.** The test that deliberately passed on the broken
+behaviour went with the rest of the behavioural suite; this paragraph is now the only record.
 
 Closing it needs a cluster on a bench, or an owner's ruling.
 
@@ -81,8 +81,8 @@ states. The captures were unambiguous each time.
 `test_carminat_ignores_unknown_full_auth_until_00` asserted that `61 11 5A` produced nothing
 until a `61 11 00` arrived. No capture contains `5A`, or says byte 2 is read at all. The
 special case had been promoted from code into a regression test, where it looked like a
-measurement and would have outlived the code that made it true. It is now
-`test_any_complete_61_11_xx_is_the_same_request`.
+measurement and would have outlived the code that made it true. It was renamed to say what the captures say, and later deleted with the rest of the
+behavioural suite — the fix it guarded is still in the FSM.
 
 The lesson generalises: **a test that pins a flag's VALUE is weaker than one that pins the
 wire.** Four assertions of the form `TEST_ASSERT_FALSE(kSync.someFlag)` went with the flags

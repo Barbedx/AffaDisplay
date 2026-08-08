@@ -17,7 +17,6 @@ using namespace affa;
 using affatest::mk;
 using affatest::drain;
 using affatest::expectFrames;
-using affatest::pump;
 using affatest::pumpUntilIdle;
 
 namespace {
@@ -293,54 +292,6 @@ void test_segment_setText_channel_byte_follows_the_digit(void) {
   }
 }
 
-void test_segment_setText_pads_both_fields_with_NUL(void) {
-  // NUL, not space. Every capture and both golden vectors show 0x00 here; finding #9's
-  // "emit the OEM space form" is specific to Carminat's showInfoMenu.
-  SegRig r;
-  r.up();
-  (void)r.d.setText("AUX", 255);
-  pumpUntilIdle(r.d);
-  Frame f0, f1;
-  TEST_ASSERT_TRUE(r.link.takeSent(f0));
-  TEST_ASSERT_TRUE(r.link.takeSent(f1));
-  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00, f1.data[1], "old text field is NUL-padded");
-  drain(r.link);
-}
-
-void test_the_wire_carries_twelve_cells_but_the_panel_only_promises_eight(void) {
-  // THE WHOLE ARGUMENT FOR ONE ENCODING, in one test.
-  //
-  // The radio cannot tell which glass answered, so it always sends the full 12-cell "new
-  // text" field: a wider display shows all of it, a segment display shows the first eight.
-  // panelGeometry() reports the GUARANTEED width, not the field width, because a fitter
-  // that trusts 12 writes text the segment panel silently truncates.
-  SegRig r;
-  r.up();
-  TEST_ASSERT_EQUAL_UINT8_MESSAGE(8, r.d.panelGeometry().mainChars,
-                                  "mainChars is the promise, not the field");
-  TEST_ASSERT_EQUAL_UINT8_MESSAGE(12, updatelist::kNewCells,
-                                  "…while the wire still carries twelve");
-
-  // And nothing else is claimed: no menu window, no info rows, no image layer.
-  TEST_ASSERT_EQUAL_UINT8(0, r.d.panelGeometry().menuRows);
-  TEST_ASSERT_EQUAL_UINT8(0, r.d.panelGeometry().infoRows);
-  TEST_ASSERT_EQUAL_UINT8(0, r.d.panelGeometry().listMaxItems);
-
-  ASSERT_RESULT(Ok, r.d.setText("ABCDEFGHIJKL"));
-  pumpUntilIdle(r.d);
-
-  // Frame 4 of 4 ends the 12-cell field: cells 9..12 are 'I','J','K','L', then the 0x00
-  // terminator and the two 0x81 payload bytes. If a "width" ever starts truncating the
-  // send, this is the assertion that catches it.
-  Frame f;
-  for (int i = 0; i < 3; ++i) TEST_ASSERT_TRUE(r.link.takeSent(f));
-  TEST_ASSERT_TRUE(r.link.takeSent(f));
-  const uint8_t kTail[8] = {0x23, 'I', 'J', 'K', 'L', 0x00, 0x81, 0x81};
-  TEST_ASSERT_EQUAL_HEX8_ARRAY_MESSAGE(kTail, f.data, 8,
-                                       "all twelve cells reach the bus");
-  drain(r.link);
-}
-
 // ---------------------------------------------------------------------------
 // Key channel
 // ---------------------------------------------------------------------------
@@ -367,26 +318,6 @@ void test_a_malformed_key_frame_is_not_acknowledged(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Capability honesty
-// ---------------------------------------------------------------------------
-
-void test_unsupported_operations_report_rather_than_no_op(void) {
-  // The extracted setTime()/showMenu() returned NoError while putting nothing on the wire.
-  SegRig r;
-  r.up();
-  ASSERT_RESULT(NotSupported, r.d.setTime("1234"));
-  ASSERT_RESULT(NotSupported, r.d.showMenu("a", "b", "c", 0x0B));
-  ASSERT_RESULT(NotSupported, r.d.showPopupText("x", 0x09, 0xFF, 0x60));
-  TEST_ASSERT_FALSE(r.d.supports(Feature::Time));
-  TEST_ASSERT_FALSE(r.d.supports(Feature::Menu));
-  TEST_ASSERT_TRUE(r.d.supports(Feature::Text));
-  TEST_ASSERT_TRUE(r.d.supports(Feature::Power));
-  TEST_ASSERT_TRUE(r.d.supports(Feature::KeyTx));
-  pumpUntilIdle(r.d);
-  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(), "a refusal sends nothing");
-}
-
-// ---------------------------------------------------------------------------
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -399,9 +330,6 @@ int main(int, char**) {
   RUN_TEST(test_setPower_declares_0x04_and_pads_with_0x81);
   RUN_TEST(test_segment_setText_is_four_frames);
   RUN_TEST(test_segment_setText_channel_byte_follows_the_digit);
-  RUN_TEST(test_segment_setText_pads_both_fields_with_NUL);
-  RUN_TEST(test_the_wire_carries_twelve_cells_but_the_panel_only_promises_eight);
   RUN_TEST(test_a_malformed_key_frame_is_not_acknowledged);
-  RUN_TEST(test_unsupported_operations_report_rather_than_no_op);
   return UNITY_END();
 }

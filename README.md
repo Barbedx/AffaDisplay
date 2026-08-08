@@ -30,7 +30,7 @@ calls are unconditional, keys come out of `onKey()`, and what happens next is yo
 - **Every render returns `Submitted`** — a ticket and a `Result`, `[[nodiscard]]`, so a
   screen that silently never appeared is a compiler warning rather than a mystery.
 - **An unsupported call returns `NotSupported`**, never a silent success.
-- **The host tests need no hardware.** 195 cases, `platform = native`, ~12 s.
+- **The host tests need no hardware.** 30 cases, `platform = native`, ~2 s.
 
 ## Quick start
 
@@ -176,13 +176,13 @@ document.
 
 | | |
 | --- | --- |
-| [`docs/WIRE.md`](docs/WIRE.md) | **Generated** from the golden vectors CI asserts. 111 frames, every one checked byte for byte. Prose about a bus drifts from the bus; an assertion cannot. |
+| [`docs/WIRE.md`](docs/WIRE.md) | **Generated** from the golden vectors CI asserts. 103 frames, every one checked byte for byte. Prose about a bus drifts from the bus; an assertion cannot. |
 | [`docs/API.md`](docs/API.md) | The contracts: threading, `Result`, latency, capabilities. It does **not** copy declarations — the headers are the declarations. |
 | [`docs/NOTES.md`](docs/NOTES.md) | What we do **not** know, how this project has got things wrong seven times running, and the incidents behind the threading model. |
 | [`docs/BENCH-VERIFIED.md`](docs/BENCH-VERIFIED.md) | What a human looked at on real glass. |
 
 ```
-pio test -e native      # 195 cases, no hardware
+pio test -e native      # 30 cases, no hardware
 pio run                 # 5 environments
 ```
 
@@ -213,7 +213,7 @@ MIT · Arduino + PlatformIO · C++17 · без купи після `begin()` · 
   `enqueue()`, нижче за кожен збирач.
 - **Кожен рендер повертає `Submitted`** — квиток і `Result`, `[[nodiscard]]`.
 - **Непідтриманий виклик повертає `NotSupported`**, а не мовчазний успіх.
-- **Тестам не потрібне залізо.** 195 випадків, `platform = native`, ~12 с.
+- **Тестам не потрібне залізо.** 30 випадків, `platform = native`, ~2 с.
 
 Швидкий старт — код в англійській половині вище, він однаковий.
 

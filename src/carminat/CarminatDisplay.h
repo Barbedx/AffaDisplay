@@ -50,7 +50,7 @@ class CarminatDisplay final : public AffaDisplayBase {
   // `void onFrame(FrameTap, void*)` — so without this line `display.onFrame(&tap, ctx)`
   // fails to compile through a CarminatDisplay& and only works through an
   // AffaDisplayBase&. The derived override still hides the base's same-signature member,
-  // so this changes nothing else. Found by a preemption bench, now pinned by test_latency.
+  // so this changes nothing else. Found by a preemption bench, now pinned by the coalescing golden vector.
   using AffaDisplayBase::onFrame;
 
   bool supports(Feature f) const override;

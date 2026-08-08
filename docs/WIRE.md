@@ -13,6 +13,87 @@ comment above the vector, where it dies with the assertion it describes.
 > transcription of captures we still have. Raw evidence lives in `docs/captures/`;
 > what has been seen on real glass lives in `docs/BENCH-VERIFIED.md`.
 
+## `test_carminat_session`
+
+### `kCarminatHello`
+
+```
+3AF  B0 14 11 00 1F 00 00 00
+```
+
+asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00`, `test_phase_walks_the_measured_opening_in_order`
+
+### `kCarminatAlive`
+
+```
+3AF  B9 00 00 00 00 00 00 00
+```
+
+asserted by `test_carminat_announces_into_a_silent_bus_slowly_and_ba_only`, `test_carminat_never_pongs_between_heartbeats`, `test_a_ping_storm_never_moves_the_free_running_heartbeat`
+
+### `kCarminatRequest`
+
+```
+3AF  BA 00 00 00 00 00 00 00
+```
+
+asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00`, `test_carminat_bootstrap_is_held_until_good_auth`, `test_phase_walks_the_measured_opening_in_order`, `test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediately`
+
+### `kCarminatRegText`
+
+```
+151  70 00 00 00 00 00 00 00
+```
+
+asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00`, `test_carminat_announces_into_a_silent_bus_slowly_and_ba_only`, `test_carminat_bootstrap_is_held_until_good_auth`, `test_phase_walks_the_measured_opening_in_order`, `test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediately`, `test_recovery_reasserts_cached_power_before_held_time`
+
+### `kCarminatRegNav`
+
+```
+1F1  70 00 00 00 00 00 00 00
+```
+
+asserted by `test_carminat_announces_into_a_silent_bus_slowly_and_ba_only`, `test_carminat_bootstrap_is_held_until_good_auth`, `test_recovery_reasserts_cached_power_before_held_time`
+
+### `kCarminatPowerOn`
+
+```
+151  03 52 09 00 00 00 00 00
+```
+
+asserted by `test_carminat_bootstrap_is_held_until_good_auth`, `test_phase_walks_the_measured_opening_in_order`, `test_an_application_that_owns_power_is_not_overridden`, `test_recovery_reasserts_cached_power_before_held_time`
+
+### `kCarminatTime1000`
+
+```
+151  05 56 31 30 30 30 00 00
+```
+
+asserted by `test_carminat_bootstrap_is_held_until_good_auth`, `test_recovery_reasserts_cached_power_before_held_time`
+
+### `kPanelChannelReg`
+
+> THE DISPLAY REGISTERS ITS OWN CHANNEL FIRST, and that is now a precondition of ours.
+> [CAP] measured 4/4 across the OEM captures: the display's `1C1 70` lands 0.81-1.55 ms
+> after B0#1 — i.e. BETWEEN the first and second announce frames — we answer `5C1 74 00 …`
+> within 0.25-0.48 ms (12/12), and only 60.69-61.34 ms later, after B0#3, does the radio put
+> its own `151 70` on the wire. A rig that never injects the 1C1 is not modelling this panel
+> at all: the library then correctly refuses to register, for ever.
+
+```
+1C1  70 A3 A3 A3 A3 A3 A3 A3
+```
+
+asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00`, `test_phase_walks_the_measured_opening_in_order`, `test_phase_falls_back_when_the_panel_voids_the_session`
+
+### `kPanelChannelAck`
+
+```
+5C1  74 00 00 00 00 00 00 00
+```
+
+asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00`, `test_phase_walks_the_measured_opening_in_order`
+
 ## `test_carminat_wire`
 
 ### `kSetTextRenault`
@@ -222,156 +303,6 @@ asserted by `test_showConfirmBox_is_a_one_button_box`
 
 asserted by `test_showInfoPopup_is_three_messages_space_padded`
 
-## `test_session_epoch`
-
-### `kHello`
-
-```
-3AF  B0 14 11 00 1F 00 00 00
-```
-
-asserted by `test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9`
-
-### `kAlive`
-
-```
-3AF  B9 00 00 00 00 00 00 00
-```
-
-asserted by `test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9`
-
-### `kRequest`
-
-```
-3AF  BA 00 00 00 00 00 00 00
-```
-
-asserted by `test_bare_first_69_gets_one_discovery_ba_but_never_unlocks_output`, `test_busy_ba_retries_only_ba_and_never_grows_a_b9`
-
-### `kReg151`
-
-```
-151  70 00 00 00 00 00 00 00
-```
-
-asserted by `test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9`
-
-### `kReg1F1`
-
-```
-1F1  70 00 00 00 00 00 00 00
-```
-
-asserted by `test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9`
-
-### `kPanelChannelAck`
-
-> The reflex reply we owe the display's own `1C1 70` channel registration. [CAP] 12/12
-> across the four OEM captures, answered in 0.288/0.453/0.470/0.483 ms.
-
-```
-5C1  74 00 00 00 00 00 00 00
-```
-
-asserted by `test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9`
-
-### `kPowerOn`
-
-```
-151  03 52 09 00 00 00 00 00
-```
-
-asserted by `test_late_reassert_ack_cannot_clear_the_next_session_restore`
-
-### `kTime1000`
-
-```
-151  05 56 31 30 30 30 00 00
-```
-
-asserted by `test_late_registration_ack_cannot_revive_a_torn_down_session`, `test_late_reassert_ack_cannot_clear_the_next_session_restore`
-
-## `test_sync_profiles`
-
-### `kCarminatHello`
-
-```
-3AF  B0 14 11 00 1F 00 00 00
-```
-
-asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00`, `test_phase_walks_the_measured_opening_in_order`
-
-### `kCarminatAlive`
-
-```
-3AF  B9 00 00 00 00 00 00 00
-```
-
-asserted by `test_carminat_announces_into_a_silent_bus_slowly_and_ba_only`, `test_carminat_never_pongs_between_heartbeats`, `test_a_ping_storm_never_moves_the_free_running_heartbeat`
-
-### `kCarminatRequest`
-
-```
-3AF  BA 00 00 00 00 00 00 00
-```
-
-asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00`, `test_carminat_bootstrap_is_held_until_good_auth`, `test_phase_walks_the_measured_opening_in_order`, `test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediately`
-
-### `kCarminatRegText`
-
-```
-151  70 00 00 00 00 00 00 00
-```
-
-asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00`, `test_carminat_announces_into_a_silent_bus_slowly_and_ba_only`, `test_carminat_bootstrap_is_held_until_good_auth`, `test_phase_walks_the_measured_opening_in_order`, `test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediately`, `test_recovery_reasserts_cached_power_before_held_time`
-
-### `kCarminatRegNav`
-
-```
-1F1  70 00 00 00 00 00 00 00
-```
-
-asserted by `test_carminat_announces_into_a_silent_bus_slowly_and_ba_only`, `test_carminat_bootstrap_is_held_until_good_auth`, `test_recovery_reasserts_cached_power_before_held_time`
-
-### `kCarminatPowerOn`
-
-```
-151  03 52 09 00 00 00 00 00
-```
-
-asserted by `test_carminat_bootstrap_is_held_until_good_auth`, `test_phase_walks_the_measured_opening_in_order`, `test_an_application_that_owns_power_is_not_overridden`, `test_recovery_reasserts_cached_power_before_held_time`
-
-### `kCarminatTime1000`
-
-```
-151  05 56 31 30 30 30 00 00
-```
-
-asserted by `test_carminat_bootstrap_is_held_until_good_auth`, `test_recovery_reasserts_cached_power_before_held_time`
-
-### `kPanelChannelReg`
-
-> THE DISPLAY REGISTERS ITS OWN CHANNEL FIRST, and that is now a precondition of ours.
-> [CAP] measured 4/4 across the OEM captures: the display's `1C1 70` lands 0.81-1.55 ms
-> after B0#1 — i.e. BETWEEN the first and second announce frames — we answer `5C1 74 00 …`
-> within 0.25-0.48 ms (12/12), and only 60.69-61.34 ms later, after B0#3, does the radio put
-> its own `151 70` on the wire. A rig that never injects the 1C1 is not modelling this panel
-> at all: the library then correctly refuses to register, for ever.
-
-```
-1C1  70 A3 A3 A3 A3 A3 A3 A3
-```
-
-asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00`, `test_phase_walks_the_measured_opening_in_order`, `test_phase_falls_back_when_the_panel_voids_the_session`
-
-### `kPanelChannelAck`
-
-```
-5C1  74 00 00 00 00 00 00 00
-```
-
-asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00`, `test_phase_walks_the_measured_opening_in_order`
-
 ## `test_updatelist_wire`
 
 ### `kRegister`
@@ -459,4 +390,4 @@ asserted by `test_key_ack_id_is_computed_not_tabulated`, `test_registration_walk
 
 ---
 
-111 frames across 40 vectors.
+103 frames across 32 vectors.

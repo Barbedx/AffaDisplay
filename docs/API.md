@@ -132,7 +132,7 @@ laptop, and it is worth more than any single feature in here.
 * `src/rtos/` is the single exception to Host, and it is fenced: FreeRTOS headers appear
   in `rtos/` and nowhere else. The poll-owner guard `core/` needs for the owned-task mode
   is a **function pointer** (`AffaDisplayBase::TaskIdFn`) precisely so that `core/` never
-  learns what a task is — and it is host-tested through that seam (`test_owned_task`).
+  learns what a task is — and it is host-tested through that seam.
 * `core/` and `util/` are compiled by `test/` for `platform = native`. If a change breaks
   that build, the change is wrong, not the test.
 
@@ -399,7 +399,7 @@ sentence a test asserts:
 > callback firing is exactly one, regardless of transmit queue depth or of any message
 > in flight.**
 
-`test/test_latency` enforces it as a **poll count**, at both ends of the range: with an
+This was enforced as a poll count at both ends of the range: with an
 empty queue, and with a 96-byte `showMenu` in `WaitAck` and every one of the
 `AFFA_TX_QUEUE_DEPTH` slots occupied (the next `enqueue` returning `QueueFull` is asserted
 too, so the queue really is full). In both cases a `0x1C1` key frame injected into
@@ -753,8 +753,8 @@ Sizing follows from `ringOverflow`, not from the protocol: at 500 kbit/s a full
 `poll()` calls on a fully saturated bus, and far longer on the 2-node bus this library
 actually runs on.
 
-Two tests enforce this, one per profile. `test_core` calls `poll()` a million times across
-one simulated second on the Carminat profile; `test_sync_profiles` does the same 20 000
+This was enforced by two tests, one per profile — a million polls across one simulated
+second on Carminat, 20 000
 times on the UpdateList profile, because a call-counting implementation would emit a storm
 on **both** and the FSM is shared. Each asserts that
 
