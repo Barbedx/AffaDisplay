@@ -200,6 +200,23 @@ inline bool normalise(DisplayDocument& d, const affa::PanelGeometry& g) {
 
   if (d.itemCount && d.selected >= d.itemCount) d.selected = 0;
   if (d.ttlMs && d.ttlMs < 2000) d.ttlMs = 2000;     // a screen nobody can read is a flicker
+
+  // ── THE COMPOSITION MATRIX, measured on the bench 2026-08-08 ────────────────
+  // The 48x48 pane is an independent LAYER, but it is not independent of everything: it
+  // stays visible under the plain text line and under the three info rows, and it is NOT
+  // visible under a list (`21 01`), a message box or a fullscreen screen. Those take the
+  // whole glass.
+  //
+  // SO A SCENE ON ONE OF THOSE TYPES IS A PROMISE THE PANEL DOES NOT KEEP, and clearing it
+  // here is the difference between a producer that learns the rule and one that keeps
+  // asking for a picture nobody can see. It costs 44 CAN frames to send an image that is
+  // then covered up — about a quarter of this link — so this is not only a correctness fix.
+  //
+  // Text and Info keep theirs. Image IS the pairing, and normalise() has already turned it
+  // into Info above when the family has no pane at all.
+  if (d.type == DocType::List || d.type == DocType::Message || d.type == DocType::Question)
+    d.scene[0] = '\0';
+
   return !d.empty();
 }
 

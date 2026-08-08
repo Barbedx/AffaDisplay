@@ -29,8 +29,8 @@
 #include <PsychicHttp.h>
 #include <WiFi.h>
 
-#include "media_render.h"
-#include "../16_navlab/nav_images.h"   // one generator, one header, two consumers
+#include "../shared/media_render.h"
+#include "../shared/nav_images.h"   // one generator, one header, two consumers
 
 #if !AFFA_PANEL_CARMINAT
 #  error "17_mediascreen needs the Carminat panel: build with -D AFFA_PANEL_CARMINAT=1"

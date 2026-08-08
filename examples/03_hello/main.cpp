@@ -43,7 +43,7 @@ namespace {
 
 // ESP32-C3 SuperMini + transceiver. RX FIRST — the named fields are what stop the swap
 // from becoming a silent bus with no error anywhere.
-constexpr affa::CanPins kPins{ .rx = GPIO_NUM_3, .tx = GPIO_NUM_4 };
+struct { gpio_num_t rx, tx; } constexpr kPins{ GPIO_NUM_3, GPIO_NUM_4 };
 constexpr uint32_t      kBitrate = 500000;
 
 // The panel needs a moment after power-on before anything drawn on it is visible.
@@ -53,7 +53,7 @@ struct ArduinoClock final : affa::IClock {
   uint32_t millis() const override { return ::millis(); }
 };
 
-affa::Esp32CanLink    g_link;
+affa::CanCommonLink   g_link;
 ArduinoClock          g_clock;
 affa::CarminatDisplay g_display(g_link, g_clock);
 affa::rtos::AffaTask  g_task;     // the library's own poll task
@@ -98,7 +98,7 @@ void setup() {
   delay(300);
   Serial.println("\nAffaDisplay 03_hello");
 
-  if (!g_link.begin(kPins, kBitrate))
+  if (!g_link.begin(kPins.rx, kPins.tx, kBitrate))
     Serial.println("[can] controller did not come up");
 
   // THE ORDER IS THE CONTRACT: callbacks, then begin(), then start(). start() refuses a

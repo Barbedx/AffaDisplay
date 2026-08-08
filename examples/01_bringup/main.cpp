@@ -68,9 +68,9 @@ namespace {
 #  define AFFA_PINS_MIRRORED 0
 #endif
 #if AFFA_PINS_MIRRORED
-constexpr affa::CanPins kPins{ .rx = GPIO_NUM_4, .tx = GPIO_NUM_3 };
+struct { gpio_num_t rx, tx; } constexpr kPins{ GPIO_NUM_4, GPIO_NUM_3 };
 #else
-constexpr affa::CanPins kPins{ .rx = GPIO_NUM_3, .tx = GPIO_NUM_4 };
+struct { gpio_num_t rx, tx; } constexpr kPins{ GPIO_NUM_3, GPIO_NUM_4 };
 #endif
 constexpr uint32_t kBitrate = 500000;
 
@@ -85,7 +85,7 @@ struct ArduinoClock final : affa::IClock {
   uint32_t millis() const override { return ::millis(); }
 };
 
-affa::Esp32CanLink    g_link;
+affa::CanCommonLink   g_link;
 ArduinoClock          g_clock;
 affa::CarminatDisplay g_display(g_link, g_clock);
 affa::rtos::AffaTask  g_task;
@@ -501,7 +501,6 @@ void jstr(const char* s) {
 
 void jStatus() {
   const affa::rtos::Status st = g_task.status();
-  const auto drv  = g_link.driverState();
   const auto hl   = g_display.linkHealth();
 
   jclear();
@@ -511,7 +510,7 @@ void jStatus() {
   jf("\"heapFree\":%lu,", static_cast<unsigned long>(ESP.getFreeHeap()));
   jf("\"bootQuiet\":%s,", g_bootQuiet ? "true" : "false");
   jf("\"canUp\":%s,", g_canUp ? "true" : "false");
-  jf("\"txGate\":%s,", g_link.txEnabled() ? "true" : "false");
+  jf("\"txGate\":%s,", g_link.txGate() ? "true" : "false");
 
   // The sequence: what the board is actually doing about SUCCESS / 10:00.
   jf("\"seq\":{\"step\":"); jstr(stepName(g_step));
@@ -550,17 +549,20 @@ void jStatus() {
      static_cast<unsigned long>(st.foreignPolls),
      static_cast<unsigned long>(st.stackFreeBytes));
 
-  // The controller. A SINGLE SAMPLE OF THIS IS NOT THE TRUTH — library-owned recovery can
-  // cycle counters-zero -> rxErr 129 -> busErr climbing -> bus-off -> restart ->
-  // counters-zero. Read `flaps` and `downMs` for the shape, busErr for the cause, and
-  // sample several times over ~40 s before concluding anything.
-  jf("\"drv\":{\"valid\":%s,\"state\":%u,\"txErr\":%lu,\"rxErr\":%lu,\"busErr\":%lu,"
-     "\"arbLost\":%lu,\"rxMissed\":%lu,\"restarts\":%lu},",
-     drv.valid ? "true" : "false", static_cast<unsigned>(drv.state),
-     static_cast<unsigned long>(drv.txErr), static_cast<unsigned long>(drv.rxErr),
-     static_cast<unsigned long>(drv.busErr), static_cast<unsigned long>(drv.arbLost),
-     static_cast<unsigned long>(drv.rxMissed),
-     static_cast<unsigned long>(g_link.restarts()));
+  // THE DRIVER COUNTERS ARE THE LINK'S NOW, not a TWAI-specific read. Esp32CanLink was
+  // deleted in 2.0 -- nothing built against it -- and can_common is the proven stack, so
+  // what is left is Stats, which every link answers. `flaps` and `downMs` below carry the
+  // shape that driverState() used to; a SINGLE SAMPLE OF EITHER IS NOT THE TRUTH, because
+  // library-owned recovery cycles counters-zero -> rxErr 129 -> bus-off -> restart -> zero.
+  {
+    const affa::Stats s = g_display.stats();
+    jf("\"drv\":{\"rx\":%lu,\"tx\":%lu,\"txDropped\":%lu,\"ringOverflow\":%lu,"
+       "\"txErr\":%lu,\"rxErr\":%lu,\"txFailed\":%lu},",
+       static_cast<unsigned long>(s.rxFrames), static_cast<unsigned long>(s.txFrames),
+       static_cast<unsigned long>(s.txDropped), static_cast<unsigned long>(s.ringOverflow),
+       static_cast<unsigned long>(s.txErr), static_cast<unsigned long>(s.rxErr),
+       static_cast<unsigned long>(s.txFailed));
+  }
 
   jf("\"health\":{\"recoveries\":%lu,\"failures\":%lu,\"flaps\":%lu,\"downMs\":%lu},",
      static_cast<unsigned long>(hl.recoveries), static_cast<unsigned long>(hl.failures),
@@ -794,7 +796,7 @@ void routes() {
   // the controller still ACKs the other node, which a two-node bus requires.
   g_server.on("/api/txgate", HTTP_GET, [](PsychicRequest* r) {
     const bool on = pnum(r, "on", 1) != 0;
-    g_link.setTxEnabled(on);
+    g_link.setTxGate(on);
     logmsg("tx gate %s", on ? "open" : "SHUT");
     jclear();
     jf("{\"txGate\":%s}", on ? "true" : "false");
@@ -893,7 +895,7 @@ void startHttp() {
     g_otaRunning = true;
     g_otaSince   = millis();
     g_autoRun    = false;
-    if (g_canUp) g_link.setTxEnabled(false);
+    if (g_canUp) g_link.setTxGate(false);
     logmsg("ota started - CAN TX gated, RX stalls on flash writes");
   });
   ElegantOTA.onEnd([](bool ok) { logmsg("ota %s", ok ? "ok, rebooting" : "FAILED"); });
@@ -941,7 +943,7 @@ void setup() {
   //
   //    Start in normal mode. The software gate below is the diagnostic quiet period: it
   //    suppresses our TX while retaining hardware ACK for the other bus participant.
-  g_canUp = g_link.begin(kPins, kBitrate);
+  g_canUp = g_link.begin(kPins.rx, kPins.tx, kBitrate);
 
   // 3. THE ORDER IS THE CONTRACT: callbacks, then begin(), then start(). start() refuses a
   //    display that was never begun, and callbacks installed after the task is running
@@ -952,7 +954,7 @@ void setup() {
 
   // Shut the gate BEFORE the task starts polling, so a quiet boot is quiet from the very
   // first iteration rather than after one heartbeat has already gone out.
-  if (g_canUp && g_bootQuiet) g_link.setTxEnabled(false);
+  if (g_canUp && g_bootQuiet) g_link.setTxGate(false);
 
   if (!g_task.start(g_display))
     Serial.println("AffaTask::start() FAILED - nothing will be polled");
@@ -988,7 +990,7 @@ void loop() {
   if (g_otaRunning && affa::expired(now, g_otaSince + kOtaAbandonMs)) {
     g_otaRunning = false;
     g_otaSince   = 0;
-    if (g_canUp) g_link.setTxEnabled(true);
+    if (g_canUp) g_link.setTxGate(true);
     g_autoRun = true;
     restart("ota started but never completed");
     logmsg("ota abandoned after %lu s - TX gate reopened",

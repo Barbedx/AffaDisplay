@@ -34,8 +34,8 @@
 #include <WiFi.h>
 
 #include "DisplayDocument.h"
-#include "../17_mediascreen/media_render.h"
-#include "../16_navlab/nav_images.h"
+#include "../shared/media_render.h"
+#include "../shared/nav_images.h"
 
 #if !AFFA_PANEL_CARMINAT
 #  error "18_aiscreen needs the Carminat panel: build with -D AFFA_PANEL_CARMINAT=1"

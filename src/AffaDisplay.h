@@ -52,9 +52,6 @@
 #endif
 
 #include "link/LoopbackLink.h"
-#if AFFA_ENABLE_ESP32CAN_LINK
-#  include "link/Esp32CanLink.h"
-#endif
 // The same seam over collin80's esp32_can instead of raw TWAI, for applications that
 // already own that stack. Off unless the build asks: it needs an external library.
 #if AFFA_ENABLE_CANCOMMON_LINK

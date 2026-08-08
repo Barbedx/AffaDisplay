@@ -148,20 +148,20 @@
 #  define AFFA_LOG_LEVEL 3
 #endif
 
-// Esp32CanLink.{h,cpp}, using the ESP32 Arduino core's built-in ESP-IDF TWAI driver.
-// No ESP32_CAN/can_common dependency is required. Defaults to ARDUINO because the header
-// includes <driver/gpio.h> for gpio_num_t, which does not exist on the host — unconditional
-// 1 would break `pio test -e native` on an include.
-#ifndef AFFA_ENABLE_ESP32CAN_LINK
-#  if defined(ARDUINO)
-#    define AFFA_ENABLE_ESP32CAN_LINK 1
-#  else
-#    define AFFA_ENABLE_ESP32CAN_LINK 0
-#  endif
-#endif
+// Esp32CanLink WAS HERE AND IS GONE, 2.0. It was the raw-TWAI seam, and nothing built
+// against it: every shipped example constructs CanCommonLink, which is the stack proven end
+// to end on the bench and the one most existing Renault/ESP32 code already uses. Two
+// implementations of one interface, one of them untested by anything, is a place for the
+// two to disagree.
+//
+// A build that wants raw TWAI writes an ICanLink of its own -- the interface is four
+// methods and LoopbackLink is a worked example in ninety lines.
 
-// CanCommonLink.h, using collin80 esp32_can / can_common instead of raw TWAI. OFF by
-// default: it pulls in an external library, so only a build that asks for it should pay.
+// CanCommonLink.h, over collin80 esp32_can / can_common -- THE ESP32 LINK since 2.0, when
+// the raw-TWAI alternative was deleted for having no consumers.
+//
+// Still OFF by default, and that is not an oversight: it pulls in an external library, so a
+// host build or a port must not be made to pay for it. Every ESP32 example asks for it.
 #ifndef AFFA_ENABLE_CANCOMMON_LINK
 #  define AFFA_ENABLE_CANCOMMON_LINK 0
 #endif
