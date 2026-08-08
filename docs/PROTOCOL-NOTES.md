@@ -1474,3 +1474,52 @@ number**, so whatever a stopped clock reads names the encoding that won.
 
 Unidentified. Listed so that a future capture has something to match against, and so nobody
 assumes a quiet AFFA bus is an idle one.
+
+---
+
+## 10. How this project gets things wrong
+
+Worth reading before writing code here, and the reason it lives in a numbered section of a
+permanent document rather than in a handoff dated to one afternoon: **it is the only part of
+those handoffs that was about the project rather than about a day.**
+
+**Every protocol bug of the 2026-08-04/05 session was the same shape: a special case standing
+in for a general rule.**
+
+| what was written | what the captures actually say |
+|---|---|
+| `61 11 01` is discovery-only | any complete `61 11 xx` is the same request |
+| tear down only on `61 11 01` | any `61 11` while registered voids the session |
+| registration happens on the first render | registration is part of the opening |
+| the hello answers the first request | our `BA` first; the *next* request draws it |
+
+Four times, the same error: encoding the case in front of me instead of the law the data
+states. The captures were unambiguous each time.
+
+**A fifth was found in a TEST, on 2026-08-04, which is worse.**
+`test_carminat_ignores_unknown_full_auth_until_00` asserted that `61 11 5A` produced nothing
+at all — no announce, no burst, no session — until a `61 11 00` arrived. No capture contains
+`5A`, or says byte 2 is read at all. The special case had been promoted from code into a
+regression test, where it looked like a measurement and would have outlived the code that
+made it true. It is now `test_any_complete_61_11_xx_is_the_same_request`.
+
+The lesson generalises past that bug: **a test that pins a flag's VALUE is weaker than one
+that pins the wire.** Four assertions of the form `TEST_ASSERT_FALSE(kSync.someFlag)` went
+with the flags they named, and every one of them would have gone on passing while the FSM did
+something else entirely.
+
+**And the counters lie by omission.** `rx 0` with zero errors fits *three* different states —
+a silent bus, a bus we cannot decode, and a controller that never started. Telling them apart
+needs `msgs_to_tx`; without it a dead ESP32-C3 receive path looked exactly like a sleeping
+display for hours, and an oscilloscope was right where the firmware was wrong. **Expose queue
+depths on any diagnostic surface.**
+
+**A sixth, 2026-08-08, and it is the same shape one level up.** `UpdateListMenuDisplay` existed
+because two captured `0x121` headers differed, and "two headers" was read as "two panels". Byte
+`[2]` is a command *flavour* — `0x76`, `0x7E` and `0x7F` all appear there, and independent
+projects have driven both `0x76` and `0x7F` into the same family of display. The special case
+in front of us had been promoted into a class, a build gate and a golden vector. §9.2 of
+`docs/WIRE-SPEC.md` has the evidence.
+
+Read `docs/BENCH-VERIFIED.md` for what has actually been seen on glass, as opposed to what the
+code believes.

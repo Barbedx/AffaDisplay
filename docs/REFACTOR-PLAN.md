@@ -271,7 +271,7 @@ Step 4 rewrites `handleSyncFrame`, `pumpSync`, `pumpHello`, `pumpUnauthControl`,
 only. Stacking it on top of 2 and 3 before any bench check means that if the next soak is
 red, three unvalidated changes are in the frame at once. **A green suite has already let a
 broken handshake through twice this session**; that sentence is in this plan and in
-HANDOFF.md, and it is the reason to spend one bench cycle here.
+docs/PROTOCOL-NOTES.md §10, and it is the reason to spend one bench cycle here.
 
 Owner's call. If the answer is "just do 4 and soak once", nothing in step 4 depends on the
 soak having happened — the phase tests are the safety net either way.

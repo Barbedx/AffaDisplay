@@ -638,7 +638,7 @@ void test_any_complete_61_11_xx_is_the_same_request(void) {
   // It was `test_carminat_ignores_unknown_full_auth_until_00`, and it asserted that
   // `61 11 5A` produced NOTHING AT ALL: no BA, no burst, no session, until a `61 11 00`
   // arrived. That was the shape of defect this project keeps repeating — a special case
-  // standing in for a general rule (HANDOFF.md, "How this project gets things wrong") — and
+  // standing in for a general rule (docs/PROTOCOL-NOTES.md §10) — and
   // it was pinned as if it were a measurement.
   //
   // The measurement says otherwise. [CAP] "aknowledge offed display cONNECT OT POWER.csv":

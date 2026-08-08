@@ -35,7 +35,7 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
     // dimmer copy for every other spelling gated on `helloOnNonAuthRequest` and
     // `oneShotResyncOnStart`, with `helloAfterBootstrapRequest` as the trapdoor between
     // them. Two of this session's four protocol bugs lived in that seam and both were the
-    // same shape — a special case standing in for a general rule (see HANDOFF.md, "How this
+    // same shape — a special case standing in for a general rule (see docs/PROTOCOL-NOTES.md §10, "How this
     // project gets things wrong"). The real gate is our own `BA`, never the byte, and it is
     // `helloRequiresAnnounce` below.
     if (_profile.requireAuthRequest) {
