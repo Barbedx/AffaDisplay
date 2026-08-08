@@ -1,7 +1,7 @@
 // UpdateList (AFFA2) family constants: identifiers, filler, sync profile, and every
 // literal byte of the three payloads this family builds.
 //
-// Every value carries its witness, in the notation of docs/WIRE-SPEC.md:
+// Every value carries its witness, in the notation of docs/WIRE.md:
 //   [CAP]  seen verbatim in MeganeCAN/logs/*.log
 //   [REF]  notes/archive_mhroczny/affa3.{c,h}
 //   [CODE] present in the extracted source only
@@ -19,7 +19,7 @@ namespace affa {
 namespace updatelist {
 
 // ---------------------------------------------------------------------------
-// Identifiers  [CAP] docs/WIRE-SPEC.md §2.1, third-party corroboration W10 §8.6
+// Identifiers  [CAP] docs/WIRE.md, third-party corroboration W10 §8.6
 // ---------------------------------------------------------------------------
 inline constexpr uint16_t kIdSync        = 0x3DF;  // we transmit the handshake here
 inline constexpr uint16_t kIdSyncReply   = 0x3CF;  // the panel answers here
@@ -30,12 +30,12 @@ inline constexpr uint16_t kIdKeyPressed  = 0x0A9;  // the panel's key channel
 // Spelled out only so a static_assert, not a comment, pins the arithmetic: 0x0A9 | 0x400
 // is 0x4A9 and NOT 0x5A9, because bit 8 is already clear in 0x0A9 — uniquely in either
 // family's table. Nothing reads this; sendGenericAck() ORs the flag itself.
-// [CAP] docs/WIRE-SPEC.md §2.2
+// [CAP] docs/WIRE.md
 inline constexpr uint16_t kAckIdKeyPressed = kIdKeyPressed | kReplyFlag;
 static_assert(kAckIdKeyPressed == 0x4A9, "0x0A9 | 0x400 is 0x4A9, not 0x5A9");
 
 // ---------------------------------------------------------------------------
-// Sync profile  [CAP] docs/WIRE-SPEC.md §5
+// Sync profile  [CAP] docs/WIRE.md
 // ---------------------------------------------------------------------------
 // Pads every frame WE build. Per-node and meaningless on receive: our bench panel pads
 // 0xA3, one OEM cluster 0x84, the OEM radio 0xFF. Never match on a received filler.
@@ -55,7 +55,7 @@ inline constexpr uint8_t kHello[1][8] = {
 };
 
 // THE SAME MACHINE AS CARMINAT, WITH ONE DIFFERENCE. Owner's decision, 2026-08-04, recorded
-// in docs/REFACTOR-PLAN.md: the two originals were nearly the same code — affa3.c is the
+// in docs/API.md §7: the two originals were nearly the same code — affa3.c is the
 // ancestor of both — the Carminat side has been reworked against OEM captures and proven on
 // glass for 96 minutes, and the UpdateList reference *worked* rather than being *right*. A
 // driver whose only heartbeat was a pong for most of its life, that registers lazily and
@@ -113,7 +113,7 @@ inline constexpr uint16_t kFuncIds[]  = {kIdSetText, kIdDisplayCtrl};
 inline constexpr uint8_t  kFuncCount  = 2;
 
 // ---------------------------------------------------------------------------
-// setPower / display control — 0x1B1  [CAP] docs/WIRE-SPEC.md §9.3
+// setPower / display control — 0x1B1  [CAP] docs/WIRE.md
 // ---------------------------------------------------------------------------
 //   04 52 <state> FF FF   + filler to 8
 // The 0x04 is a single-frame PCI declaring FOUR content bytes, and here it is actually
@@ -128,7 +128,7 @@ inline constexpr uint8_t kPowerTail   = 0xFF;  // bytes 3..4, fixed
 inline constexpr uint8_t kPowerLen    = 5;
 
 // ---------------------------------------------------------------------------
-// setText — 0x121, both encodings  [CAP] docs/WIRE-SPEC.md §9.1, §9.2
+// setText — 0x121, both encodings  [CAP] docs/WIRE.md, §9.2
 // ---------------------------------------------------------------------------
 inline constexpr uint8_t kCmdSetText   = 0x10;  // ISO-TP first frame / "set text"
 inline constexpr uint8_t kTextSep      = 0x10;  // separator between the two text fields
@@ -170,7 +170,7 @@ inline constexpr uint8_t kChanMaxDigit = 9;
 // icons become a real argument, they come back with the CAPTURED bytes, and a bench.
 
 // ---------------------------------------------------------------------------
-// Inbound radio text — 0x121  [CAP] docs/WIRE-SPEC.md §9.6
+// Inbound radio text — 0x121  [CAP] docs/WIRE.md
 // ---------------------------------------------------------------------------
 // When the RADIO transmits the segment encoding on 0x121, data[5..7] are the first three
 // cells of its "old text" field. `AUX` there is the whole of the extracted heuristic.

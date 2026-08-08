@@ -10,7 +10,7 @@
 // CarminatVirtualPanel: a panel twin shipped as library surface, replaced by thirty lines of
 // decoder in the suite that needed it.
 //
-// THE POINT IS THE DISAGREEMENT. This is written from docs/WIRE-SPEC.md, not from the
+// THE POINT IS THE DISAGREEMENT. This is written from docs/WIRE.md, not from the
 // builders, and it shares no code with them. A test that asserted the builder's output using
 // the builder's own offsets would pass with both of them wrong in the same direction; this
 // one has to be wrong in the SAME way, independently, which is the property worth the
@@ -29,7 +29,7 @@ namespace affadec {
 // ISO-TP reassembly
 // ---------------------------------------------------------------------------
 // The PCI byte is KEPT as payload byte 0, because every offset below is measured from it —
-// docs/WIRE-SPEC.md counts that way and so does the OEM corpus.
+// docs/WIRE.md counts that way and so does the OEM corpus.
 class Reassembler {
  public:
   // True when the frame was consumed as an ISO-TP data frame.
@@ -102,7 +102,7 @@ inline uint8_t fragment(uint16_t id, const uint8_t* payload, uint8_t len, uint8_
 }
 
 // ---------------------------------------------------------------------------
-// The two-row menu screen — docs/WIRE-SPEC.md §8.5
+// The two-row menu screen — docs/WIRE.md
 // ---------------------------------------------------------------------------
 // Offsets are from payload byte 0, which is the PCI. Transcribed from the spec, not from
 // CarminatDisplay's builder.

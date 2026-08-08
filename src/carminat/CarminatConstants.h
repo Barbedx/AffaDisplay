@@ -6,7 +6,7 @@
 //   [OEM] seen from a node that is not ours (the factory head unit)
 //   [REF] notes/archive_mhroczny/affa3.{c,h}
 //   [DERIVED] hand-executed from the builder, no capture
-// The arithmetic and the quoted log lines are in docs/WIRE-SPEC.md §8; where this header
+// The arithmetic and the quoted log lines are in docs/WIRE.md; where this header
 // and that document disagree, docs/API.md is the arbiter.
 //
 // NOTHING panel-agnostic belongs here — kReplyFlag, kAckDone, kRegisterByte and the
@@ -100,7 +100,7 @@ enum class CarminatHelloProfile : uint8_t {
 // B9 is a free-running 500.08 ms timer (sigma <= 0.5 ms) that never flinches as the display's
 // 504/512 ms `69` drifts past it through a full phase cycle — including one 0.023 ms
 // near-collision. It is categorically not a reply. With replyToPing on we emitted the paced
-// B9 AND a pong ~4 ms later, twice the OEM rate. docs/PROTOCOL.md §3.
+// B9 AND a pong ~4 ms later, twice the OEM rate. captures/
 //
 // SIX FIELDS SHORTER THAN IT WAS, and not one wire byte different. `authRequestByte2`,
 // `helloAfterBootstrapRequest`, `helloOnNonAuthRequest`, `oneShotResyncOnStart`,
@@ -169,7 +169,7 @@ inline constexpr uint8_t  kFuncCount  = 2;
 
 // Byte 0 of a multi-frame payload. The transport does NOT add it — the builder does, and
 // the transport then carries eight raw bytes in frame 0. Same numeric value as the text
-// field separator inside a 0x76 payload, different layer; see PROTOCOL-NOTES §4.4.
+// field separator inside a 0x76 payload, different layer; different from the 0x10 text separator.
 inline constexpr uint8_t kPciFirstFrame = 0x10;
 
 inline constexpr uint8_t kCmdText    = 0x77;  // setText, windowed        [CAP]

@@ -22,10 +22,10 @@ wins, always — see the box above.
 
 Companion documents:
 
-* `docs/WIRE-SPEC.md` — byte-level frame layouts and where each byte was observed.
-* `docs/PROTOCOL-NOTES.md` — what is known, how it is known, and what is still a guess.
+* `docs/WIRE.md` — byte-level frame layouts and where each byte was observed.
+* `docs/NOTES.md` — what is known, how it is known, and what is still a guess.
 * `docs/ESP32CAN-CONTRACT.md` — driver ownership, RX/TX and recovery.
-* `docs/REFACTOR-2.0.md` — why the surface has the shape it now has.
+* `docs/API.md §7` — why the surface has the shape it now has.
 
 ---
 
@@ -112,7 +112,7 @@ laptop, and it is worth more than any single feature in here.
 | --- | --- |
 | `carminat/` | `0x3AF` sync, `0x151`/`0x1F1` data, `0x1C1` keys. The largest family: text, time, menus, popups, info screens, lists, the 48×48 nav bitmap. Gated on `AFFA_PANEL_CARMINAT`. |
 | `updatelist/` | AFFA2: `0x3DF` sync, `0x121`/`0x1B1` data, `0x0A9` keys. **One `setText` encoding for every glass in the family** — `UpdateListDisplay.h` records why the second one was a misreading of a command flavour. Gated on `AFFA_PANEL_UPDATELIST`. |
-| `cluster/` | The instrument cluster: `0x3AF` again, but `59`/`5A` where Carminat has `61`/`62`. **Not verified on hardware, and its opening cannot complete** — `docs/PROTOCOL-NOTES.md` §9.2a. Gated on `AFFA_PANEL_CLUSTER`. |
+| `cluster/` | The instrument cluster: `0x3AF` again, but `59`/`5A` where Carminat has `61`/`62`. **Not verified on hardware, and its opening cannot complete** — `docs/NOTES.md` §9.2a. Gated on `AFFA_PANEL_CLUSTER`. |
 
 ### The rest
 
@@ -304,7 +304,7 @@ if (g_clockPending && display.setTime("1000") == affa::Result::Ok) g_clockPendin
 With the panel disconnected, that costs **one failed render per loop iteration**: measured
 in the 17_mediascreen soak, 4 800 failures and 170 log lines per second in 90
 seconds, which then pushed the one line that explained it — `peer lost` — out of the log
-ring. It is failure mode #2 from `docs/CR-0.3.0-OWNED-TASK.md` §2, written a second time by
+ring. It is failure mode #2 from `docs/NOTES.md §3` §2, written a second time by
 someone who had just read it.
 
 **§3.1 is the reason that example no longer needs the loop at all** — the library holds and
@@ -507,7 +507,7 @@ callbacks second* (§4.3).
 next frame of that job is never built; the job completes `Aborted` and the continuation
 counter resets (see `admit()` in `AffaTx.cpp`). The panel is then holding a partial transfer. **Whether it
 recovers cleanly on the next frame 0 has not been verified on hardware and must not be
-assumed** — verify with `examples/90_bench_ota` before using `abortAll()` in an
+assumed** — verify with `examples/17_mediascreen` before using `abortAll()` in an
 application. Routine preemption does not need it.
 
 **`Priority::Urgent`** inserts the new job after the last started job and after any
@@ -620,7 +620,7 @@ The library's own terms are exact and computable:
 | In-flight contribution to L2 | one ACK round-trip, or `AFFA_ACK_TIMEOUT_MS` if the panel is gone | `AffaTx.cpp` |
 
 The one term the library cannot compute is the panel's ACK turnaround, and it dominates
-L2. It is measured, not estimated: `examples/90_bench_ota` timestamps each transmitted
+L2. It is measured, not estimated: `examples/17_mediascreen` timestamps each transmitted
 frame and its ACK against `IClock`, and prints the min/mean/max over a 14-frame
 `showMenu`. **The measured figure for the Carminat panel on the 2-node 500 kbit/s bus
 must be recorded here and in the README before v0.1.0 is tagged — owner: the core
@@ -836,7 +836,7 @@ callback. Deferring them by one task wakeup would put the reaction behind whatev
 counter enqueued in the meantime and reintroduce exactly the backlog §3b exists to
 prevent. Defer the slow work, never the preemption.
 
-`examples/03_carminat_menu` ships this shape. In owned-task mode the split still applies
+`examples/17_mediascreen` ships this shape. In owned-task mode the split still applies
 and for the same reason — the callback runs on the library's task now, so the expensive
 half belongs off it more than ever — but the queue in the second half is yours to keep or
 delete: the *preemption* half is what must stay in the callback.
@@ -1009,7 +1009,7 @@ moment, lock-free, and it can never block an HTTP handler.
 
 `core/` and `util/` are untouched and still compile on the host
 against nothing but C++17. `src/rtos/` is the only FreeRTOS-dependent directory in the
-library and the only one a port omits (`docs/PORTING.md`). `AFFA_ENABLE_TASK=1` on a
+library and the only one a port omits . `AFFA_ENABLE_TASK=1` on a
 non-FreeRTOS target is still an `#error`.
 
 ---
@@ -1091,7 +1091,7 @@ returns `Result::NotSupported`.
 >
 > Inbound text is still delivered: `UpdateListBase` decodes the radio's `0x121` and reports
 > it through the protected virtual `onRadioText(bool isAux)`. That hook is real, exercised,
-> and stays. `docs/PROTOCOL-NOTES.md` §8 has the AUX pattern table.
+> and stays. `docs/NOTES.md` §8 has the AUX pattern table.
 
 > **The one deliberate behaviour change versus the code that was extracted.** The legacy
 > `IDisplay` gave `showInfoPopup`, `showConfirmBox`, `showFullscreenText`, `showPopupText`
@@ -1146,8 +1146,8 @@ calls, and they are unconditional: `showMenu`, `showMenuN`, `highlightItem`,
 calls `setText` with a different window every 400 ms — which is exactly what `Marquee`
 did, except on the library's task, where it did not belong.
 
-`AFFA_ENABLE_MENU` and `AFFA_ENABLE_MARQUEE` went with them. `docs/MENU-WIDGET.md`
-described the deleted design and is gone too.
+`AFFA_ENABLE_MENU` and `AFFA_ENABLE_MARQUEE` went with them, and so did the 384-line
+document that described the design.
 
 ### 7.2 `proto/` — `IsoTp::Reassembler`, `ScreenModel`, `ScreenDecode`
 
@@ -1213,7 +1213,7 @@ flavour**, not a different panel.
 
 Byte `[2]` of the `0x121` text command has been seen as `0x76`, `0x7E` and `0x7F`, and both
 the `0x76` and `0x7F` forms have been driven into UpdateList displays by independent
-projects. One radio, one frame, every glass. `docs/WIRE-SPEC.md` §9.2 keeps the evidence,
+projects. One radio, one frame, every glass. `docs/WIRE.md` §9.2 keeps the evidence,
 including the two bytes where our reconstructed copy of the `0x7F` form contradicted the
 only real capture of it.
 

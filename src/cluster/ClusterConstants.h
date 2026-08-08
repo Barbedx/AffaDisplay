@@ -1,7 +1,7 @@
 // The dashboard-cluster variant — A THIRD SYNC PROFILE, AND NOBODY HAS RUN IT.
 //
 // EVERYTHING IN THIS FILE IS TRANSCRIBED FROM ONE CAPTURE of an OEM radio talking to an
-// instrument cluster, supplied 2026-07-28 and analysed in docs/PROTOCOL-NOTES.md §9. Not one
+// instrument cluster, supplied 2026-07-28 and analysed in docs/NOTES.md §1.1 Not one
 // byte has been put on a bus by this library. It is here because it costs a header to try
 // and because it is the evidence that SyncProfile was cut in the right place: a third family
 // turned out to need new DATA and no new code.

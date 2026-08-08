@@ -23,7 +23,7 @@ struct Frame {
   // the key decoder — all three. Missing the ACK matcher makes a loopback transfer
   // complete after one frame with a bogus success; missing the auto-ACK makes the
   // library acknowledge itself into a storm. Both have been observed on real hardware
-  // (the 0x7AF incident, docs/WIRE-SPEC.md §6.1).
+  // (the 0x7AF incident, docs/WIRE.md).
   bool     fromSelf = false;
 };
 
@@ -66,7 +66,7 @@ inline const char* edgeName(KeyEdge e) { return e == KeyEdge::Hold ? "hold" : "c
 // Where an emulated key press is to have its effect. A press on the real system is
 // transmitted by the PANEL and received by us, so "emulate a key" legitimately means two
 // things at once, and an application wants each of them separately at different times.
-// One function with a source, not two lookalike functions — see docs/API.md §7b.6.
+// One function with a source, not two lookalike functions — see docs/API.md §7.4.
 enum class KeySource : uint8_t {
   Local = 1,   // as if a key arrived: drive our menu + fire the Key event. Nothing goes
                // on the bus. THE DEFAULT, because in the radio role that is what a key
@@ -149,7 +149,7 @@ constexpr bool hasFlag(SyncState v, SyncState f) noexcept {
 // AwaitPeerChannel is the one nobody expects and it is measured 4/4: the DISPLAY registers
 // its own channel (`1C1 70`, answered `5C1 74`) before the radio registers its functions.
 // A bench that stalls here — "waiting for the display's 1C1" — is a panel that never got
-// our announce. See docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md.
+// our announce. See docs/WIRE.md and captures/.
 enum class Phase : uint8_t {
   Silent,            // nothing heard from the panel yet; announcing on a slow timer
   Announced,         // our `BA` is on the wire; awaiting the panel's NEXT request
@@ -370,7 +370,7 @@ using FrameTap = void (*)(const Frame& f, Direction d, void* ctx);
 //
 // Until 2.0 the only evidence was `Status::pollLateMaxUs`: "an iteration took 340 ms". That
 // says something is wrong and nothing about where. The three incidents in
-// docs/CR-0.3.0-OWNED-TASK.md §2 all presented as "the panel is frozen" with every error
+// docs/NOTES.md §3 all presented as "the panel is frozen" with every error
 // counter at zero, and the search each time was the whole application. This is the missing
 // word in that sentence.
 enum class CbKind : uint8_t {

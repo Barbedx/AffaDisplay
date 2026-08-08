@@ -2,7 +2,7 @@
 //
 // It is tested here on its own, before anything is wired to it, because a concurrency bug
 // found through the protocol is a bug found as "the panel occasionally draws garbage" — the
-// exact symptom docs/CR-0.3.0-OWNED-TASK.md §2 describes and the one that costs days.
+// exact symptom docs/NOTES.md §3 describes and the one that costs days.
 //
 // WHAT A HOST TEST CAN AND CANNOT PROVE. It cannot run two real tasks, so it cannot catch a
 // memory-ordering mistake by racing. What it CAN do is drive the ring through every state a

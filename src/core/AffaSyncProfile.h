@@ -31,7 +31,7 @@ namespace affa {
 //                          -> no. `BA` alone asks the question; `B9` only says "still here".
 //                             AffaDisplayBase::pumpUnauthControl().
 //
-// See docs/REFACTOR-PLAN.md for the remaining ones and the order they go in.
+// See docs/API.md §7 for the remaining ones and the order they go in.
 struct SyncProfile {
   uint16_t syncId;        // Carminat 0x3AF   UpdateList 0x3DF   (we transmit here)
   uint16_t syncReplyId;   // both 0x3CF                          (panel transmits here)
@@ -72,7 +72,7 @@ struct SyncProfile {
                           // pongs every `0x69` and for whom that pong was the ONLY
                           // heartbeat until March 2026. If an UpdateList panel ever stalls
                           // in the handshake, this is the first knob to turn.
-                          // docs/REFACTOR-PLAN.md, "The one finding to act on first".
+                          // docs/API.md §7, "The one finding to act on first".
   // A Carminat panel is the session initiator.  While this is true the library is a
   // completely silent CAN participant after begin(): no heartbeat and, importantly, no
   // `BA` probe leave until a valid message from the panel arrives on syncReplyId.  The
@@ -95,7 +95,7 @@ struct SyncProfile {
   //
   // It is also what makes a bare `69` arm the one-shot announce, and what selects the
   // measured opening in handleSyncFrame() over the older UpdateList startup contract.
-  // Step 8 of docs/REFACTOR-PLAN.md brings UpdateList onto the same rules and this
+  // Step 8 of docs/API.md §7 brings UpdateList onto the same rules and this
   // becomes universal; until then it is the family switch.
   bool requireAuthRequest = false;
 
@@ -128,7 +128,7 @@ struct SyncProfile {
   // third B0, with no application involvement at all — so a Carminat build that never
   // renders must still register, or the panel sits in a half-open session for ever.
   // UpdateList's reference driver registers lazily, on its first render, so this stays
-  // false for that family until step 8 of docs/REFACTOR-PLAN.md moves it over.
+  // false for that family until step 8 of docs/API.md §7 moves it over.
   bool registerAfterHello = false;
 
   // THE RADIO ANNOUNCES ITSELF. In "aknowledge on on display.csv" the first frame on the bus

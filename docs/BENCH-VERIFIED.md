@@ -41,7 +41,7 @@ as proof of pixels — what is new here is the *transfer*, which is not an ACK q
 ## Session of 2026-08-04, evening — AFFA2 / UpdateList, FIRST EVER CONTACT
 
 **The UpdateList family had never put a frame on a bus.** Every byte it emits was pinned by
-golden vectors extracted from a reference driver, and step 8 of `docs/REFACTOR-PLAN.md`
+golden vectors extracted from a reference driver, and step 8 of `docs/API.md §7`
 moved its *sequencing* onto the measured Carminat rules on the strength of an argument —
 that the two originals were nearly the same code, and that the reference *worked* rather
 than being *right*. This is that argument meeting glass.
@@ -82,12 +82,12 @@ panel that assumption would have cost the whole session.
 |---|---|
 | That the burst answers the **first** request (`helloRequiresAnnounce = false`) | ⬜ Our announce went out at 2796 ms, *before* the request at 2899 ms, because the panel's `69` armed it. "Answers the first request" and "answers a request that follows our announce" both fit this log. It did not matter here; it is not settled either |
 | The `61 11`-while-registered teardown | ⬜ never triggered — the panel did not deauthorize us in 63 s |
-| The `7F` text-plus-icons flavour | ⬜ **never transmitted from here, and no longer built.** Only the `76` form was ever rendered. It was removed in 2.0 once a real capture contradicted our reconstructed bytes in two places — docs/WIRE-SPEC.md §9.2 |
+| The `7F` text-plus-icons flavour | ⬜ **never transmitted from here, and no longer built.** Only the `76` form was ever rendered. It was removed in 2.0 once a real capture contradicted our reconstructed bytes in two places — docs/WIRE.md |
 | `setTime` | ⬜ this family has no clock command at all — see below |
 
 ### ❌ 23 candidate clock frames, 162 probes, NOTHING moved the clock
 
-Tested 2026-08-05 with `examples/12_ulclock`, on the same universal panel, in an UpdateList
+Tested 2026-08-05 on the bench rig, on the same universal panel, in an UpdateList
 session that was registered, lit and rendering. **Seven complete passes over 23 candidates —
 162 frames — and the clock did not move once.** Every one is therefore ruled out:
 
@@ -190,8 +190,7 @@ none. But this is a **universal panel**, and there are two candidates, neither t
 
 1. **`3EF A6 <hours> <minutes>`** — three bytes, DLC 3, **no PCI and no SF_DL**, so it does
    not go through the transport at all and must be sent with a raw `ICanLink::send()`.
-   Transcribed from an OEM radio↔cluster capture (`ClusterConstants.h`, `PROTOCOL-NOTES.md`
-   §9) and never put on a bus by this library.
+   Transcribed from an OEM radio↔cluster capture (`ClusterConstants.h`, `docs/NOTES.md   §9) and never put on a bus by this library.
 2. **Carminat's `151 05 56 "HHMM"`** — which **this exact panel has already accepted**, on
    2026-07-28, read off the glass as `10:00`. It would mean adding `0x151` to the UpdateList
    function table so the `70` probe registers it, then sending the Carminat payload. Ugly,
@@ -209,7 +208,7 @@ not text, so it is taken and discarded.
 
 ## Session of 2026-08-04 — the captured opening, on a real Carminat
 
-The first run against the **OEM-capture-derived** handshake (`docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`),
+The first run against the **OEM-capture-derived** handshake (`captures/`),
 06_authclock 0.6.0, ESP32-C3 with CTX=GPIO4 / CRX=GPIO3.
 
 | Capability | | Evidence |
@@ -312,13 +311,13 @@ a statement about the wire.
 ### The clock, and why it is still open
 
 UpdateList has **no `setTime` at all** — `supports(Feature::Time)` is false. The only
-candidate found is the OEM cluster's `3EF A6 <hh> <mm>` (PROTOCOL-NOTES §9.4), a raw 3-byte
+candidate found is the OEM cluster's `3EF A6 <hh> <mm>` (the OEM cluster capture), a raw 3-byte
 frame with no PCI, and **it does not work on this panel**.
 
 **The oracle for any future attempt:** these panels *blink* the clock while it is unset and
 count up from power-on; a clock that has been set stops blinking. So nobody needs to watch
 the moment a command lands — a steady clock means something worked.
-`examples/15_updatelist_modes` exposes `/api/sweep?n=1..8`, which sets **hour == candidate
+The sweep exposed `/api/sweep?n=1..8`, which set **hour == candidate
 number** so a stopped clock names the encoding that won. Candidate 1 is the `3EF` frame and
 it failed; candidates 2–8 (BCD, swapped operands, Carminat's `05 56` shape on `0x121` and
 `0x1B1`, DLC 8, `0x3DF`, command `0x26`) are **untried**.
@@ -329,12 +328,10 @@ it failed; candidates 2–8 (BCD, swapped operands, Carminat's `05 56` shape on 
 |---|---|---|
 | Everything | ⬜ | `src/cluster/` is transcribed from ONE capture and has **never been run**. No cluster hardware was present. It renders no text because the capture contains no text frame |
 
-`examples/18_cluster_web` is the firmware to flash the day a cluster is on the bench: it
-brings the profile up, exposes the captured clock frame (`3EF A6 hh mm` — this is the family
-it was captured on, unlike the UpdateList attempt above), offers the three known text
-encodings on `0x121` as labelled `[GUESS]` probes, and puts the frame ring on `/api/frames`
-so the answer comes from the wire rather than from a theory. Its siblings do the same two
-operations on the families that *have* been seen: `16_carminat_web`, `17_updatelist_web`.
+The firmware to flash the day a cluster reaches a bench does not exist yet. What it has to
+settle is in `docs/NOTES.md` §1.1: whether the `69` triggers our hello, or whether our own
+request is enough. One sample cannot answer it, and this project has paid for guessing a
+trigger before.
 
 ---
 

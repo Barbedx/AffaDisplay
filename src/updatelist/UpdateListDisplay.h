@@ -33,7 +33,7 @@
 //
 // Eight header bytes of unproven, uncapturable, capability-free risk are not a feature.
 // If icons are ever exposed, the flavour comes back as an ICON argument with the capture's
-// bytes, not as a panel type. docs/WIRE-SPEC.md §9.2 keeps the record.
+// bytes, not as a panel type. docs/WIRE.md keeps the record.
 #pragma once
 #include "../AffaConfig.h"
 #if AFFA_PANEL_UPDATELIST
@@ -71,7 +71,7 @@ class UpdateListDisplay : public UpdateListBase {
 
  protected:
   // Copy `cells` bytes of `src` into `dst`, padding the tail with NUL — not space. Every
-  // capture and every golden vector in docs/WIRE-SPEC.md shows 0x00 there; do not "fix"
+  // capture and every golden vector in docs/WIRE.md shows 0x00 there; do not "fix"
   // this to spaces.
   static void copyCells(const char* src, uint8_t* dst, uint8_t cells);
 };

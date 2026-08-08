@@ -638,7 +638,7 @@ void test_any_complete_61_11_xx_is_the_same_request(void) {
   // It was `test_carminat_ignores_unknown_full_auth_until_00`, and it asserted that
   // `61 11 5A` produced NOTHING AT ALL: no BA, no burst, no session, until a `61 11 00`
   // arrived. That was the shape of defect this project keeps repeating — a special case
-  // standing in for a general rule (docs/PROTOCOL-NOTES.md §10) — and
+  // standing in for a general rule (docs/NOTES.md §2) — and
   // it was pinned as if it were a measurement.
   //
   // The measurement says otherwise. [CAP] "aknowledge offed display cONNECT OT POWER.csv":
@@ -690,7 +690,7 @@ void assertPhase(CarRig& r, Phase want, const char* what) {
 }
 
 void test_phase_walks_the_measured_opening_in_order(void) {
-  // THIS IS THE SAFETY NET FOR STEP 4 of docs/REFACTOR-PLAN.md. `phase()` is derived from
+  // THIS IS THE SAFETY NET FOR STEP 4 of docs/API.md §7. `phase()` is derived from
   // the nine booleans today, so it cannot currently disagree with them; what this test pins
   // is the derivation against THE WIRE — which frame moves the opening on, and in what
   // order. When the booleans are deleted and Phase becomes the stored truth, this is the

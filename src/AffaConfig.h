@@ -11,7 +11,7 @@
 // is the only mechanism that can remove a translation unit, so each optional .cpp wraps
 // its body in its gate and compiles to an empty object when off. That plus
 // -ffunction-sections -fdata-sections -Wl,--gc-sections is what makes an unused panel
-// cost zero flash. See docs/API.md §5.1.
+// cost zero flash. See docs/API.md §5.
 
 #pragma once
 
@@ -57,7 +57,7 @@
 // The dashboard cluster: a THIRD sync profile, transcribed from ONE capture and NEVER RUN
 // against hardware. It is NOT in AFFA_PANEL_DEFAULT_ALL and it is not on by any other
 // route — you have to ask for it, because everything it claims is inference from a single
-// sample (docs/PROTOCOL-NOTES.md §9). It renders no text at all: the capture contains no
+// sample (docs/NOTES.md §1.1). It renders no text at all: the capture contains no
 // text frame, so the encoding is unknown and supports(Feature::Text) is false.
 #ifndef AFFA_PANEL_CLUSTER
 #  define AFFA_PANEL_CLUSTER 0
@@ -172,7 +172,7 @@
 //
 // It defaulted to 0 through 1.x on an argument that was correct at the time: turning it on
 // changes WHICH TASK a consumer's callbacks run on, which is observable behaviour, so it
-// should be asked for rather than imposed (docs/CR-0.3.0-OWNED-TASK.md §11.1 deferred the
+// should be asked for rather than imposed (docs/NOTES.md §3 deferred the
 // decision explicitly — "revisit for 1.0"). What that produced is countable: THIRTEEN OF
 // NINETEEN shipped examples turned it off and pumped poll() from loop(), including the one
 // whose HTTP handlers then raced the queue.
@@ -215,7 +215,7 @@
 #endif
 
 // poll() plus the deepest documented callback nesting (docs/API.md §4.3). MEASURED on the
-// bench rig (C3, marquee widget, rendering KeyCb, examples/19_owned_task): 2036 bytes
+// bench rig (C3, marquee widget, rendering KeyCb, examples/17_mediascreen): 2036 bytes
 // still free, i.e. about half of this unused. Status::stackFreeBytes reports it live, so
 // shrinking this is checkable against your own callbacks rather than a guess.
 #ifndef AFFA_TASK_STACK
@@ -246,7 +246,7 @@
 
 // An iteration slower than this many periods logs once (rate-limited) and is recorded in
 // Status::pollLateMaxUs. It is how a blocking user callback becomes visible instead of
-// mysterious — the three incidents in docs/CR-0.3.0-OWNED-TASK.md §2 all presented as "the
+// mysterious — the three incidents in docs/NOTES.md §3 all presented as "the
 // panel is frozen" with every error counter at zero.
 #ifndef AFFA_TASK_LATE_FACTOR
 #  define AFFA_TASK_LATE_FACTOR 8
@@ -285,7 +285,7 @@
 // library has written the same three things — a retry with a backoff, a quiet period after
 // an interrupted transfer, and a "hold this until the panel comes back" — and got at least
 // one of them wrong, at a cost measured in thousands of failed renders (docs/API.md §3.1,
-// docs/CR-0.3.0-OWNED-TASK.md §2). It is protocol behaviour, it belongs here, and it is a
+// docs/NOTES.md §3). It is protocol behaviour, it belongs here, and it is a
 // state machine over IClock like everything else in this file.
 
 // How many times a job is re-attempted after a TRANSIENT failure — Timeout, SendFailed,
@@ -412,7 +412,7 @@
 // 119 is the two-button message box: 2 PCI + 6 header + 6+6 labels + 105 body = the OEM's
 // own `CONFIRM SCREEN NO.csv`, 117 declared, 17 frames, last CF `0x20`, ACKed by the panel.
 // Raising the ceiling to hold it costs 6 bytes per queue slot.
-// Below 96 the Carminat menu screen returns TooLong. See docs/WIRE-SPEC.md §3.3.
+// Below 96 the Carminat menu screen returns TooLong. See docs/WIRE.md
 #ifndef AFFA_MAX_PAYLOAD
 #  define AFFA_MAX_PAYLOAD 119
 #endif
@@ -429,7 +429,7 @@
 // SO THIS NUMBER IS NOT A RAM BUDGET AND MUST NOT BE READ AS ONE. It is a sanity bound on a
 // length that reaches the ISO-TP segmenter, nothing more; raising it costs zero bytes. The
 // default holds the OEM head unit's 304-byte 0x1F1 nav screen (2 PCI + 302 declared) with
-// room to spare — see docs/PROTOCOL-NOTES.md §"the 0x1F1 nav bitmap".
+// room to spare — see docs/NOTES.md §"the 0x1F1 nav bitmap".
 //
 // THE 113-BYTE CEILING ABOVE STILL GOVERNS enqueue(). Long payloads are opt-in, by calling
 // a different function, precisely so that no existing consumer pays for them.

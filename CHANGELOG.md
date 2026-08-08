@@ -85,7 +85,7 @@ lesson — *three co-varying samples are not a field.*
 
 ### Still open
 
-The uncatalogued glyph runs between the named entries. `docs/OEM-CSV-CORPUS.md` §4 and
+The uncatalogued glyph runs between the named entries. `docs/captures/some more logs from origin/` §4 and
 `docs/BENCH-VERIFIED.md`.
 
 ---
@@ -161,7 +161,7 @@ opposed to what the code believes.
   carry `0x49`, and declares 96 bytes where the OEM declares 105.** Real, and left alone: it
   is the most exercised path in the library — 09_golden has put 24 912 of these on the glass
   — and changing it on a byte diff without watching the result is the trade this project
-  keeps losing. It is a bench question, not an edit. `docs/OEM-CSV-CORPUS.md` §6.4.
+  keeps losing. It is a bench question, not an edit. `docs/captures/some more logs from origin/` §6.4.
 * **Whether the message box's buttons are DRAWN has not been looked at.** The bytes match
   the OEM's and the panel ACKed them — and this panel ACKs everything, which is how twenty
   useless clock probes once looked like twenty discoveries.

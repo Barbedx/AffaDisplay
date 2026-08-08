@@ -9,7 +9,7 @@
 //
 // AND IT HOLDS NO STATE AT ALL. Every builder below is a pure function of its arguments into
 // a stack buffer, which is what makes a render safe to call from any task with nothing to
-// check (docs/REFACTOR-2.0.md §2). It used to own the menu renderer, model and page stack as
+// check (docs/API.md §7). It used to own the menu renderer, model and page stack as
 // well — a fourth bullet, and the only members it had; those are affa::CarminatMenu now, and
 // the application owns one.
 //
@@ -50,13 +50,13 @@ class CarminatDisplay final : public AffaDisplayBase {
   // `void onFrame(FrameTap, void*)` — so without this line `display.onFrame(&tap, ctx)`
   // fails to compile through a CarminatDisplay& and only works through an
   // AffaDisplayBase&. The derived override still hides the base's same-signature member,
-  // so this changes nothing else. Found by examples/06_counter_preempt.
+  // so this changes nothing else. Found by a preemption bench, now pinned by test_latency.
   using AffaDisplayBase::onFrame;
 
   bool supports(Feature f) const override;
 
   // MEASURED AT THE GLASS, not taken from the builders. setText carries fourteen cells and
-  // the panel shows about eight; `listItemChars` is 26 because docs/WIRE-SPEC.md §8.5 pins
+  // the panel shows about eight; `listItemChars` is 26 because docs/WIRE.md pins
   // item2 at 26 usable even though the builder accepts 30. A fitter that trusted the builder
   // would produce text that is correct in every test and cut off on hardware.
   PanelGeometry panelGeometry() const override {
@@ -84,7 +84,7 @@ class CarminatDisplay final : public AffaDisplayBase {
 
   // setText WITH THE HEADER EXPOSED. The plain override above hard-codes the four bytes
   // after the command; they are documented (MeganeCAN's CarminatDisplay.cpp, cross-checked
-  // against the OEM capture in docs/PROTOCOL-NOTES.md §17) and an application that wants an
+  // against the OEM capture in docs/NOTES.md) and an application that wants an
   // icon on the main line has no way to ask for one otherwise.
   //
   //   icon     carminat::kIconsNone 0x55 / kIconsAfRds 0x45. The capture uses 0x09, which is
@@ -245,7 +245,7 @@ class CarminatDisplay final : public AffaDisplayBase {
   //
   // showMenuIcon() got named parameters because a bench sweep had already established what
   // its two bytes DO. Naming these would be inventing vocabulary for bytes nobody has
-  // measured, which is the mistake docs/PROTOCOL-NOTES.md keeps warning about. When a sweep
+  // measured, which is the mistake docs/NOTES.md keeps warning about. When a sweep
   // settles one, it earns a name and a constant, exactly as kMenuIcon* did.
   //
   // WHAT PROMPTED IT (owner, 2026-08-08): a stripe appears on the nav pane after a display
@@ -292,7 +292,7 @@ class CarminatDisplay final : public AffaDisplayBase {
 
   // NO MEMBERS. Every render above is a pure function of its arguments into a stack buffer,
   // which is what makes a call from any task safe with nothing to check — see
-  // docs/REFACTOR-2.0.md §2. The three that used to be here were the menu widget's, and it
+  // docs/API.md §7 The three that used to be here were the menu widget's, and it
   // is affa::CarminatMenu now.
 };
 

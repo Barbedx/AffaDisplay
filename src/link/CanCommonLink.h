@@ -8,7 +8,7 @@
 //
 // It is also the stack that was proven end to end on real glass on 2026-08-04: handshake,
 // registration, clock and a three-row animated screen, sustained with every error counter at
-// zero. See examples/07_cantime and examples/08_rows3.
+// zero. Measured on the bench rig, 2026-07.
 //
 // PULL, NOT PUSH. esp32_can hands frames over on its own task through a callback; ICanLink
 // is deliberately a pull port (see ICanLink's comment on the ACK deadlock). So the callback

@@ -346,7 +346,7 @@ esp_err_t state(PsychicRequest* r) {
      static_cast<unsigned long>(g_renders), static_cast<unsigned long>(g_renderFail));
   jf(",\"pane\":%lu", static_cast<unsigned long>(g_paneFrames));
   jf(",\"scene\":\"%s\"", g_scene < 0 ? "" : kScenes[g_scene].name);
-  // The library's own diagnostics — see docs/REFACTOR-2.0.md §3.6 for why the callback is
+  // The library's own diagnostics — see docs/API.md §7 for why the callback is
   // named rather than merely counted.
   jf(",\"lost\":%lu,\"foreign\":%lu,\"posted\":%u,\"postDropped\":%lu",
      static_cast<unsigned long>(st.sessionsLost), static_cast<unsigned long>(st.foreignPolls),

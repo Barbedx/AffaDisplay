@@ -1,8 +1,8 @@
-// Every Carminat frame builder against the golden vectors in docs/WIRE-SPEC.md, byte for
+// Every Carminat frame builder against the golden vectors in docs/WIRE.md, byte for
 // byte, including the ISO-TP chunking, the INCONSISTENT declared length bytes and the 0x00
 // padding.
 //
-// The vectors below are transcribed from docs/WIRE-SPEC.md "Golden vectors". Where a
+// The vectors below are transcribed from docs/WIRE.md "Golden vectors". Where a
 // vector is [CAP-VERBATIM] the comment says so — those bytes were observed on a real bus
 // and are not negotiable.
 //
@@ -25,7 +25,7 @@ using affatest::pumpUntilIdle;
 namespace {
 
 // ---------------------------------------------------------------------------
-// Golden vectors — docs/WIRE-SPEC.md
+// Golden vectors — docs/WIRE.md
 // ---------------------------------------------------------------------------
 
 // [CAP-VERBATIM] logs/device-monitor-260616-235529.log
@@ -157,7 +157,7 @@ const Frame kConfirmBoxOk[] = {
 //
 // SPACE-PADDED, which is the OEM form and a deliberate divergence from the extracted
 // builder's `char padded[8] = {' '}` (that initialises element 0 only and NUL-pads 1..7).
-// docs/WIRE-SPEC.md §8.10 and its kCarminatInfoPopupOem vector have been corrected to
+// docs/WIRE.md and its kCarminatInfoPopupOem vector have been corrected to
 // match, and record that no capture in the corpus witnesses a continuation frame of an
 // info row at all — the [CAP-VERBATIM] evidence covers first frames only, which carry
 // t0..t2 and therefore never a pad byte. Doc and suite now agree.
@@ -249,7 +249,7 @@ void test_setText_declares_0x0E_for_20_transmitted_bytes(void) {
 
 void test_setText_transliterates_before_the_wire(void) {
   // The one deliberate byte-affecting change against the extracted builder, sanctioned by
-  // WIRE-SPEC §8.1: UTF-8 that reaches the panel is garbage on the glass, so every string
+  // docs/WIRE.md: UTF-8 that reaches the panel is garbage on the glass, so every string
   // goes through affa::toAscii at the builder.
   Rig r;
   r.up();
@@ -721,7 +721,7 @@ void tearDown(void) {}
 // ---------------------------------------------------------------------------
 // showMenuN — the N-item list screen
 // ---------------------------------------------------------------------------
-// docs/OEM-CSV-CORPUS.md §4: [6] = 0x80 | itemCount and total length = 36 + 27*count, both
+// docs/captures/some more logs from origin/: [6] = 0x80 | itemCount and total length = 36 + 27*count, both
 // three-for-three across 2-, 4- and 6-item OEM menus, with the tag bytes measured at
 // 36/63/90/117/144/171.
 

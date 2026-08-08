@@ -29,7 +29,7 @@
 // That rule is not stylistic. This library shipped an enum that mapped one value onto one
 // render call (rtos::Op), and keeping it in step meant editing four places; twelve renders
 // were added and NONE were mirrored, until the whole thing was deleted in 2.0
-// (docs/REFACTOR-2.0.md §1.1). What saves DocType from the same rot is that it is SEMANTIC —
+// (docs/API.md §7). What saves DocType from the same rot is that it is SEMANTIC —
 // it says what the content IS, not which builder to call — and that the mapping below is
 // allowed to be LOSSY. A `Question` on a panel with no message box degrades to two lines and
 // a hint; it does not add a case.

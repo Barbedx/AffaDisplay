@@ -105,7 +105,7 @@ bool CarminatDisplay::onFrame(const Frame& f) {
 // is affa::CarminatMenu now — the application calls CarminatMenu::tick() from its own task,
 // which is strictly better: a page that does slow work can no longer stall the protocol.
 
-// setText — 0x151, docs/WIRE-SPEC.md §8.1
+// setText — 0x151, docs/WIRE.md
 //
 // DO NOT "FIX" THE DECLARED LENGTH. 0x0E says 14 content bytes; we transmit 20. The panel
 // consumes only the declared 14 — header plus the first EIGHT text bytes, hence "max 7
@@ -158,7 +158,7 @@ Submitted CarminatDisplay::setTime(const char* hhmm) {
   return submit(kIdSetText, d, sizeof(d), RenderSlot::Clock);
 }
 
-// setPower — 0x151, WIRE-SPEC §8.3.  03 52 <09|00> 00 00 00 00 00
+// setPower — 0x151, docs/WIRE.md.  03 52 <09|00> 00 00 00 00 00
 //
 // DO NOT UNIFY THIS WITH UpdateList: Carminat's captured control byte is 0x03, whereas
 // UpdateList uses 0x04 for its distinct control payload.
@@ -172,7 +172,7 @@ Submitted CarminatDisplay::setPower(bool on) {
                 /*coalesce=*/true, Priority::Urgent, /*reassertAfterSession=*/true);
 }
 
-// highlightItem — 0x151, WIRE-SPEC §8.4.  07 29 01 <7E|7F> 80 00 00 00
+// highlightItem — 0x151, docs/WIRE.md.  07 29 01 <7E|7F> 80 00 00 00
 //
 // Its OWN RenderSlot, not Menu's: a highlight must not replace a pending full redraw, and
 // a full redraw must not replace a pending highlight.
@@ -184,7 +184,7 @@ Submitted CarminatDisplay::highlightItem(uint8_t row) {
   return submit(kIdSetText, d, sizeof(d), RenderSlot::Highlight);
 }
 
-// showMenu — 0x151, WIRE-SPEC §8.5. The 96-byte two-row window, always exactly 96.
+// showMenu — 0x151, docs/WIRE.md. The 96-byte two-row window, always exactly 96.
 //
 // DECLARED LENGTH 0x5A = 90, BUILT 94 — AND THAT IS CORRECT. The panel stops as soon as it
 // holds the declared count (6 + 12*7 = 90), so hardware DONEs after PCI 0x2C at 13 frames
@@ -319,7 +319,7 @@ Submitted CarminatDisplay::hidePopup() { return Submitted::refused(Result::NotSu
 // screen, 14 frames, every one acknowledged) with no close in between.
 //
 // The POPUP is the true overlay: it survives a redraw of the screen underneath, the redraw
-// still lands, and only hidePopup() clears it. WIRE-SPEC.md §8.6 had these two the wrong
+// still lands, and only hidePopup() clears it. docs/WIRE.md had these two the wrong
 // way round until that bench session; if you are holding a comment that says a fullscreen
 // owns the glass until closed, it is the old one.
 //
@@ -361,7 +361,7 @@ Submitted CarminatDisplay::selectMenuItem(uint8_t index) {
 //
 // showMenu() above hard-codes `0x82` and a 90-byte
 // payload and can therefore only ever draw two — which is a limit of this library, not of
-// the panel. From the 24-file OEM corpus (docs/OEM-CSV-CORPUS.md §4):
+// the panel. From the 24-file OEM corpus (docs/captures/some more logs from origin/):
 //
 //   [6] = 0x80 | itemCount, three-for-three:  0x82 / 2 items / 90 B
 //                                             0x84 / 4 items / 144 B
@@ -484,7 +484,7 @@ Submitted CarminatDisplay::navTick(bool phase) {
 // bench panel, and the OEM's do not have that record HERE. Changing the most-exercised path
 // in the library on the strength of a byte diff, without putting the result on glass, is
 // the trade this project keeps losing. It is a bench question, not an edit:
-// docs/OEM-CSV-CORPUS.md §6 item 4 has it queued.
+// docs/captures/some more logs from origin/ has it queued.
 //
 // It is also worth knowing that a fullscreen needs no teardown — see below — and that the
 // report of "fullscreen is broken" on 2026-08-06 turned out to be 17_mediascreen's repaint

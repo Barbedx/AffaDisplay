@@ -13,7 +13,7 @@ namespace affa {
 //
 // CALLABLE FROM ANY TASK. The bytes are built on the calling task's own stack — every
 // render in this library is a pure function of its arguments — and then cross into the
-// task that owns poll(). See docs/REFACTOR-2.0.md §3.4 for the one honest consequence:
+// task that owns poll(). See docs/API.md §7 for the one honest consequence:
 // a refusal that the direct path reports in `result` is reported through onComplete()
 // instead when the call came from another task, because nothing has been enqueued yet at
 // the moment of return.

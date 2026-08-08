@@ -715,7 +715,7 @@ esp_err_t replyJson(PsychicRequest* r) { return r->reply(200, "application/json"
 
 // THE HANDLERS BELOW CALL THE DISPLAY FROM THE HTTP SERVER'S TASK, and since 2.0 that is
 // correct rather than lucky: the render builds its bytes on this task's stack and crosses
-// into the poll task as data (docs/REFACTOR-2.0.md §3.4). It never blocks the handler.
+// into the poll task as data (docs/API.md §7). It never blocks the handler.
 //
 // `reason` is worth reporting even on success: a refusal here is the caller's own mistake
 // (a bad argument, an unknown function), because everything else is held rather than

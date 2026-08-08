@@ -19,7 +19,7 @@
 // mirrored, because mirroring one meant editing four places nobody was looking at. So an
 // application that wanted a styled main line or the nav pane had to take the display
 // directly — and then the owned task looked like an extra object with a second vocabulary,
-// which is why thirteen of nineteen shipped examples turned it off (docs/REFACTOR-2.0.md
+// which is why thirteen of nineteen shipped examples turned it off (docs/API.md §7
 // §1.1).
 //
 // The boundary moved into AffaDisplayBase::enqueue() instead, where every render in every

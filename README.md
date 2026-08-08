@@ -132,7 +132,7 @@ is needed because the package has no external CAN dependency.
 > ### Carminat/AFFA3 NAV session rule
 >
 > **Settled 2026-08-04 against four passive captures of a real OEM Renault radio driving a
-> real Carminat panel.** Derivation: [`docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`](docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md).
+> real Carminat panel.** Derivation: [`captures/`](captures/).
 >
 > **We speak first.** Into a silent bus the library announces one bounded bare `3AF BA` —
 > no `B9` in front of it; that is the heartbeat, and it does not start until registration
@@ -264,7 +264,7 @@ answered and eight is what every panel in it is known to render.
 > built — and a capability query that answers a question about your own build tells you
 > nothing about the glass. Inbound `0x121` from the radio is still decoded and reported
 > through the protected `UpdateListBase::onRadioText(bool isAux)` hook; see
-> `docs/PROTOCOL-NOTES.md` §8 for the pattern table.
+> `docs/NOTES.md` §8 for the pattern table.
 
 ### The library is a transport, not a UI
 
@@ -532,7 +532,7 @@ before** pumping the transmit FSM. The TX FSM checks a deadline and returns; it 
 Without this, a 10 Hz counter rendered in front of a 13-frame menu transfer leaves a backlog
 of stale values: the panel visibly keeps counting for a second *after* the user pressed
 Pause and after the library correctly received the key. It reads as a key-handling bug and
-it is a queueing bug. `examples/06_counter_preempt` measures it.
+it is a queueing bug. `test_latency` measures it.
 
 ### Key codes
 
@@ -577,7 +577,7 @@ Four things about this table are load-bearing:
 ### Developing without a car
 
 Three tiers, none of which needs a vehicle. The full walkthrough with copy-pasteable
-commands is **[`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HARDWARE.md)**.
+commands is `examples/01_bringup` and `link/LoopbackLink.h`.
 
 1. **Laptop only — no board at all.**
    ```
@@ -592,7 +592,7 @@ commands is **[`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HA
    Self-ACK is the **Declared** rule — PARTIAL while the declared FF_DL is unsatisfied, DONE
    at it — which is what the hardware does and what reproduces every frame count in the wire
    spec (`showMenu` = 13 frames, last PCI `0x2C`) without being told them.
-2. **A bare ESP32 devkit — no transceiver, no panel.** Flash `examples/90_bench_ota`, open
+2. **A bare ESP32 devkit — no transceiver, no panel.** Flash `examples/17_mediascreen`, open
    the web console, switch it to `panel=virtual`. The decoder is fed from the Layer-0 tap,
    so the same wiring serves both a virtual panel and a passive decode alongside a real one.
    You get the live frame ring, the decoded glass, key
@@ -603,8 +603,7 @@ commands is **[`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HA
    `examples/01_bringup` first — it proves the link in the order it has to be proved, and on
    a two-node bus `txErr == 0` is the proof the panel is acknowledging you.
 
-The same document also covers capturing your own traffic, diffing it against
-`docs/WIRE-SPEC.md`, and adding a fourth panel family.
+`docs/WIRE.md`, and adding a fourth panel family.
 
 ### Keep ownership of the controller
 
@@ -628,12 +627,9 @@ pio run                 # 5 environments: one host, four ESP32 examples
 | Document | What it is |
 | --- | --- |
 | [`docs/API.md`](docs/API.md) | The contracts the implementation is written against — threading, `Result`, latency, capabilities. **It does not copy declarations**: the headers are the declarations, and §7 says where every deleted thing went. |
-| [`docs/WIRE-SPEC.md`](docs/WIRE-SPEC.md) | The byte-level oracle: every frame layout, ready-to-paste golden vectors each tagged with the strongest witness that attests it, and the arithmetic for every frame count. **Where the code and this document disagree about a byte, the code is wrong.** |
-| [`docs/PROTOCOL-NOTES.md`](docs/PROTOCOL-NOTES.md) | Provenance: every byte traced to a capture, an OEM log or a third-party reference, plus the open questions each phrased as the experiment that closes it. |
-| [`docs/REFACTOR-2.0.md`](docs/REFACTOR-2.0.md) | Why the surface has the shape it now has: the evidence, the root cause, and what was deleted to fix it. |
+| [`docs/WIRE.md`](docs/WIRE.md) | **Generated** from the golden vectors `pio test -e native` asserts, by `tools/gen_wire_doc.js`. 118 frames, every one checked byte for byte by CI. Prose about a bus drifts from the bus; an assertion cannot. |
+| [`docs/NOTES.md`](docs/NOTES.md) | The three things that are not bytes: what we do **not** know, how this project has got things wrong six times running, and the incidents behind the threading model. |
 | [`docs/ESP32CAN-CONTRACT.md`](docs/ESP32CAN-CONTRACT.md) | Driver ownership, RX/TX, lifecycle, and recovery. |
-| [`docs/PORTING.md`](docs/PORTING.md) | Moving an application off the old classes — and how to drop this library entirely, including which files are panel-specific and which are the reusable transport core. |
-| [`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HARDWARE.md) | The three tiers above, in full, plus capturing traffic and adding a panel. |
 | [`docs/BENCH-VERIFIED.md`](docs/BENCH-VERIFIED.md) | What has actually been seen on a panel, as opposed to what is believed. |
 
 `core/`, `util/` and `link/LoopbackLink.h` must all compile for `platform = native` with
@@ -805,7 +801,7 @@ TJA1051T-3, *не* 5 В TJA1050 без узгодження рівнів).
 стан панелі, а не рівень авторизації.
 
 > **Виправлено 2026-08-04 за чотирма OEM-захопленнями** (`docs/captures/*.csv`, розбір у
-> `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`). Тут раніше стояло: *"бібліотека не передає,
+> `captures/`). Тут раніше стояло: *"бібліотека не передає,
 > доки дисплей не надішле повний `0x3CF: 61 11 xx`"*, *"три-кадровий Carminat hello:
 > `70 1A 11`, `B0 14 11`, `B0 14 11`"*, *"`61 11 01` — лише bootstrap … Лише пізній
 > `61 11 00` дозволяє послідовну реєстрацію"*. Спростовано: наш `BA` іде першим (панель
@@ -872,7 +868,7 @@ ACK id завжди **обчислюється** як `funcId | 0x400`, і ні�
 > зібрано — а запит можливостей, який відповідає на питання про вашу власну збірку, нічого не
 > каже про скло. Вхідний `0x121` від радіо досі декодується і повідомляється через захищений
 > гак `UpdateListBase::onRadioText(bool isAux)`; таблиця патернів — у
-> `docs/PROTOCOL-NOTES.md` §8.
+> `docs/NOTES.md` §8.
 
 ### Бібліотека — це транспорт, а не UI
 
@@ -1137,7 +1133,7 @@ ESP32-C3 (`board = esp32-c3-devkitm-1`, Arduino core 2.0.17), release-збірк
 Без цього лічильник, що малюється з частотою 10 Гц перед 13-кадровою передачею меню, лишає
 хвіст застарілих значень: панель видимо рахує далі ще секунду *після* того, як користувач
 натиснув Pause і бібліотека коректно отримала кнопку. Виглядає як баг обробки кнопок, а є
-багом черги. `examples/06_counter_preempt` це вимірює.
+багом черги. `test_latency` це вимірює.
 
 ### Коди кнопок
 
@@ -1182,7 +1178,7 @@ ESP32-C3 (`board = esp32-c3-devkitm-1`, Arduino core 2.0.17), release-збірк
 ### Розробка без автомобіля
 
 Три рівні, і жоден не потребує машини. Повний покроковий опис із командами, які можна просто
-скопіювати, — **[`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HARDWARE.md)**.
+скопіювати, — `examples/01_bringup` and `link/LoopbackLink.h`.
 
 1. **Лише ноутбук — узагалі без плати.**
    ```
@@ -1197,7 +1193,7 @@ ESP32-C3 (`board = esp32-c3-devkitm-1`, Arduino core 2.0.17), release-збірк
    Self-ACK — це правило **Declared**: PARTIAL, поки оголошений FF_DL не набрано, і DONE на
    ньому. Саме так поводиться залізо, і саме це відтворює всі кількості кадрів із wire spec
    (`showMenu` = 13 кадрів, останній PCI `0x2C`), не знаючи їх наперед.
-2. **Гола плата ESP32 — без трансивера і без панелі.** Прошийте `examples/90_bench_ota`,
+2. **Гола плата ESP32 — без трансивера і без панелі.** Прошийте `examples/17_mediascreen`,
    відкрийте вебконсоль, переключіть її на `panel=virtual`.
    Декодер годується з Layer-0 tap, тому та сама схема обслуговує і віртуальну панель, і
    пасивне декодування поруч зі справжньою. У браузері ви отримуєте живе кільце кадрів,
@@ -1207,9 +1203,6 @@ ESP32-C3 (`board = esp32-c3-devkitm-1`, Arduino core 2.0.17), release-збірк
    ~30 с, і панель відповідає на `0x3CF: 61 11 xx`. Спершу прошийте `examples/01_bringup` —
    він доводить лінк у тому порядку, у якому це треба робити, і на шині з двох вузлів
    `txErr == 0` є доказом того, що панель вас підтверджує.
-
-Той самий документ описує, як зняти власний трафік, як звірити його з `docs/WIRE-SPEC.md` і
-як додати четверту родину панелей.
 
 ### Власник контролера
 
@@ -1233,12 +1226,9 @@ pio run                 # 5 середовищ: одне хостове і чо�
 | Документ | Що це |
 | --- | --- |
 | [`docs/API.md`](docs/API.md) | Контракти, під які написана реалізація: багатозадачність, `Result`, затримки, можливості. **Він не копіює оголошень**: оголошення — це заголовки, а §7 каже, куди поділося кожне видалене. |
-| [`docs/WIRE-SPEC.md`](docs/WIRE-SPEC.md) | Побайтовий оракул: кожен формат кадру, готові до вставки золоті вектори з найсильнішим свідком для кожного, і арифметика кількості кадрів. **Якщо код і цей документ розходяться щодо байта — неправий код.** |
-| [`docs/PROTOCOL-NOTES.md`](docs/PROTOCOL-NOTES.md) | Походження: кожен байт зведено до лога, OEM-запису чи стороннього джерела, плюс відкриті питання, кожне сформульоване як експеримент, що його закриє. |
-| [`docs/REFACTOR-2.0.md`](docs/REFACTOR-2.0.md) | Чому поверхня має теперішній вигляд: докази, першопричина і що було видалено, щоб це полагодити. |
+| [`docs/WIRE.md`](docs/WIRE.md) | **Згенеровано** з золотих векторів, які перевіряє `pio test -e native`, через `tools/gen_wire_doc.js`. 118 кадрів, кожен звірений побайтово в CI. Проза про шину розходиться з шиною; твердження тесту — ні. |
+| [`docs/NOTES.md`](docs/NOTES.md) | Три речі, які не є байтами: чого ми **не** знаємо, як цей проєкт помилявся шість разів поспіль, і інциденти, з яких виросла модель багатозадачності. |
 | [`docs/ESP32CAN-CONTRACT.md`](docs/ESP32CAN-CONTRACT.md) | Володіння драйвером, RX/TX, життєвий цикл і відновлення. |
-| [`docs/PORTING.md`](docs/PORTING.md) | Як перевести застосунок зі старих класів — і як відмовитися від цієї бібліотеки взагалі, включно з тим, які файли специфічні для панелі, а які є придатним до повторного вжитку ядром транспорту. |
-| [`docs/DEVELOPING-WITHOUT-HARDWARE.md`](docs/DEVELOPING-WITHOUT-HARDWARE.md) | Три рівні вище, повністю, плюс захоплення трафіку і додавання панелі. |
 | [`docs/BENCH-VERIFIED.md`](docs/BENCH-VERIFIED.md) | Що справді бачили на панелі, на відміну від того, у що віриться. |
 
 `core/`, `util/` і `link/LoopbackLink.h` мають збиратися для `platform = native` з нічим,

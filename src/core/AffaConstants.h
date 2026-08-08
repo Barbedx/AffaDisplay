@@ -4,7 +4,7 @@
 // Every value carries its witness. [CAP] = seen verbatim in MeganeCAN/logs/*.log,
 // [OEM] = seen from a node that is not ours, [REF] = notes/archive_mhroczny/affa3.c,
 // [DERIVED] = hand-executed from the builder with no capture. Full arithmetic and the
-// quoted log lines are in docs/WIRE-SPEC.md.
+// quoted log lines are in docs/WIRE.md.
 #pragma once
 #include <cstdint>
 
@@ -62,7 +62,7 @@ inline constexpr uint8_t kFrameNBytes = 7;
 // Continuation PCI; the counter WRAPS. Legacy `0x20 + num` produces 0x30 at num == 16 —
 // the ISO-TP flow-control PCI, not a consecutive frame. The OEM head unit wraps modulo 16
 // on its 302-byte 0x1F1 message (distinct PCIs there: 11 20 21..2A 2C 2D 2E 2F, 0x20
-// present, nothing above 0x2F). [CAP] docs/WIRE-SPEC.md §3.3
+// present, nothing above 0x2F). [CAP] docs/WIRE.md
 inline constexpr uint8_t kIsoTpCfBase = 0x20;
 inline constexpr uint8_t kIsoTpCfMask = 0x0F;
 inline constexpr uint8_t isoTpCf(uint8_t num) {
@@ -72,7 +72,7 @@ inline constexpr uint8_t isoTpCf(uint8_t num) {
 // Frames a `len`-byte payload occupies if nothing stops the sender early. The panel DOES
 // stop early when the declared FF_DL is shorter than the builder holds — showMenu is the
 // one over-run in the repertoire, ending at PCI 0x2C — so this is a ceiling, not always
-// the count. docs/WIRE-SPEC.md §3.6
+// the count. docs/WIRE.md
 constexpr uint8_t isoTpFrameCount(uint8_t len) {
   return (len <= kFrame0Bytes)
              ? 1

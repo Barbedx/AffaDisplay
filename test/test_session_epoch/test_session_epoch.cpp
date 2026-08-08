@@ -209,7 +209,7 @@ void completeFreshRegistration(Rig& r, const char* first, const char* second) {
 // cannot either, because pumpSync() returns early on `registerAfterHello && !FuncsReg`. It is
 // not a REGRESSION — a panel sends `00` or `01`, and both were already absorbed in that state
 // — but it is a hole, and closing it means deciding what a post-burst `61 11` means, which no
-// capture answers. See docs/REFACTOR-PLAN.md.
+// capture answers. See docs/API.md §7.
 //
 // A `61 11 01` that ANSWERS our BA is a different frame with the same bytes: it is a full
 // request. MEASURED, NOT ASSUMED — "aknowledge offed display cONNECT OT POWER.csv" is a

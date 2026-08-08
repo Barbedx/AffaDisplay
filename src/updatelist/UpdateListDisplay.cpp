@@ -11,7 +11,7 @@ namespace affa {
 using namespace updatelist;
 
 // ---------------------------------------------------------------------------
-// setText — ONE ENCODING, 0x121   docs/WIRE-SPEC.md §9.1
+// setText — ONE ENCODING, 0x121   docs/WIRE.md
 // ---------------------------------------------------------------------------
 //   10 19 76 <chan> 01 old(8) 10 new(12) 00 81 81      29 B, 4 frames, PCI 0x23
 //
@@ -60,7 +60,7 @@ Submitted UpdateListDisplay::setText(const char* text, uint8_t digit) {
   d[n++] = kFiller;                                     // 0x81
 
   static_assert(5 + kOldCells + 1 + kNewCells + 3 == kSegPayload,
-                "setText payload is 29 bytes (WIRE-SPEC §9.1)");
+                "setText payload is 29 bytes (docs/WIRE.md)");
   return enqueueRender(kIdSetText, d, n, RenderSlot::Text);
 }
 

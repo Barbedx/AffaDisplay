@@ -1,11 +1,11 @@
 // AffaSync — the opening, and nothing else.
 //
-// Split out of AffaDisplayBase.cpp by step 7 of docs/REFACTOR-PLAN.md; see AffaObserve.cpp
+// Split out of AffaDisplayBase.cpp by step 7 of docs/API.md §7; see AffaObserve.cpp
 // for the four-way division. What lives here is the Phase table and the frames that drive
 // it: the announce, the hello burst, the panel's channel reflex, the heartbeat, and the
 // watchdog that ends a session.
 //
-// EVERY RULE IN THIS FILE IS MEASURED. docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md derives them
+// EVERY RULE IN THIS FILE IS MEASURED. docs/WIRE.md and captures/ derives them
 // from docs/captures/*.csv, and the whole sequence has run 1 h 36 m on glass. Four separate
 // protocol bugs lived here, all the same shape — a special case standing in for a general
 // rule — so when something looks like it needs a new branch, check the captures first.
@@ -35,7 +35,7 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
     // dimmer copy for every other spelling gated on `helloOnNonAuthRequest` and
     // `oneShotResyncOnStart`, with `helloAfterBootstrapRequest` as the trapdoor between
     // them. Two of this session's four protocol bugs lived in that seam and both were the
-    // same shape — a special case standing in for a general rule (see docs/PROTOCOL-NOTES.md §10, "How this
+    // same shape — a special case standing in for a general rule (see docs/NOTES.md §2, "How this
     // project gets things wrong"). The real gate is our own `BA`, never the byte, and it is
     // `helloRequiresAnnounce` below.
     if (_profile.requireAuthRequest) {
@@ -124,7 +124,7 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
     // NO AUTHORIZATION GATE ON THIS FAMILY, so the opening is released the moment the panel
     // asks and the phase goes straight to the registration wait. It is an approximation:
     // registration here is LAZY, triggered by the first render, so this can sit at
-    // Registering with no probe queued. Step 8 of docs/REFACTOR-PLAN.md brings UpdateList
+    // Registering with no probe queued. Step 8 of docs/API.md §7 brings UpdateList
     // onto the measured opening and the mapping stops being a shrug.
     if (!atLeast(_phase, Phase::Registering)) enterPhase(Phase::Registering);
     // Do not append a B9 to the three-frame hello response.  The first paced heartbeat is
@@ -156,7 +156,7 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
     //
     // So Start also drops the registrations, exactly as a peer-alive timeout does. The next
     // render re-runs the 0x70 probe over every funcId from index 0, which is the thing the
-    // panel is actually asking for and is a frame we can send. See docs/PROTOCOL.md §3.3.
+    // panel is actually asking for and is a frame we can send. See captures/
     //
     // len >= 3 before touching data[2]: short DLCs are real on this channel — the OEM corpus
     // holds 0x3CF at DLC 1 and DLC 2 — and the legacy shim read uninitialised stack there,
@@ -216,7 +216,7 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
     // called tick() from exactly this branch, so its B9 followed the panel's 69 within
     // milliseconds — a pong, on the wire, whether or not the panel reads it as one. That
     // driver is the one proven against a real panel, and this is the LAST wire-visible
-    // difference between it and this library (MegaOpen/docs/DISPLAY-INIT-SPEC.md §5).
+    // difference between it and this library (MegaOpen/the MegaOpen-side audit).
     //
     // What deliberately does NOT come back from the legacy path: the watchdog stays armed
     // from OUR loop (pumpSync consumes PeerAlive), and no BA rides along. Only the alive
@@ -653,7 +653,7 @@ void AffaDisplayBase::setSync(SyncState s) {
   // time-based Settling boundary, which is not a loss. Counting it here is what turns "the
   // panel drops us about every seven minutes" from something the owner discovers by reading
   // a 96-minute log into a number on the status page. Fourteen of them went unnoticed
-  // through a soak that looked perfect. Step 6 of docs/REFACTOR-PLAN.md hangs the wire-ring
+  // through a soak that looked perfect. Step 6 of docs/API.md §7 hangs the wire-ring
   // snapshot on this same edge.
   if (hasFlag(prev, SyncState::FuncsReg) && !hasFlag(s, SyncState::FuncsReg)) {
     ++_sessionsLost;

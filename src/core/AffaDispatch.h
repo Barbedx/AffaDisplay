@@ -11,7 +11,7 @@
 //
 //   * enqueue() completes a superseded ticket when a render coalesces, which fires the
 //     application's CompleteCb. Holding a lock across an arbitrary user callback is exactly
-//     the deadlock docs/CR-0.3.0-OWNED-TASK.md §4.2 rejected mutexes for.
+//     the deadlock docs/NOTES.md §3 rejected mutexes for.
 //   * enqueue() reads linkReady(), the sync state, the phase and the clock — all of it
 //     mutated by pumpTx() on the poll task. A lock that made that safe would have to cover
 //     the poll task's whole transmit pump, so a low-priority web handler could hold off a
@@ -138,7 +138,7 @@ class AffaMpsc {
 // panel, present and future — crosses as a payload and needs no entry here, which is the
 // whole point of putting the boundary at enqueue() instead of over a hand-written table of
 // operations. The pre-2.0 command queue had fourteen render ops and had to be edited for
-// every new screen; twelve were added and none were mirrored (docs/REFACTOR-2.0.md §1.1).
+// every new screen; twelve were added and none were mirrored (docs/API.md §7).
 //
 // This list is closed and short because it is exactly the calls that mutate library state
 // rather than build bytes.

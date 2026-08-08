@@ -1,7 +1,7 @@
 // AffaDisplayBase — lifecycle, the poll() contract, the receive drain, keys, and the
 // public surface.
 //
-// ONE CLASS, FOUR TRANSLATION UNITS, as of step 7 of docs/REFACTOR-PLAN.md. This file was
+// ONE CLASS, FOUR TRANSLATION UNITS, as of step 7 of docs/API.md §7. This file was
 // 2156 lines spanning four unrelated jobs; the other three are AffaSync.cpp (the opening
 // FSM), AffaTx.cpp (queue, ISO-TP, retries) and AffaObserve.cpp (the frame tap and the
 // choke point every frame passes through). Nothing moved but line numbers — the split
@@ -501,7 +501,7 @@ void AffaDisplayBase::setSelfAck(bool on) { _selfAck = on; }
 void AffaDisplayBase::setAutoPower(bool on) { _autoPower = on; }
 bool AffaDisplayBase::autoPower() const { return _autoPower; }
 
-// STORED, AND THE SOURCE OF TRUTH — step 4 of docs/REFACTOR-PLAN.md is done. It was derived
+// STORED, AND THE SOURCE OF TRUTH — step 4 of docs/API.md §7 is done. It was derived
 // from the booleans for exactly one commit, long enough for
 // test_phase_walks_the_measured_opening_in_order to pin the reading against the wire; that
 // test is unchanged across the inversion, which is what makes the inversion checkable at all.

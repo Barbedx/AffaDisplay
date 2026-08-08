@@ -1,7 +1,7 @@
 // The dashboard cluster — UNTESTED, and the header says so because nothing else can.
 //
 // This class exists to be the counter-example that proves SyncProfile: a third family,
-// transcribed from ONE capture (docs/PROTOCOL-NOTES.md §9), needed a header of data and
+// transcribed from ONE capture (docs/NOTES.md §1.1), needed a header of data and
 // these forty lines. No change to core/, no new transport, no new FSM.
 //
 // WHAT IT CAN DO: complete the handshake, latch the lazy 0x70 registration on 0x121 and

@@ -164,7 +164,7 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // every protocol bug of 2026-07/08 was found, eventually, by learning to read the nine
   // booleans it replaces in the right order.
   //
-  // Step 3 of docs/REFACTOR-PLAN.md: it is DERIVED here, so it cannot disagree with the
+  // Step 3 of docs/API.md §7: it is DERIVED here, so it cannot disagree with the
   // machine it describes. Step 4 inverts that and deletes the booleans; the phase tests are
   // what make that safe.
   Phase     phase()      const;
@@ -252,7 +252,7 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // THE CHOKE POINT. Every render in every panel, present and future, funnels through here —
   // CarminatDisplay::submit() and UpdateListBase::enqueueRender() are two-line wrappers — so
   // this is the one place the cross-task boundary has to live, and putting it here is what
-  // makes a render added later thread-safe on the day it is written. docs/REFACTOR-2.0.md §2.
+  // makes a render added later thread-safe on the day it is written. docs/API.md §7
   Submitted enqueue(uint16_t funcId, const uint8_t* data, uint8_t len,
                     TxOptions opt = TxOptions{});
 
@@ -308,7 +308,7 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   //
   // BOTH DEFAULT TO Local: in the radio role we RECEIVE key frames. KeySource::Wire is for
   // impersonating the panel at a REAL radio and PUTS PHANTOM PRESSES ON THE BUS — harmless
-  // on a bench, input other modules may act on in a vehicle. docs/API.md §7b.6.
+  // on a bench, input other modules may act on in a vehicle. docs/API.md §7.4.
   //
   // nav(NavCommand, KeySource) WAS HERE AND IS GONE, with the menu hotkey trio beside it.
   // Both were UI policy on a CAN driver: nav() existed to turn six menu intents into key
@@ -381,7 +381,7 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // packetFiller() — that is what the capture shows. NotSupported for a Hold edge on a
   // wheel code, because 0x0101|0xC0 and 0x0141|0xC0 are both 0x01C1 and the click form
   // would step fine where the caller asked coarse. NOT QUEUED: behind the ISO-TP queue it
-  // would have exactly the latency preemption exists to remove. docs/WIRE-SPEC.md §7.
+  // would have exactly the latency preemption exists to remove. docs/WIRE.md
   [[nodiscard]] Result transmitKey(Key k, KeyEdge e);
 
   // Once per poll(), after the sync and TX FSMs, for a panel's own time-driven work. MUST

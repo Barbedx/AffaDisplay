@@ -462,7 +462,7 @@ void test_poll_from_a_foreign_task_does_nothing_and_is_counted() {
 // application holding the display — which every application did, because AffaTask published
 // ten of CarminatDisplay's twenty-two renders — could call setText from an HTTP handler
 // straight into the transmit queue while the owned task was pumping it. That is what
-// examples/17_mediascreen actually did (docs/REFACTOR-2.0.md §1.2).
+// examples/17_mediascreen actually did (docs/API.md §7).
 //
 // These drive the boundary with the same faked task identity the poll guard above uses.
 

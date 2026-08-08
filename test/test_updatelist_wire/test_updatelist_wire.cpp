@@ -23,7 +23,7 @@ using affatest::pumpUntilIdle;
 namespace {
 
 // ---------------------------------------------------------------------------
-// Golden vectors — docs/WIRE-SPEC.md §9
+// Golden vectors — docs/WIRE.md
 // ---------------------------------------------------------------------------
 
 const Frame kRegister[] = {

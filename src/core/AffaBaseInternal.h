@@ -1,7 +1,7 @@
 // Shared between the four translation units that implement AffaDisplayBase. NOT a public
 // header — nothing outside src/core/ may include it, and nothing in here is part of the API.
 //
-// It exists because step 7 of docs/REFACTOR-PLAN.md split a 2156-line file into four, and
+// It exists because step 7 of docs/API.md §7 split a 2156-line file into four, and
 // these constants were in an anonymous namespace that three of them still need. Copying them
 // per file would be four places for a tuned retry budget to drift apart, which is the exact
 // failure mode this library was written to stop happening.

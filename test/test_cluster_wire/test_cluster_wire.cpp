@@ -6,7 +6,7 @@
 // that rots, so it is in [env:native] now and these tests are what make that mean something.
 //
 // WHAT THESE ASSERTIONS ARE AND ARE NOT. Every expectation here is transcribed from
-// docs/PROTOCOL-NOTES.md §9 — a single capture of an OEM radio talking to a cluster, supplied
+// docs/NOTES.md §1.1 — a single capture of an OEM radio talking to a cluster, supplied
 // 2026-07-28, with the direction annotations belonging to whoever captured it. NOTHING here
 // is bench-verified, and no byte of it has ever been on a bus from this library.
 //
@@ -108,7 +108,7 @@ void test_we_wait_for_the_clusters_own_channel_before_registering_ours(void) {
   //
   // Filler is a property of the SPEAKER, not of the bus, so 0x1C1 was sent BY THE CLUSTER:
   // it opens its own channel first and we register after. That is the same peer-channel gate
-  // Carminat measures 4/4, and PROTOCOL-NOTES §9.2 reads it as "three functions" the radio
+  // Carminat measures 4/4, and the cluster capture reads as "three functions" the radio
   // registered — the prose is wrong and the filler is right.
   TEST_ASSERT_TRUE_MESSAGE(cluster::kSync.registerAfterHello,
                            "the cluster's 1C1 comes first; ours follow it");

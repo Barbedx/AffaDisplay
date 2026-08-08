@@ -1,6 +1,6 @@
 // AffaTx — the transmit queue, ISO-TP segmentation, flow control and retries.
 //
-// Split out of AffaDisplayBase.cpp by step 7 of docs/REFACTOR-PLAN.md; see AffaObserve.cpp
+// Split out of AffaDisplayBase.cpp by step 7 of docs/API.md §7; see AffaObserve.cpp
 // for the four-way division. handleAckFrame() is here rather than in AffaSync.cpp because
 // an `0x74` or a `30 01 00` is ISO-TP flow control addressed to the job at the head of this
 // queue — it belongs to the transfer, not to the handshake.
@@ -312,7 +312,7 @@ Submitted AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t
   //
   // THEY ARE ALSO THE ONLY CHECKS THAT NEED NO LIBRARY STATE — `_funcIds` is fixed at
   // construction — which is why they stay above the ticket mint. Step 4 of
-  // docs/REFACTOR-2.0.md puts the cross-task branch immediately below this block, so a
+  // docs/API.md §7 puts the cross-task branch immediately below this block, so a
   // foreign caller still gets these three answers synchronously, on its own task.
   if (!data || len == 0)      { _lastResult = Result::BadArgument; return Submitted::refused(Result::BadArgument); }
   if (len > AFFA_MAX_PAYLOAD) { _lastResult = Result::TooLong;     return Submitted::refused(Result::TooLong); }
@@ -327,7 +327,7 @@ Submitted AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t
   // THE TASK BOUNDARY, AND IT IS ONE LINE BECAUSE EVERY RENDER IN THIS LIBRARY FUNNELS HERE.
   // Above this point nothing has been read but the caller's arguments and a table fixed at
   // construction; below it, every decision reads state the poll owner mutates. So this is
-  // where the call stops and the bytes travel instead. docs/REFACTOR-2.0.md §2.
+  // where the call stops and the bytes travel instead. docs/API.md §7
   if (!onPollOwner()) return post(t, funcId, data, len, opt, nullptr, len);
 
   return admit(t, funcId, data, len, opt, nullptr, len);
