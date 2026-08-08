@@ -1394,11 +1394,45 @@ instance and not a line of new code. Note also `3CF` at **DLC 1** — the short-
     121 8  70 FF FF FF FF FF FF FF     probe -> 521 74 ...
     1B1 8  70 FF FF FF FF FF FF FF     probe -> 5B1 74 ...
 
-Three functions rather than two, probed with `0x70` and acknowledged on `id | 0x400` —
-exactly the mechanism in §5. **The filler differs by SPEAKER, not by bus**: the cluster
-pads `0x84`, the radio pads `0xFF`. That corroborates the note in `proto/ScreenDecode.h`
-that filler is `0xA3` on our bench unit, `0x84` on an OEM cluster and `0xFF` on the OEM
-radio — and is why nothing in this library ever matches on a received filler byte.
+**TWO functions, not three — and the FILLER is what says so.** `0x1C1` is padded `0x84`,
+which is the CLUSTER's filler; `0x121` and `0x1B1` are padded `0xFF`, which is the radio's.
+Filler is a property of the SPEAKER, not of the bus, so the cluster opened **its own**
+channel first and the radio registered two of its own after — the same peer-channel order
+Carminat measures 4/4 (`registerAfterHello`).
+
+> **This paragraph read "three functions rather than two" until 2026-08-08**, counting all
+> three probes as the radio's. `ClusterConstants.h` always had it right; the prose did not.
+> Corrected when `[env:native]` started compiling the cluster and `test_cluster_wire` pinned
+> the reading.
+
+Probed with `0x70` and acknowledged on `id | 0x400`, exactly the mechanism in §5. The filler
+observation corroborates the wider note that it is `0xA3` on our bench unit, `0x84` on an OEM
+cluster and `0xFF` on the OEM radio — and is why nothing in this library ever matches on a
+received filler byte.
+
+### 9.2a The opening CANNOT complete as the library is written  [BLOCKER, 2026-08-08]
+
+Both `queueHello()` call sites live inside one branch of `AffaDisplayBase::handleSyncFrame()`:
+
+    if (f.data[0] == 0x61 && f.data[1] == 0x11) { … queueHello(now); … }
+
+**There is no `61 11` anywhere in the cluster capture.** §9.1 shows the cluster sending only
+`3CF 1 69`. So the burst is never queued, registration never follows it, and no
+`SyncProfile` field can change that — the trigger lives in the FSM, not in the data.
+
+What the capture shows is the radio driving throughout:
+
+    3AF 2  59 00                       radio alive
+    3AF 2  5A 01                       radio sync request
+    3CF 1  69                          cluster answers
+    3AF 8  50 29 00 23 00 00 00 69     radio hello
+
+so the trigger is either the `69` or nothing at all — our own request being enough.
+**Which of the two is not decidable from one sample**, and this project has paid for guessing
+a trigger before: four protocol bugs, every one the same shape, a special case standing in
+for a general rule. It is recorded here rather than invented, and
+`test_the_opening_cannot_complete_because_nothing_triggers_the_hello` fails the day somebody
+changes it without updating this section.
 
 ### 9.3 Display control carries a THIRD declared length
 

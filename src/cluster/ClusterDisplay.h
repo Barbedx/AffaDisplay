@@ -53,10 +53,14 @@ class ClusterDisplay final : public AffaDisplayBase {
         on ? cluster::kPowerOn : cluster::kPowerOff,
         cluster::kPowerTail,
     };
-    return enqueue(cluster::kIdDisplayCtrl, d, cluster::kPowerLen,
-                   TxOptions{}) == kNoTicket
-               ? lastResult()
-               : Result::Ok;
+    // RenderSlot::Control, like the other two families: a second setPower must supersede a
+    // queued first rather than stack behind it. The pre-2.0 version passed a default
+    // TxOptions — RenderSlot::None — so two power calls could both sit in the queue and the
+    // older one land last. It also predated Submitted and did not compile at all, which
+    // nothing noticed because no build compiled this file.
+    TxOptions opt;
+    opt.slot = RenderSlot::Control;
+    return enqueue(cluster::kIdDisplayCtrl, d, cluster::kPowerLen, opt);
   }
 
  protected:
