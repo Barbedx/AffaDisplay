@@ -91,6 +91,26 @@ class CarminatDisplay final : public AffaDisplayBase {
 
   bool supports(Feature f) const override;
 
+  // MEASURED AT THE GLASS, not taken from the builders. setText carries fourteen cells and
+  // the panel shows about eight; `listItemChars` is 26 because docs/WIRE-SPEC.md §8.5 pins
+  // item2 at 26 usable even though the builder accepts 30. A fitter that trusted the builder
+  // would produce text that is correct in every test and cut off on hardware.
+  PanelGeometry panelGeometry() const override {
+    PanelGeometry g;
+    g.mainChars     = 8;                          // 14 carried, ~8 visible
+    g.menuRows      = 2;
+    g.menuRowChars  = 26;
+    g.infoRows      = 3;
+    g.infoRowChars  = carminat::kInfoCells;       // 8
+    g.listMaxItems  = carminat::kMenuMaxItems;    // 10; the OEM corpus shows 2, 4 and 6
+    g.listItemChars = 26;
+    g.fullRows      = 3;
+    g.fullRowChars  = 26;
+    g.imageWidth    = static_cast<uint8_t>(carminat::kNavWidth);
+    g.imageHeight   = static_cast<uint8_t>(carminat::kNavHeight);
+    return g;
+  }
+
   // ---- IDisplay / IPanel rendering ----------------------------------------
   // Every one of these ENQUEUES and returns immediately. The Result is an acceptance
   // verdict — "was it queued?" — never a delivery verdict; that arrives through

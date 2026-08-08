@@ -1,5 +1,6 @@
 #pragma once
 #include "AffaTypes.h"
+#include "PanelGeometry.h"
 
 namespace affa {
 
@@ -23,6 +24,14 @@ struct IDisplay {
   virtual void      poll()  = 0;
   virtual bool      supports(Feature f) const = 0;
   virtual SyncState syncState() const = 0;
+
+  // HOW BIG EACH SURFACE IS. supports() says a panel can draw a list; this says the list
+  // holds six items of twenty-six characters. See PanelGeometry.h for why a consumer that
+  // copies those numbers is a place to change every time a panel family is added.
+  //
+  // Not pure: a panel that has not filled it in returns all zeros, which reads as "no
+  // surface" everywhere and is the same answer supports() gives.
+  virtual PanelGeometry panelGeometry() const { return PanelGeometry{}; }
 
   // The [[nodiscard]] that used to be spelled out on every one of these now lives on
   // `Submitted` itself, so it cannot be forgotten on a render added later. Same guarantee,

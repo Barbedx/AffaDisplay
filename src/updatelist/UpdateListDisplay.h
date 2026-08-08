@@ -21,6 +21,16 @@ class UpdateListDisplay : public UpdateListBase {
 
   bool supports(Feature f) const override { return familySupports(f); }
 
+  // ONE LINE AND NOTHING ELSE. This family is eight segment cells; it has no menu window, no
+  // info rows and no image layer, and the zeros say so. It is the reason the geometry is
+  // asked for rather than assumed: a fitter written against Carminat's 26-character rows
+  // produces nothing this panel can show.
+  PanelGeometry panelGeometry() const override {
+    PanelGeometry g;
+    g.mainChars = updatelist::kOldCells;   // 8
+    return g;
+  }
+
   // 0x121, segment encoding. `digit` selects the channel: 0..9 -> 0x70 + digit,
   // anything else (255, the default) -> 0x7A, "no channel". Enqueued on RenderSlot::Text,
   // so a repeated render supersedes a queued one instead of stacking behind it.
