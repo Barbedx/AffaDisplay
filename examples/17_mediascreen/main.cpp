@@ -79,12 +79,12 @@ bool g_wantReboot = false;
 // State
 // ---------------------------------------------------------------------------
 enum class Scene : uint8_t {
-  Spectrum = 0, Vu, Wave, Clock, Stars, Bounce, Rings,
+  Spectrum = 0, Vu, Wave, Clock, Stars, Bounce, Rings, Eyes,
   Globe, Tryzub, TryzubClock, Renault, Dash, Gauges, Combo, FontSheet, Checker,
   Custom, Blank, kCount
 };
 const char* kSceneName[] = {
-  "spectrum","vu","wave","clock","stars","bounce","rings",
+  "spectrum","vu","wave","clock","stars","bounce","rings","eyes",
   "globe","tryzub","tryzubclock","renault","dash","gauges","combo","fontsheet","checker",
   "custom","blank"
 };
@@ -97,7 +97,7 @@ uint32_t g_periodMs = 250;
 uint32_t g_nextFrameMs = 0, g_sceneFrame = 0, g_uptimeS = 0, g_nextSecondMs = 0;
 
 media::Bars g_bars; media::Vu g_vu; media::Wave g_wave;
-media::Stars g_stars; media::Bounce g_bounce;
+media::Stars g_stars; media::Bounce g_bounce; media::Eyes g_eyes;
 
 // Double buffered: showNavBitmap BORROWS until the ticket completes, so drawing into the
 // buffer still being transmitted would tear the image on the wire.
@@ -320,6 +320,7 @@ void renderScene(uint8_t* b) {
     case Scene::Stars:    media::drawStars(b, g_stars);         break;
     case Scene::Bounce:   media::drawBounce(b, g_bounce);       break;
     case Scene::Rings:    media::drawRings(b, g_sceneFrame);    break;
+    case Scene::Eyes:     media::drawEyes(b, g_eyes);           break;
     case Scene::Custom:   memcpy(b, g_custom, media::kBytes);   break;
     case Scene::Blank:    media::clear(b);                      break;
     case Scene::Globe:       memcpy(b, navlab::kBmpGlobe,       media::kBytes); break;
@@ -343,6 +344,7 @@ void stepScene() {
     case Scene::Wave:     g_wave.step(true);  break;
     case Scene::Stars:    g_stars.step();     break;
     case Scene::Bounce:   g_bounce.step();    break;
+    case Scene::Eyes:     g_eyes.step();      break;
     default: break;
   }
 }

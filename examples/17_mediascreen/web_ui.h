@@ -124,6 +124,7 @@ th{color:var(--dim);font-weight:normal}
       <button onclick="scene('stars')">starfield</button>
       <button onclick="scene('bounce')">bounce</button>
       <button onclick="scene('rings')">rings</button>
+      <button onclick="scene('eyes')">robot eyes</button>
     </div>
     <div class="r">
       <small>frame ms</small><input id="per" type="number" value="250" style="width:70px">

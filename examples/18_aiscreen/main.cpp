@@ -144,19 +144,31 @@ void refillFromDeck() {
 // has been removing. What this example needs is the CONTRACT — a name resolves to pixels on
 // the device — so it carries the stills, which are already in flash, plus the two animations
 // that need nothing but a counter.
-struct Scene { const char* name; const uint8_t* still; };
+//
+// A scene is EITHER a still OR a draw function, never a name matched again at draw time. The
+// `still ? memcpy : strcmp(name,"clock") ? ... : ...` chain that used to live in
+// pushPaneFrame() meant adding an animation touched two places and re-compared strings on
+// every frame; now the table is the only place.
+uint32_t g_sceneFrame = 0;   // above the table: the animated scenes close over it
+uint32_t g_paneFrames = 0;   // pane frames ACCEPTED for transmit — the only way to tell
+                             // an animation apart from a still from outside the box
+media::Eyes g_eyes;
+struct Scene { const char* name; const uint8_t* still; void (*draw)(uint8_t*); };
 const Scene kScenes[] = {
-  { "globe",   navlab::kBmpGlobe   },
-  { "tryzub",  navlab::kBmpTryzub  },
-  { "renault", navlab::kBmpRenault },
-  { "gauges",  navlab::kBmpGauges  },
-  { "clock",   nullptr },                    // animated: needs only the wall clock
-  { "rings",   nullptr },                    // animated: needs only a frame counter
+  { "globe",   navlab::kBmpGlobe,   nullptr },
+  { "tryzub",  navlab::kBmpTryzub,  nullptr },
+  { "renault", navlab::kBmpRenault, nullptr },
+  { "gauges",  navlab::kBmpGauges,  nullptr },
+  { "clock",   nullptr, [](uint8_t* b) { media::drawClockFace(b, ::millis() / 1000); } },
+  { "rings",   nullptr, [](uint8_t* b) { media::drawRings(b, g_sceneFrame); } },
+  // The face. It belongs on THIS example more than on the demo: an AI that tells you an
+  // octopus has three hearts should have somewhere to look while you read it.
+  { "eyes",    nullptr, [](uint8_t* b) { g_eyes.step(); media::drawEyes(b, g_eyes); } },
 };
 constexpr uint8_t kSceneCount = sizeof(kScenes) / sizeof(kScenes[0]);
 
 int8_t     g_scene = -1;                    // -1 = the pane is not ours to drive
-uint32_t   g_sceneFrame = 0, g_nextFrameMs = 0, g_panePeriodMs = 250;
+uint32_t   g_nextFrameMs = 0, g_panePeriodMs = 250;
 uint8_t    g_frame[2][media::kBytes];
 uint8_t    g_drawInto = 0;
 bool       g_paneBusy = false, g_forceFrame = true;
@@ -181,15 +193,8 @@ void pushPaneFrame() {
   g_nextFrameMs = ::millis() + g_panePeriodMs;
 
   uint8_t* const buf = g_frame[g_drawInto];
-  if (sc.still) {
-    memcpy(buf, sc.still, media::kBytes);
-  } else if (!strcmp(sc.name, "clock")) {
-    media::clear(buf);
-    media::drawClockFace(buf, ::millis() / 1000);
-  } else {
-    media::clear(buf);
-    media::drawRings(buf, g_sceneFrame);
-  }
+  if (sc.still) memcpy(buf, sc.still, media::kBytes);
+  else          { media::clear(buf); sc.draw(buf); }
   ++g_sceneFrame;
 
   if (!g_forceFrame && memcmp(buf, g_frame[g_drawInto ^ 1], media::kBytes) == 0) return;
@@ -198,6 +203,7 @@ void pushPaneFrame() {
   // the one still being transmitted would tear the image on the wire.
   const affa::Submitted s = g_display.showNavBitmap(buf);
   if (!s) return;
+  ++g_paneFrames;
   g_paneTicket = s.ticket;
   g_paneBusy   = true;
   g_forceFrame = false;
@@ -338,6 +344,7 @@ esp_err_t state(PsychicRequest* r) {
      static_cast<unsigned long>(g_feed.pushed), static_cast<unsigned long>(g_feed.dropped));
   jf(",\"last\":\"%s\",\"renders\":%lu,\"renderFail\":%lu", g_lastId,
      static_cast<unsigned long>(g_renders), static_cast<unsigned long>(g_renderFail));
+  jf(",\"pane\":%lu", static_cast<unsigned long>(g_paneFrames));
   jf(",\"scene\":\"%s\"", g_scene < 0 ? "" : kScenes[g_scene].name);
   // The library's own diagnostics — see docs/REFACTOR-2.0.md §3.6 for why the callback is
   // named rather than merely counted.

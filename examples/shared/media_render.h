@@ -49,6 +49,23 @@ inline void px(uint8_t* b, int x, int y) {
   b[y * kStride + (x >> 3)] |= 0x80 >> (x & 7);
 }
 
+// The eraser. Everything else here only ever sets bits, which is fine for line art and
+// useless the moment something has to be drawn INSIDE something else — a pupil in an eye is
+// a hole, not a shape.
+inline void pxOff(uint8_t* b, int x, int y) {
+  if (x < 0 || x >= static_cast<int>(kW) || y < 0 || y >= static_cast<int>(kH)) return;
+  b[y * kStride + (x >> 3)] &= static_cast<uint8_t>(~(0x80 >> (x & 7)));
+}
+
+// A filled circle, by scanline rather than by the polar walk `circle()` uses: at r=9 the
+// 4-degree step leaves gaps a fill would have to chase, and x*x+y*y has no such problem.
+inline void disc(uint8_t* b, int cx, int cy, int r, bool on = true) {
+  const int rr = r * r;
+  for (int y = -r; y <= r; ++y)
+    for (int x = -r; x <= r; ++x)
+      if (x * x + y * y <= rr) { if (on) px(b, cx + x, cy + y); else pxOff(b, cx + x, cy + y); }
+}
+
 inline void hline(uint8_t* b, int x0, int x1, int y) { for (int x = x0; x <= x1; ++x) px(b, x, y); }
 inline void vline(uint8_t* b, int x, int y0, int y1) { for (int y = y0; y <= y1; ++y) px(b, x, y); }
 
@@ -358,6 +375,100 @@ inline void drawRings(uint8_t* b, uint32_t frame) {
     if (r > 1) circle(b, 23, 23, r);
   }
   rect(b, 21, 21, 25, 25, false);
+}
+
+// ---------------------------------------------------------------------------
+// Robot eyes
+// ---------------------------------------------------------------------------
+// A FACE IS THE ONE THING THAT SURVIVES FOUR FRAMES A SECOND. Every other scene here fights
+// the frame rate — a spectrum at 4 fps looks like a slideshow of bar charts. Eyes do not:
+// people read a blink as a blink at any rate, and a gaze that snaps to a new place is a
+// glance rather than a dropped frame. The low rate is the reason this scene works, not
+// something it has to survive.
+//
+// It is drawn, not baked, for the same reason as the clock: the interesting part is WHEN
+// things happen, and none of that is known at build time.
+struct Eyes {
+  int gx = 0, gy = 0;          // gaze offset, in pixels from centre
+  int tgx = 0, tgy = 0;        // where the gaze is heading
+  uint8_t blink = 0;           // frames still shut
+  uint8_t hold = 6;            // frames until the next glance
+  uint8_t untilBlink = 10;
+  uint8_t mood = 0;            // 0 neutral, 1 pleased, 2 cross, 3 startled
+  uint32_t rng = 0x5EED1234;
+
+  uint32_t rnd() { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return rng; }
+
+  void step() {
+    if (blink) { --blink; return; }               // eyes shut: nothing else moves
+
+    if (untilBlink) --untilBlink;
+    else {
+      blink = 1 + (rnd() & 1);                    // one frame, or two for a slow one
+      untilBlink = static_cast<uint8_t>(10 + (rnd() % 30));
+      return;
+    }
+
+    // A NEW TARGET, NOT A NEW POSITION. The gaze eases toward it over the frames in
+    // between, so a glance reads as a movement even when it only takes two frames.
+    if (hold) --hold;
+    else {
+      tgx = static_cast<int>(rnd() % 9) - 4;
+      tgy = static_cast<int>(rnd() % 7) - 3;
+      hold = static_cast<uint8_t>(4 + (rnd() % 16));
+      if ((rnd() & 7) == 0) mood = static_cast<uint8_t>(rnd() & 3);
+    }
+    if (gx < tgx) ++gx; else if (gx > tgx) --gx;
+    if (gy < tgy) ++gy; else if (gy > tgy) --gy;
+  }
+};
+
+inline void drawEyes(uint8_t* b, const Eyes& s) {
+  clear(b);
+
+  // Visor and antenna — enough of a head to say "robot" without competing with the eyes.
+  rect(b, 1, 6, 46, 45, false);
+  vline(b, 23, 1, 5);
+  disc(b, 23, 1, 1);
+
+  constexpr int kLx = 13, kRx = 34, kCy = 25, kR = 9;   // 2 px of daylight between them
+                                                       // at the widest row; at 14/33 the
+                                                       // two whites touch and read as one
+
+  if (s.blink) {
+    // Shut: a slit where each eye was. Drawn at the same centre so the blink lands where
+    // the eye is rather than snapping it back to the middle.
+    rect(b, kLx - kR, kCy - 1, kLx + kR, kCy + 1, true);
+    rect(b, kRx - kR, kCy - 1, kRx + kR, kCy + 1, true);
+    return;
+  }
+
+  for (int i = 0; i < 2; ++i) {
+    const int cx = i ? kRx : kLx;
+    disc(b, cx, kCy, kR, true);                        // the white
+    disc(b, cx + s.gx, kCy + s.gy, 4, false);          // the pupil, punched out
+    px(b, cx + s.gx - 1, kCy + s.gy - 1);              // and one pixel of catchlight,
+                                                       // which is the whole difference
+                                                       // between a hole and an eye
+    if (s.mood == 2) {                                 // cross: brows angled inward
+      for (int k = 0; k < 8; ++k)
+        px(b, i ? (cx + 6 - k) : (cx - 6 + k), kCy - kR - 3 + (k / 2));
+    } else if (s.mood == 3) {                          // startled: brows raised, flat
+      hline(b, cx - 6, cx + 6, kCy - kR - 4);
+    }
+  }
+
+  // The mouth carries the mood the eyes cannot.
+  switch (s.mood) {
+    case 1:                                            // pleased: corners up
+      hline(b, 18, 29, 40); px(b, 17, 39); px(b, 30, 39); break;
+    case 2:                                            // cross: corners down
+      hline(b, 18, 29, 39); px(b, 17, 40); px(b, 30, 40); break;
+    case 3:                                            // startled: a small O
+      circle(b, 23, 39, 3); break;
+    default:
+      hline(b, 18, 29, 40); break;
+  }
 }
 
 }  // namespace media
