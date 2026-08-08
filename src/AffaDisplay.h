@@ -76,8 +76,5 @@
 #    include "updatelist/UpdateListConstants.h"
 #    include "updatelist/UpdateListBase.h"
 #    include "updatelist/UpdateListDisplay.h"
-#    if AFFA_PANEL_UPDATELIST_MENU
-#      include "updatelist/UpdateListMenuDisplay.h"
-#    endif
 #  endif
 #endif

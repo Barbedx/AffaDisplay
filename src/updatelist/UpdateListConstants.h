@@ -152,7 +152,7 @@ inline constexpr uint8_t kChanBase     = 0x70;
 inline constexpr uint8_t kChanNone     = 0x7A;
 inline constexpr uint8_t kChanMaxDigit = 9;
 
-// -- LCD (UpdateListMenuDisplay) ---------------------------------------------
+// -- LCD (UpdateListGlass::Lcd) ------------------------------------------------
 //   10 1C 7F 55 55 FF 60 03 old(8) 10 new(12) 00                       30 bytes
 // 0x1C = 28 declared content bytes, covering data[2..29]: also correct. Frames:
 // 1 + ceil(22/7) = 5, last PCI 0x24 carrying one byte and six filler.

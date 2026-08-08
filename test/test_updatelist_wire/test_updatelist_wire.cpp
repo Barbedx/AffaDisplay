@@ -10,7 +10,7 @@
 #include "../affa_test_support.h"
 
 #include "updatelist/UpdateListDisplay.h"
-#include "updatelist/UpdateListMenuDisplay.h"
+
 #include "updatelist/UpdateListConstants.h"
 
 using namespace affa;
@@ -87,7 +87,9 @@ struct Rig {
   affatest::FakeClock clk;
   Panel d;
 
-  Rig() : d(link, clk) {}
+  // The glass reaches the panel constructor. It is one class for both variants now, so the
+  // two rigs differ by an argument rather than by a type.
+  explicit Rig(UpdateListGlass glass = UpdateListGlass::Segment) : d(link, clk, glass) {}
 
   // THE OPENING, AS THIS FAMILY NOW RUNS IT. Two frames from the panel, not one.
   //
@@ -132,8 +134,14 @@ struct Rig {
   }
 };
 
-using SegRig = Rig<UpdateListDisplay>;
-using LcdRig = Rig<UpdateListMenuDisplay>;
+// ONE CLASS, TWO GLASSES — see UpdateListDisplay.h for why the LCD stopped being a subclass
+// and became an argument. The two rigs exist so a test can say which panel it means.
+struct SegRig : Rig<UpdateListDisplay> {
+  SegRig() : Rig(UpdateListGlass::Segment) {}
+};
+struct LcdRig : Rig<UpdateListDisplay> {
+  LcdRig() : Rig(UpdateListGlass::Lcd) {}
+};
 
 int g_keys = 0;
 Key g_lastKey = Key::Load;

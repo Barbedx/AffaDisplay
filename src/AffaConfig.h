@@ -20,7 +20,7 @@
 // ---------------------------------------------------------------------------
 // SILENCE IS AN ERROR, NOT A DEFAULT: name at least one panel in build_flags. A misspelled
 // flag leaves every real macro undefined and -Wundef cannot see it; the #error below is what
-// catches it. AFFA_PANEL_DEFAULT_ALL=1 asks for all three — for first builds and the
+// catches it. AFFA_PANEL_DEFAULT_ALL=1 asks for both — for first builds and the
 // footprint references, not for shipping.
 #ifndef AFFA_PANEL_DEFAULT_ALL
 #  define AFFA_PANEL_DEFAULT_ALL 0
@@ -33,9 +33,6 @@
 #  ifndef AFFA_PANEL_UPDATELIST
 #    define AFFA_PANEL_UPDATELIST 1
 #  endif
-#  ifndef AFFA_PANEL_UPDATELIST_MENU
-#    define AFFA_PANEL_UPDATELIST_MENU 1
-#  endif
 #endif
 
 #ifndef AFFA_PANEL_CARMINAT
@@ -44,15 +41,14 @@
 #ifndef AFFA_PANEL_UPDATELIST
 #  define AFFA_PANEL_UPDATELIST 0      // UpdateList/AFFA2 8-segment: 0x3DF, 0x121 + 0x1B1
 #endif
-#ifndef AFFA_PANEL_UPDATELIST_MENU
-#  define AFFA_PANEL_UPDATELIST_MENU 0 // UpdateList LCD variant: different setText encoding
-#endif
 
-// UpdateListMenuDisplay derives from UpdateListDisplay.
-#if AFFA_PANEL_UPDATELIST_MENU && !AFFA_PANEL_UPDATELIST
-#  undef  AFFA_PANEL_UPDATELIST
-#  define AFFA_PANEL_UPDATELIST 1
-#endif
+// AFFA_PANEL_UPDATELIST_MENU WAS HERE AND IS GONE, 2.0. It selected UpdateListMenuDisplay,
+// a subclass and a build gate that existed to override exactly ONE method — and whose name
+// lied, because nothing about it was a menu. The LCD is a constructor argument now:
+//
+//     affa::UpdateListDisplay lcd(link, clock, affa::UpdateListGlass::Lcd);
+//
+// Not one byte on the wire moved: both headers are still built exactly as captured.
 
 // The dashboard cluster: a THIRD sync profile, transcribed from ONE capture and NEVER RUN
 // against hardware. It is NOT in AFFA_PANEL_DEFAULT_ALL and it is not on by any other
@@ -63,9 +59,8 @@
 #  define AFFA_PANEL_CLUSTER 0
 #endif
 
-#if !AFFA_PANEL_CARMINAT && !AFFA_PANEL_UPDATELIST && !AFFA_PANEL_UPDATELIST_MENU && \
-    !AFFA_PANEL_CLUSTER
-#  error "AffaDisplay: no panel selected. Add -D AFFA_PANEL_CARMINAT=1 (and/or _UPDATELIST / _UPDATELIST_MENU), or -D AFFA_PANEL_DEFAULT_ALL=1 for all three. Check your spelling: a typo'd AFFA_PANEL_* flag lands here."
+#if !AFFA_PANEL_CARMINAT && !AFFA_PANEL_UPDATELIST && !AFFA_PANEL_CLUSTER
+#  error "AffaDisplay: no panel selected. Add -D AFFA_PANEL_CARMINAT=1 and/or -D AFFA_PANEL_UPDATELIST=1, or -D AFFA_PANEL_DEFAULT_ALL=1 for both. Check your spelling: a typo'd AFFA_PANEL_* flag lands here."
 #endif
 
 // ---------------------------------------------------------------------------
