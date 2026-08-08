@@ -138,6 +138,31 @@ th{color:var(--dim);font-weight:normal}
       still image costs one transfer and then nothing. <b>stop pane</b> does not clear the
       glass &mdash; no command to erase this pane is known; <b>blank</b> sends 288 zero bytes.
     </small></p>
+
+    <h2 style="margin-top:15px">Nav header &mdash; 14 bytes, ten of them unmeasured</h2>
+    <div class="r" id="nhrow"></div>
+    <div class="r">
+      <button onclick="nhSend()">SEND with these bytes</button>
+      <button onclick="nhReset()">restore captured</button>
+      <button onclick="nhNote()">log what I saw</button>
+    </div>
+    <div class="r"><b>wire:</b>&nbsp;<span id="nhpv" class="k"></span></div>
+    <table id="nht"><thead><tr><th>header</th><th>on the glass</th></tr></thead><tbody></tbody></table>
+    <p><small>
+      Sends the picture currently in the editor with a header you choose. Bytes
+      <span class="k">[12] [13]</span> are the geometry and are <b>locked</b>: the declared
+      ISO-TP length is computed from the 288-byte image, so a header claiming another size
+      describes a payload that is not there.
+      <br><br>
+      <b>Sweep one byte at a time.</b> Three captures where two bytes moved together are what
+      produced the &ldquo;one icon field&rdquo; misreading on the list screen &mdash; co-varying
+      samples are not a field.
+      <br><br>
+      <b>There is no automated sweep and there will not be one.</b> The panel ACKs a screen it
+      never lights, so 256 scripted steps give 256 rows of <i>ok</i> and no information. The
+      oracle is you, looking at the glass. <b>log what I saw</b> writes the header you just
+      sent next to your own words, and <b>export</b> on the Wire tab takes the table with it.
+    </small></p>
   </section>
 </main>
 
@@ -736,6 +761,69 @@ function randomFull() { cmd('fullscreen', { a: pick(), b: pick(), c: pick() }); 
 //
 // Sent as text, because the dispatcher parses with strtol base 0 — `0x14` and `20` both
 // arrive as 20, so a hand-typed byte works in either notation.
+// ---------------------------------------------------------------------------
+// The nav header sweep
+// ---------------------------------------------------------------------------
+// FOURTEEN CELLS, BUILT BY A LOOP rather than written out. Fourteen hand-written input rows
+// is where a UI starts disagreeing with itself: one cell gets a step button the others do
+// not, one preset forgets to refresh the preview. There is one cell template, so there is
+// one behaviour.
+//
+// The captured header, from carminat::kNavHeader. [4..10] held "ABCDEF\0" in the OEM capture
+// and are CONFIRMED NOT TO BE TEXT — ASCII written there puts nothing on the glass — which
+// is exactly the kind of thing worth stepping through here.
+var NH_CAP = [0x21, 0x0B, 0x00, 0x25, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x00, 0x01, 48, 48];
+var NH_WHAT = ['cmd', 'screen', '?', '?', '?', '?', '?', '?', '?', '?', '?', 'fmt?', 'w', 'h'];
+var nh = NH_CAP.slice();
+
+function nhBuild() {
+  var h = '';
+  for (var i = 0; i < 14; ++i) {
+    var lock = i >= 12;                            // geometry: shown, never sent
+    h += '<span style="display:inline-block;text-align:center;margin:0 1px">'
+       + '<small>[' + i + '] ' + NH_WHAT[i] + '</small><br>'
+       + (lock ? '' : '<button onclick="nhStep(' + i + ',-1)">&minus;</button>')
+       + '<input id="nh' + i + '" size="3" oninput="nhSync()"' + (lock ? ' disabled' : '') + '>'
+       + (lock ? '' : '<button onclick="nhStep(' + i + ',1)">+</button>')
+       + '</span>';
+  }
+  el('nhrow').innerHTML = h;
+  nhPut();
+}
+function nhPut() { for (var i = 0; i < 14; ++i) el('nh' + i).value = hx(nh[i]); nhSync(); }
+function nhGet(i) { return parseInt(el('nh' + i).value, 16) & 255; }
+function nhStep(i, d) { el('nh' + i).value = hx((nhGet(i) + d) & 255); nhSync(); }
+function nhReset() { nh = NH_CAP.slice(); nhPut(); }
+
+// THE WIRE, BEFORE IT GOES OUT, and the differences called out by name. Seeing "[3] 25->2E"
+// is what stops a sweep from drifting into two changed bytes without noticing.
+function nhSync() {
+  var s = '', diff = [];
+  for (var i = 0; i < 14; ++i) {
+    var v = i >= 12 ? NH_CAP[i] : nhGet(i);
+    s += hx(v).slice(2) + ' ';
+    if (v !== NH_CAP[i]) diff.push('[' + i + '] ' + hx(NH_CAP[i]).slice(2) + '→' + hx(v).slice(2));
+  }
+  el('nhpv').textContent = s + (diff.length ? '   — ' + diff.join(', ')
+                                            + (diff.length > 1 ? '   (MORE THAN ONE BYTE MOVED)' : '')
+                                            : '   — as captured');
+}
+function nhSend() {
+  var p = {};
+  for (var i = 0; i < 12; ++i) if (nhGet(i) !== NH_CAP[i]) p['b' + i] = hx(nhGet(i));
+  cmd('navhdr', p);
+}
+// The human half of the loop. The panel cannot tell us what it drew, so the row is only
+// worth anything with a person's sentence attached to it.
+function nhNote() {
+  var what = prompt('What did the glass do?');
+  if (what === null) return;
+  var tb = el('nht').getElementsByTagName('tbody')[0];
+  var r = tb.insertRow(0);
+  r.insertCell(0).innerHTML = '<span class="k">' + el('nhpv').textContent.split('—')[0].trim() + '</span>';
+  r.insertCell(1).textContent = what;
+}
+
 function sty() { return { i0: el('ms0').value, i1: el('ms1').value }; }
 function styGet(which) { return parseInt(el(which ? 'ms1' : 'ms0').value, 16) & 255; }
 function stySet(which, v) {
@@ -993,6 +1081,7 @@ function poll() {
 load('tryzub');
 cLabels();
 stySync();
+nhBuild();
 iconChips();
 poll();
 setInterval(poll, 1500);
