@@ -442,11 +442,17 @@
 #  error "AffaDisplay: AFFA_MAX_EXTERNAL_PAYLOAD > 4095 exceeds the 12-bit ISO-TP length field."
 #endif
 
-// RX ring slots; power of two (static_assert in AffaRing). 32 tolerates a ~7 ms gap between
-// poll() calls on a saturated 500 kbit/s bus. Too small: ringOverflow climbs, ACKs are lost,
-// sends time out and sync flaps.
+// RX ring slots in CanCommonLink. 64 tolerates a ~14 ms gap between poll() calls on a
+// saturated 500 kbit/s bus. Too small: ringOverflow climbs, ACKs are lost, sends time out
+// and sync flaps.
+//
+// IT DID NOT DO ANYTHING UNTIL 2026-08-08, and the comment here was worse than useless: it
+// said 32, it said tunable, and the ring was a hard-coded `kRing = 64` inside
+// CanCommonLink.h. Nothing read this macro. Anyone who lowered it to save RAM, or raised it
+// after seeing ringOverflow climb, changed nothing and went looking for the fault somewhere
+// real. The default is 64 rather than 32 because 64 is what has actually been running.
 #ifndef AFFA_RX_RING_DEPTH
-#  define AFFA_RX_RING_DEPTH 32
+#  define AFFA_RX_RING_DEPTH 64
 #endif
 
 // Per-frame ACK deadline. 2000 matches the legacy blocking wait, so panel timing is

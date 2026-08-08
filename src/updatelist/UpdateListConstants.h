@@ -176,28 +176,6 @@ inline constexpr uint8_t kChanMaxDigit = 9;
 // cells of its "old text" field. `AUX` there is the whole of the extracted heuristic.
 inline constexpr uint8_t kAuxProbeOffset = 5;
 
-// ---------------------------------------------------------------------------
-// AMS key-forwarding feedback  [CODE] UpdateListBase::ProcessKey
-// ---------------------------------------------------------------------------
-// The banner is exactly kOldCells wide so it fills the segment display and neither field
-// is truncated. Both strings are 8 characters; do not shorten one of them.
-inline constexpr char kAmsOnText[]  = "AMS  ON ";
-inline constexpr char kAmsOffText[] = "AMS OFF ";
-static_assert(sizeof(kAmsOnText)  == kOldCells + 1, "AMS banner must be 8 characters");
-static_assert(sizeof(kAmsOffText) == kOldCells + 1, "AMS banner must be 8 characters");
-
-// The legacy code sent the banner three times with delay(100) between them, so it would
-// survive the next scroll step. The repeat count and the spacing are preserved; the
-// blocking is not — poll() advances the schedule against IClock.
-inline constexpr uint8_t  kAmsRepeats    = 3;
-inline constexpr uint32_t kAmsRepeatMs   = 100;
-
-// ---------------------------------------------------------------------------
-// Title scroll  [CODE] UpdateListDisplay::tickMedia
-// ---------------------------------------------------------------------------
-inline constexpr uint8_t  kScrollWidth   = 8;    // the 8-segment display width
-inline constexpr uint32_t kScrollStepMs  = 400;  // ms per one-character step
-inline constexpr uint8_t  kScrollGap     = 8;    // blank cells appended before wrap-around
 
 }  // namespace updatelist
 }  // namespace affa

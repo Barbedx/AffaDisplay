@@ -167,7 +167,10 @@ class CanCommonLink final : public ICanLink {
   // updates are the only shared state and each is written by exactly one side, so this needs
   // no lock — which matters, because taking one on the driver's task is how a receive path
   // starts dropping frames under load.
-  static constexpr uint8_t kRing = 64;
+  // The knob, not a literal: AFFA_RX_RING_DEPTH used to document this number and size
+  // nothing. See AffaConfig.h.
+  static constexpr uint8_t kRing = AFFA_RX_RING_DEPTH;
+  static_assert(kRing >= 8, "an RX ring below 8 drops frames on any real bus");
   struct Rec { uint32_t id; uint8_t len; bool ext; uint8_t d[8]; };
   struct Ring {
     Rec              slot[kRing];

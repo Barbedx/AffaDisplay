@@ -367,54 +367,6 @@ void test_a_malformed_key_frame_is_not_acknowledged(void) {
 }
 
 // ---------------------------------------------------------------------------
-// The AMS banner: the delay(100) loop, unwound
-// ---------------------------------------------------------------------------
-
-void test_ams_banner_is_three_renders_100ms_apart(void) {
-  // Legacy: `for (i = 0; i < 3; i++) { setText(msg); delay(100); }`. Same three renders,
-  // same spacing, no delay — a repeat count plus a deadline advanced from onPoll().
-  SegRig r;
-  r.up();
-  r.d.onKey(&countKey, nullptr);
-  g_keys = 0;
-
-  TEST_ASSERT_TRUE(r.d.amsKeysEnabled());
-  ASSERT_RESULT(Ok, r.d.pressKey(Key::Load, KeyEdge::Hold, KeySource::Local));
-  TEST_ASSERT_FALSE_MESSAGE(r.d.amsKeysEnabled(), "hold-Load toggles AMS forwarding");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_keys, "the gesture belongs to the panel, not the app");
-
-  int banners = 0;
-  for (int step = 0; step < 6; ++step) {
-    pump(r.d, 24);                       // more than enough to drain one 4-frame render
-    Frame f;
-    while (r.link.takeSent(f)) {
-      if (f.data[0] == 0x10 && f.data[2] == 0x76) ++banners;
-    }
-    r.clk.advance(100);
-  }
-  TEST_ASSERT_EQUAL_INT_MESSAGE(3, banners, "exactly three banner renders, 100 ms apart");
-}
-
-void test_ams_disabled_suppresses_the_fall_through(void) {
-  // The extracted semantic, and the whole point of the switch. Layer 0 and Layer 1 still
-  // see the raw frames; only the decoded fall-through is suppressed.
-  SegRig r;
-  r.up();
-  r.d.onKey(&countKey, nullptr);
-
-  g_keys = 0;
-  r.link.inject(mk(0x0A9, {0x03, 0x89, 0x00, 0x05, 0xA3, 0xA3, 0xA3, 0xA3}));
-  r.d.poll();
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_keys, "forwarding is ON by default");
-
-  r.d.setAmsKeysEnabled(false);
-  g_keys = 0;
-  r.link.inject(mk(0x0A9, {0x03, 0x89, 0x00, 0x05, 0xA3, 0xA3, 0xA3, 0xA3}));
-  r.d.poll();
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_keys, "disabled means the key does not reach KeyCb");
-}
-
-// ---------------------------------------------------------------------------
 // Capability honesty
 // ---------------------------------------------------------------------------
 
@@ -448,10 +400,8 @@ int main(int, char**) {
   RUN_TEST(test_segment_setText_is_four_frames);
   RUN_TEST(test_segment_setText_channel_byte_follows_the_digit);
   RUN_TEST(test_segment_setText_pads_both_fields_with_NUL);
-    RUN_TEST(test_the_wire_carries_twelve_cells_but_the_panel_only_promises_eight);
+  RUN_TEST(test_the_wire_carries_twelve_cells_but_the_panel_only_promises_eight);
   RUN_TEST(test_a_malformed_key_frame_is_not_acknowledged);
-  RUN_TEST(test_ams_banner_is_three_renders_100ms_apart);
-  RUN_TEST(test_ams_disabled_suppresses_the_fall_through);
   RUN_TEST(test_unsupported_operations_report_rather_than_no_op);
   return UNITY_END();
 }

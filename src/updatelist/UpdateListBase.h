@@ -1,6 +1,13 @@
 // Everything the AFFA2 family shares below the text encoding: the SyncProfile and function
-// table (0x121, 0x1B1), setPower's 0x1B1 payload, the 0x0A9 key channel, the 0x121 inbound
-// radio-text sniff, and the AMS key-forwarding gesture with its non-blocking feedback.
+// table (0x121, 0x1B1), setPower's 0x1B1 payload, the 0x0A9 key channel and the 0x121 inbound
+// radio-text sniff.
+//
+// THE AMS GESTURE WAS HERE AND IS GONE, 2026-08-08. It decided that hold-Load meant "toggle
+// whether keys reach the application", swallowed that key so the app never saw it, chose the
+// words "AMS  ON" / "AMS OFF", rendered them itself three times 100 ms apart, and then told
+// the application to hold off drawing for 300 ms. That is a product decision end to end, and
+// this library is a transport. The keys reach onKey(); what a gesture means is the
+// application's to decide, in about ten lines.
 //
 // ABSTRACT ON PURPOSE — no setText and no supports(). The two concrete panels differ in
 // exactly the text encoding, and a base answering supports(Feature::Text) == true while
@@ -28,22 +35,6 @@ class UpdateListBase : public AffaDisplayBase {
   // never coalesces against a text render. Asynchronous, like every render call.
   Submitted setPower(bool on) override;
 
-  // ---- AMS key forwarding -------------------------------------------------
-  // "Hold Load toggles whether wheel keys reach the application, and the panel says so" —
-  // UI policy, so it ships on as a replaceable default.
-  //
-  // While forwarding is DISABLED, decoded keys other than the toggle gesture are dropped
-  // before KeyCb and before EventKind::Key. Layer 0 (onFrame tap) and Layer 1 (subscribe)
-  // still see the raw 0x0A9 frames, so nothing becomes unobservable.
-  void setAmsHotkey(Key k, KeyEdge e);         // default: Key::Load, KeyEdge::Hold
-  void clearAmsHotkey();                       // no gesture toggles; forwarding is fixed
-  bool amsHotkey(Key& k, KeyEdge& e) const;    // false when cleared
-
-  bool amsKeysEnabled() const { return _amsEnabled; }
-  // Silent: sets the state without drawing the banner. The GESTURE draws the banner;
-  // a programmatic change is the application's to announce (or not).
-  void setAmsKeysEnabled(bool on) { _amsEnabled = on; }
-
  protected:
   uint8_t  packetFiller() const override { return updatelist::kFiller; }
   uint16_t keyTxId()      const override { return updatelist::kIdKeyPressed; }
@@ -56,47 +47,18 @@ class UpdateListBase : public AffaDisplayBase {
   // frame on 0x0A9 — including the panel's own `70` registration probe — is.
   bool shouldAutoAck(const Frame& f) const override;
 
-  // Applies the AMS policy, then chains to AffaDisplayBase::routeKey. It suppresses the
-  // fall-through only for the toggle gesture and for keys arriving while forwarding is
-  // disabled; anything else reaches the base untouched.
-  void routeKey(Key k, KeyEdge e) override;
-
-  // Advances the AMS banner repeat schedule. A subclass that overrides onPoll() MUST
-  // call this first — UpdateListDisplay does.
-  void onPoll() override;
-
 
   // Called when another node (the radio) transmits the segment text encoding on 0x121.
   // `isAux` is a heuristic and nothing more: the first three cells of the sender's "old
   // text" field spell AUX. Exists for the one library-side reaction that is a panel
   // concern — re-asserting our own content after someone else overwrote it.
 
-  // True while the banner owns the screen: from the gesture until kAmsRepeats *
-  // kAmsRepeatMs has elapsed. A renderer that would overwrite it must hold off for exactly
-  // that window (the legacy delay(100) loop did this by blocking).
-  bool amsFeedbackPending() const { return !expired(_clock.millis(), _amsHoldUntilMs); }
-
   // Shared capability table; the two concrete panels differ in no Feature, only in bytes.
   static bool familySupports(Feature f);
 
   // enqueue() + the Result mapping every render call in this family repeats.
   Submitted enqueueRender(uint16_t funcId, const uint8_t* data, uint8_t len,
-                                     RenderSlot slot);
-
- private:
-  void scheduleAmsBanner();
-
-  bool     _amsEnabled     = true;
-  bool     _amsHotkeyOn    = true;
-  Key      _amsHotkey      = Key::Load;
-  KeyEdge  _amsHotkeyEdge  = KeyEdge::Hold;
-
-  // Per-instance, never file-static: in a library that is shared state between two
-  // displays on two buses.
-  const char* _amsBanner      = nullptr;  // string literal; no ownership, no copy
-  uint8_t     _amsRepeatsLeft = 0;
-  uint32_t    _amsNextMs      = 0;
-  uint32_t    _amsHoldUntilMs = 0;        // banner owns the screen until this deadline
+                          RenderSlot slot);
 };
 
 }  // namespace affa

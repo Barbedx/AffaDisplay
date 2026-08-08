@@ -14,15 +14,7 @@ constexpr const char* kTag = "UL";
 using namespace updatelist;
 
 UpdateListBase::UpdateListBase(ICanLink& link, IClock& clock)
-    : AffaDisplayBase(link, clock, kSync, kFuncIds, kFuncCount) {
-  // Arm the banner deadlines on the CLOCK'S epoch rather than on zero. Every comparison
-  // in this library is wrap-safe against a 32-bit difference, which means a literal zero
-  // is only a safe initial value while millis() is below 2^31 — true on a fresh boot and
-  // not true for an object constructed after 24.8 days of uptime, where an unarmed
-  // deadline would read as "still pending" and hold the marquee off.
-  _amsNextMs      = clock.millis();
-  _amsHoldUntilMs = _amsNextMs;
-}
+    : AffaDisplayBase(link, clock, kSync, kFuncIds, kFuncCount) {}
 
 // ---------------------------------------------------------------------------
 // Capability
@@ -130,66 +122,6 @@ bool UpdateListBase::onFrame(const Frame& f) {
 // Keys
 // ---------------------------------------------------------------------------
 
-void UpdateListBase::setAmsHotkey(Key k, KeyEdge e) {
-  _amsHotkey = k; _amsHotkeyEdge = e; _amsHotkeyOn = true;
-}
-void UpdateListBase::clearAmsHotkey() { _amsHotkeyOn = false; }
-bool UpdateListBase::amsHotkey(Key& k, KeyEdge& e) const {
-  if (!_amsHotkeyOn) return false;
-  k = _amsHotkey; e = _amsHotkeyEdge;
-  return true;
-}
-
-void UpdateListBase::routeKey(Key k, KeyEdge e) {
-  if (_amsHotkeyOn && k == _amsHotkey && e == _amsHotkeyEdge) {
-    _amsEnabled = !_amsEnabled;
-    AFFA_LOGI(kTag, "AMS key forwarding %s", _amsEnabled ? "enabled" : "disabled");
-    scheduleAmsBanner();
-    return;   // the gesture belongs to the panel, not to the application
-  }
-
-  if (!_amsEnabled) return;   // forwarding suppressed — the whole point of the switch
-
-  AffaDisplayBase::routeKey(k, e);
-}
-
-// ---------------------------------------------------------------------------
-// AMS banner — the delay(100) loop, unwound
-// ---------------------------------------------------------------------------
-// Legacy: `for (i = 0; i < 3; i++) { setText(msg); delay(100); }`. Three renders 100 ms
-// apart so the banner outlives the next scroll step. Same three renders, same spacing,
-// no delay: a repeat count plus a deadline, advanced from onPoll(). The first one goes
-// out on the very next poll rather than immediately, which keeps every transmit in this
-// library on one path.
-
-void UpdateListBase::scheduleAmsBanner() {
-  const uint32_t now = _clock.millis();
-  _amsBanner      = _amsEnabled ? kAmsOnText : kAmsOffText;
-  _amsRepeatsLeft = kAmsRepeats;
-  _amsNextMs      = now;   // due now: emitted by this poll's onPoll()
-  // The banner owns the screen for the whole of what the blocking loop occupied, and NOT
-  // merely until the last send is queued: without the trailing interval the scroll would
-  // redraw in the same poll() pass that emitted repeat 3 and the banner would never be
-  // seen at all.
-  _amsHoldUntilMs = now + static_cast<uint32_t>(kAmsRepeats) * kAmsRepeatMs;
-}
-
-void UpdateListBase::onPoll() {
-  if (_amsRepeatsLeft == 0) return;
-
-  const uint32_t now = _clock.millis();
-  if (!expired(now, _amsNextMs)) return;
-
-  // `= now + interval`, never `+= interval`: a caller that stalled must not produce a
-  // catch-up burst of banners.
-  _amsNextMs = now + kAmsRepeatMs;
-  --_amsRepeatsLeft;
-
-  // Virtual: the concrete panel owns the encoding. Its Result is deliberately dropped —
-  // a banner that could not be queued (no sync yet, queue full) is cosmetic, and the
-  // remaining repeats will try again.
-  (void)setText(_amsBanner, 255);
-}
 
 }  // namespace affa
 
