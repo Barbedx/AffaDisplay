@@ -1,26 +1,39 @@
-// The AFFA2 panel — BOTH GLASSES, one class.
+// The AFFA2 / UpdateList panel — ONE encoding, every glass.
 //
-// Same bus, same ids, same sync, same keys, same registration. The only thing that differs
-// between the eight-segment display and the LCD is the setText HEADER, and it is a header
-// and not a width:
+// The eight-segment display and the wider LCD are DIFFERENT GLASS ON THE SAME BUS, and the
+// radio does not know which one is out there. It emits one frame and each panel renders what
+// it can: the segment shows eight cells, the LCD shows all twelve. Nothing in a SENDER can
+// branch on a fact the sender is never told.
 //
-//   segment  10 19 76 <chan> 01           old(8) 10 new(12) 00 81 81    29 bytes
-//   LCD      10 1C 7F 55 55 FF 60 03      old(8) 10 new(12) 00          30 bytes
+// This is a correction, and the evidence is worth keeping because the mistake was mine.
+// I previously shipped two encodings as two "glasses":
 //
-// `0x76` is the text-only variant of the command and `0x7F` is text-plus-icons, so the LCD
-// form carries three icon bytes the segment form has no room for. THE TEXT FIELDS ARE
-// IDENTICAL — both carry an 8-cell "old" and a 12-cell "new" — which is what makes one
-// builder possible; the headers are what stop it being one encoding.
+//   0x76 form   10 19 76 <chan> 01           old(8) 10 new(12) 00 81 81    29 bytes
+//   0x7F form   10 1C 7F 55 55 FF 60 03      old(8) 10 new(12) 00          30 bytes
 //
-// WHY A CONSTRUCTOR ARGUMENT AND NOT A SUBCLASS. UpdateListMenuDisplay was a whole file and
-// a build gate (AFFA_PANEL_UPDATELIST_MENU) to override exactly one method, and its name
-// lied: nothing about it was a menu. A variant that differs by eight header bytes is data,
-// not a type.
+// BYTE [2] IS A FLAVOUR, NOT A PANEL SELECTOR. Three values have been seen in that one
+// position across independent projects — 0x76, 0x7E and 0x7F — and both the 0x76 and the
+// 0x7F forms have been driven into UpdateList displays by separate people:
 //
-// AND THE TWO ENCODINGS ARE NOT MERGED, deliberately. Picking one for both panels would mean
-// choosing an encoding we can only test on one of them: the segment glass is bench-verified,
-// the LCD has never been on a bench here. Breaking a proven family for an unproven one is the
-// wrong direction to be wrong in, so both byte sequences stay exactly as captured.
+//   0x76  abecikxp/RenaultUpdateListDisplay lcd.ino, data[2]=0x76, and OUR bench panel
+//   0x7E  hackaday.io/project/27439 part 2, "0x10, 0x19, ~, q, 0x01"  (~ = 0x7E, q = 0x71)
+//   0x7F  hackaday.io/project/27439 part 3, "121 ... 10:1C:7F:55:55:3F:60:01", the author's
+//         own board driving the display with no Renault radio attached
+//
+// So the split was never segment-versus-LCD. 0x7F is the TEXT-PLUS-ICONS flavour of the same
+// command, which is why it carries three extra bytes.
+//
+// WHY THE 0x7F FORM IS GONE RATHER THAN KEPT AS AN OPTION:
+//   - it buys no capability we expose. This driver has never set an icon, so both flavours
+//     put the same characters on the same glass;
+//   - our copy of it was [REF] — reconstructed from archive affa3 source, never transmitted
+//     from here — and the ONE real capture of it disagrees with our bytes in two places:
+//     [5] was 0x3F where we wrote 0xFF, [7] was 0x01 where we wrote 0x03;
+//   - the 0x76 form is bench-verified here and shipping in an independent project.
+//
+// Eight header bytes of unproven, uncapturable, capability-free risk are not a feature.
+// If icons are ever exposed, the flavour comes back as an ICON argument with the capture's
+// bytes, not as a panel type. docs/WIRE-SPEC.md §9.2 keeps the record.
 #pragma once
 #include "../AffaConfig.h"
 #if AFFA_PANEL_UPDATELIST
@@ -29,44 +42,28 @@
 
 namespace affa {
 
-// WHICH GLASS is on the bus. Chosen at construction because it is a property of the
-// hardware, not a mode: no panel turns into the other one at runtime.
-enum class UpdateListGlass : uint8_t {
-  Segment = 0,   // eight segment cells. Bench-verified 2026-08-04.
-  Lcd     = 1,   // the wider LCD. Golden vectors only — no hardware here has ever seen it.
-};
-
 class UpdateListDisplay : public UpdateListBase {
  public:
-  explicit UpdateListDisplay(ICanLink& link, IClock& clock,
-                             UpdateListGlass glass = UpdateListGlass::Segment)
-      : UpdateListBase(link, clock), _glass(glass) {}
+  UpdateListDisplay(ICanLink& link, IClock& clock) : UpdateListBase(link, clock) {}
 
   bool supports(Feature f) const override { return familySupports(f); }
 
-  UpdateListGlass glass() const { return _glass; }
-
-  // WHAT REACHES THE GLASS, and it differs by variant. Both encodings carry a 12-cell "new"
-  // field and the panel shows it, but the segment display renders eight of those cells and
-  // the LCD renders all twelve — so a caller fitting text has to ask, which is exactly what
-  // panelGeometry() is for.
+  // EIGHT, and it is a promise rather than a measurement.
   //
-  // Everything else is zero: this family has no menu window, no info rows and no image
-  // layer, and the zeros say so. A fitter written against Carminat's 26-character rows
-  // produces nothing either of these panels can show.
+  // The frame always carries a 12-cell "new text" field, so a wider glass shows more for
+  // free — but the sender cannot tell which glass answered, and eight cells are what every
+  // panel in this family is known to render. A fitter that trusts 12 produces text the
+  // segment display silently truncates; one that trusts 8 is correct everywhere.
+  //
+  // The rest is zero: no menu window, no info rows, no image layer, and the zeros say so.
   PanelGeometry panelGeometry() const override {
     PanelGeometry g;
-    g.mainChars = (_glass == UpdateListGlass::Lcd) ? updatelist::kNewCells    // 12
-                                                   : updatelist::kOldCells;   // 8
+    g.mainChars = updatelist::kOldCells;   // 8 — guaranteed visible, not the field width
     return g;
   }
 
-  // 0x121. `digit` selects the channel on the SEGMENT encoding: 0..9 -> 0x70 + digit,
-  // anything else (255, the default) -> 0x7A, "no channel".
-  //
-  // IT IS IGNORED ON THE LCD, whose header carries a fixed 0x60 channel byte instead. The
-  // parameter stays in the signature because it is IDisplay's and IPanel's, and dropping it
-  // would break the one-override-satisfies-both-bases arrangement AffaDisplayBase depends on.
+  // 0x121. `digit` selects the channel: 0..9 -> 0x70 + digit, anything else (255, the
+  // default) -> 0x7A, "no channel".
   //
   // Enqueued on RenderSlot::Text, so a repeated render supersedes a queued one instead of
   // stacking behind it.
@@ -77,9 +74,6 @@ class UpdateListDisplay : public UpdateListBase {
   // capture and every golden vector in docs/WIRE-SPEC.md shows 0x00 there; do not "fix"
   // this to spaces.
   static void copyCells(const char* src, uint8_t* dst, uint8_t cells);
-
- private:
-  UpdateListGlass _glass;
 };
 
 }  // namespace affa

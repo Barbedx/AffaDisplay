@@ -11,18 +11,15 @@ namespace affa {
 using namespace updatelist;
 
 // ---------------------------------------------------------------------------
-// setText — ONE BUILDER, TWO HEADERS, 0x121   docs/WIRE-SPEC.md §9.1 and §9.2
+// setText — ONE ENCODING, 0x121   docs/WIRE-SPEC.md §9.1
 // ---------------------------------------------------------------------------
-//   segment  10 19 76 <chan> 01           old(8) 10 new(12) 00 81 81   29 B, 4 frames, PCI 0x23
-//   LCD      10 1C 7F 55 55 FF 60 03      old(8) 10 new(12) 00         30 B, 5 frames, PCI 0x24
+//   10 19 76 <chan> 01 old(8) 10 new(12) 00 81 81      29 B, 4 frames, PCI 0x23
 //
-// The tail from `old(8)` onwards is IDENTICAL, which is why this is one function; everything
-// before it is the variant. Both declared lengths are correct and neither is the other plus
-// three: they cover different amounts of content.
+// Sent to every glass in the family. The header does not describe the panel; see the class
+// comment for why the second "LCD" encoding was a misreading and is gone.
 //
-// The segment form's two trailing 0x81 are PAYLOAD bytes the builder emits, not transport
-// filler — they sit outside the declared 0x19 and are reproduced because that is what the
-// panel has been accepting.
+// The two trailing 0x81 are PAYLOAD bytes the builder emits, not transport filler — they sit
+// outside the declared 0x19 and are reproduced because that is what the panel accepts.
 
 void UpdateListDisplay::copyCells(const char* src, uint8_t* dst, uint8_t cells) {
   uint8_t i = 0;
@@ -42,45 +39,28 @@ Submitted UpdateListDisplay::setText(const char* text, uint8_t digit) {
   char t[AFFA_TEXT_MAX];
   toAscii(text, t, sizeof(t));
 
-  // The larger of the two, so one buffer serves both variants.
-  uint8_t d[kLcdPayload];
+  uint8_t d[kSegPayload];
   uint8_t n = 0;
 
-  if (_glass == UpdateListGlass::Lcd) {
-    d[n++] = kCmdSetText;                               // 0x10
-    d[n++] = kLcdFfDl;                                  // 0x1C = 28 content bytes
-    d[n++] = kLcdFixed;                                 // 0x7F text + icons
-    d[n++] = kLcdIcons;                                 // 0x55 NO_TRAFFIC|NO_NEWS|...
-    d[n++] = kLcdIconSep;                               // 0x55 literal separator
-    d[n++] = kLcdIconMode;                              // 0xFF ICON_MODE_NONE
-    d[n++] = kLcdChannel;                               // 0x60 — `digit` has no place here
-    d[n++] = kLcdLocation;                              // 0x03 LOCATION(0,0)|SEL|FULLSCR
-  } else {
-    d[n++] = kCmdSetText;                               // 0x10
-    d[n++] = kSegFfDl;                                  // 0x19 = 25 content bytes
-    d[n++] = kSegTextType;                              // 0x76 text only
-    d[n++] = (digit <= kChanMaxDigit)                   // channel
-                 ? static_cast<uint8_t>(kChanBase + digit)
-                 : kChanNone;
-    d[n++] = kSegLocation;                              // 0x01
-  }
+  d[n++] = kCmdSetText;                                 // 0x10
+  d[n++] = kSegFfDl;                                    // 0x19 = 25 content bytes
+  d[n++] = kSegTextType;                                // 0x76 text only
+  d[n++] = (digit <= kChanMaxDigit)                     // channel
+               ? static_cast<uint8_t>(kChanBase + digit)
+               : kChanNone;
+  d[n++] = kSegLocation;                                // 0x01
 
-  // IDENTICAL FROM HERE, both variants. This is the whole reason the two are one function.
+  // BOTH fields go out in full. The segment glass renders the first eight cells of `new`
+  // and a wider one renders all twelve, which is exactly why there is nothing to branch on.
   copyCells(t, &d[n], kOldCells);  n = static_cast<uint8_t>(n + kOldCells);
   d[n++] = kTextSep;                                    // 0x10
   copyCells(t, &d[n], kNewCells);  n = static_cast<uint8_t>(n + kNewCells);
   d[n++] = kTextTerm;                                   // 0x00
-
-  if (_glass != UpdateListGlass::Lcd) {
-    d[n++] = kFiller;                                   // 0x81, outside the declared len
-    d[n++] = kFiller;                                   // 0x81
-  }
+  d[n++] = kFiller;                                     // 0x81, outside the declared len
+  d[n++] = kFiller;                                     // 0x81
 
   static_assert(5 + kOldCells + 1 + kNewCells + 3 == kSegPayload,
-                "segment setText payload is 29 bytes (WIRE-SPEC §9.1)");
-  static_assert(8 + kOldCells + 1 + kNewCells + 1 == kLcdPayload,
-                "LCD setText payload is 30 bytes (WIRE-SPEC §9.2)");
-  static_assert(kLcdPayload >= kSegPayload, "the buffer must hold the larger variant");
+                "setText payload is 29 bytes (WIRE-SPEC §9.1)");
   return enqueueRender(kIdSetText, d, n, RenderSlot::Text);
 }
 

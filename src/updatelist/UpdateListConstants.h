@@ -141,9 +141,10 @@ inline constexpr uint8_t kTextTerm     = 0x00;  // terminator
 // 0x19 = 25 declared content bytes, covering data[2..26]: CORRECT, and the trailing two
 // 0x81 sit outside it. Frames: 1 + ceil(21/7) = 4, last PCI 0x23.
 inline constexpr uint8_t kSegFfDl      = 0x19;
-inline constexpr uint8_t kSegTextType  = 0x76;  // text-only variant; 0x7F is text+icons
-                                                // and this driver never emits it, so
-                                                // icon control is NOT a capability here
+inline constexpr uint8_t kSegTextType  = 0x76;  // FLAVOUR, not panel type. 0x7E and 0x7F
+                                                // occupy the same position elsewhere; see
+                                                // the note below. 0x76 is text-only and is
+                                                // the one this driver is proven on.
 inline constexpr uint8_t kSegLocation  = 0x01;  // LOCATION(0,0) | SELECTED
 inline constexpr uint8_t kSegPayload   = 29;
 
@@ -152,18 +153,21 @@ inline constexpr uint8_t kChanBase     = 0x70;
 inline constexpr uint8_t kChanNone     = 0x7A;
 inline constexpr uint8_t kChanMaxDigit = 9;
 
-// -- LCD (UpdateListGlass::Lcd) ------------------------------------------------
-//   10 1C 7F 55 55 FF 60 03 old(8) 10 new(12) 00                       30 bytes
-// 0x1C = 28 declared content bytes, covering data[2..29]: also correct. Frames:
-// 1 + ceil(22/7) = 5, last PCI 0x24 carrying one byte and six filler.
-inline constexpr uint8_t kLcdFfDl     = 0x1C;
-inline constexpr uint8_t kLcdFixed    = 0x7F;
-inline constexpr uint8_t kLcdIcons    = 0x55;  // NO_TRAFFIC|NO_NEWS|NO_AFRDS|NO_MODE [REF]
-inline constexpr uint8_t kLcdIconSep  = 0x55;  // literal separator, not a second icon set
-inline constexpr uint8_t kLcdIconMode = 0xFF;  // AFFA3_ICON_MODE_NONE [REF]
-inline constexpr uint8_t kLcdChannel  = 0x60;  // LCD channel encoding is 0x60 | chan
-inline constexpr uint8_t kLcdLocation = 0x03;  // LOCATION(0,0) | SELECTED | FULLSCREEN
-inline constexpr uint8_t kLcdPayload  = 30;
+// -- THE 0x7F "text + icons" FLAVOUR — documented, not emitted, no constants --
+//   10 1C 7F 55 55 3F 60 01 old(8) 10 new(12) 00                       30 bytes  [CAP]
+//
+// The same command carrying icon bytes where 0x76 carries a channel byte. Captured on
+// hackaday.io project 27439 part 3, driving an UpdateList display with NO Renault radio
+// attached — so it is not a different panel's dialect, it is a different thing to say to
+// the same panel. Part 2 of that project shows a third value, 0x7E, in the same position.
+//
+// It used to live here as an "LCD panel type" with [REF] bytes reconstructed from archive
+// affa3 source. The capture above contradicts those at [5] — 0x3F, where we wrote 0xFF —
+// and at [7] — 0x01, where we wrote 0x03. It was never transmitted from this codebase.
+//
+// NO CONSTANTS, deliberately: this driver sets no icons, so the flavour puts the same
+// characters on the same glass as 0x76 while carrying eight unverified header bytes. When
+// icons become a real argument, they come back with the CAPTURED bytes, and a bench.
 
 // ---------------------------------------------------------------------------
 // Inbound radio text — 0x121  [CAP] docs/WIRE-SPEC.md §9.6

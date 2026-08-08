@@ -1414,7 +1414,7 @@ appears: it separates radio-style formats (`0x19`-`0x3F`) from plain ASCII (`0x5
 
 ## 9. UpdateList operations
 
-### 9.1 `setText(const char* text, uint8_t digit)` — segment encoding, `0x121`
+### 9.1 `setText(const char* text, uint8_t digit)` — the only encoding, `0x121`
 
 The 8+12 "old text / new text" segment encoding.
 
@@ -1452,32 +1452,55 @@ RX  521  30 01 00 ..  30 01 00 ..  30 01 00 ..  74 ..
 > element 0 to a space and the rest to `0`; `strncpy` then NUL-pads. Both fields are
 > **NUL**-padded on the wire, never space-padded.
 
-### 9.2 `setText(const char* text, uint8_t)` — LCD encoding, `0x121`
+### 9.2 The `0x7F` "text + icons" flavour — documented, **not emitted**
 
-`UpdateListMenuDisplay` overrides `setText` with the icons variant from the archive affa3
-library (`affa3_do_set_text` style). `digit` is ignored. Payload, 30 bytes:
+This section used to describe a second *panel*: an "LCD encoding" that `UpdateListMenuDisplay`
+sent instead of §9.1. **That was a misreading, and the driver no longer has it.**
 
-| Offset | Byte(s) | Meaning |
+Byte `[2]` is a **command flavour**, not a panel selector. Three values have been observed in
+that one position, and both the `0x76` and `0x7F` forms have been driven into UpdateList
+displays by independent people:
+
+| `[2]` | Where | What was driving |
+|---|---|---|
+| `0x76` | `abecikxp/RenaultUpdateListDisplay` `lcd/lcd.ino`, `data[2] = 0x76` — and **our bench panel**, `captures/golden-wire-2026-08-04.txt` | a homebrew board |
+| `0x7E` | hackaday.io project 27439 part 2: *"a fixed sequence of 5 bytes (0x10, 0x19, ~, q, 0x01)"* — `~` = `0x7E`, `q` = `0x71` | the OEM radio |
+| `0x7F` | hackaday.io project 27439 part 3: `FRAME 121 :ID=289: LEN=8:10:1C:7F:55:55:3F:60:01` | the author's own board, **with no Renault radio attached** |
+
+So one radio serves every glass in this family. The segment display renders eight cells of
+the 12-cell `new text` field and a wider one renders all twelve — the sender never learns
+which, and never needs to.
+
+The `0x7F` form, for the record:
+
+```
+10 1C 7F 55 55 3F 60 01  old(8) 10 new(12) 00                        30 bytes
+```
+
+| Offset | Byte | Meaning |
 |---|---|---|
 | 0 | `0x10` | ISO-TP first frame |
-| 1 | `0x1C` | declared content length = 28 — **correct**, covers `data[2..29]` |
-| 2 | `0x7F` | fixed |
-| 3 | `0x55` | icons: NO_TRAFFIC \| NO_NEWS \| NO_AFRDS \| NO_MODE |
-| 4 | `0x55` | literal separator |
-| 5 | `0xFF` | icon mode = NONE |
-| 6 | `0x60` | channel 0 (LCD encoding is `0x60 \| chan`) |
-| 7 | `0x03` | `LOCATION(0,0) \| SELECTED \| FULLSCREEN` |
+| 1 | `0x1C` | declared content length = 28, covers `data[2..29]` — correct |
+| 2 | `0x7F` | flavour: text **plus icons** |
+| 3 | `0x55` | icons: NO_TRAFFIC \| NO_NEWS \| NO_AFRDS \| NO_MODE `[REF]` |
+| 4 | `0x55` | literal separator, not a second icon set `[REF]` |
+| 5 | `0x3F` | icon mode — **`[CAP]`; the driver used to send `0xFF`, from source only** |
+| 6 | `0x60` | channel (`0x60 \| chan` here, not `0x70 + digit`) |
+| 7 | `0x01` | location — **`[CAP]`; the driver used to send `0x03`** |
 | 8..15 | `oldBuf[0..7]` | 8-cell "old text" |
 | 16 | `0x10` | separator |
 | 17..28 | `newBuf[0..11]` | 12-cell "new text" |
 | 29 | `0x00` | terminator |
 
-Here `oldBuf` / `newBuf` **are** correctly initialised to all spaces — but `strncpy` still
-NUL-pads, so the space initialisation only survives when the source string is at least 8
-(resp. 12) characters. In practice the fields are NUL-padded, same as §9.1.
+Frames: `L = 30` -> `1 + ceil(22/7) = 5`; tail frame carries 1 byte + 6 filler. Last PCI `0x24`.
 
-Frames: `L = 30` -> `1 + ceil(22/7) = 1 + 4 = 5`. Frames 1..3 carry 7 (21), total 29, tail
-frame carries 1 byte + 6 filler `0x81`. Last PCI `0x24`.
+> **Why it is gone rather than kept behind a flag.** It buys no capability this driver
+> exposes — we have never set an icon, so both flavours put the same characters on the same
+> glass. Our copy of it was `[REF]`, reconstructed from archive `affa3` source and **never
+> transmitted from this codebase**, and the two rows marked `[CAP]` above are where the only
+> real capture contradicts what we had. Eight unproven header bytes that add nothing are not
+> a feature; they are a way to break a working panel. When icons become a real argument they
+> come back with the captured bytes, and a bench.
 
 ### 9.3 `setState(bool enabled)` — `0x1B1`
 

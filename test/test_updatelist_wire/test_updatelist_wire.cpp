@@ -56,16 +56,6 @@ const Frame kSegHelloChan3[] = {
     {0x121, 8, {0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x81, 0x81}, false},
 };
 
-// LCD setText("MENU"): the 0x7F text-plus-icons form. Five frames, last PCI 0x24 carrying
-// one payload byte and six 0x81 of TRANSPORT filler.
-const Frame kLcdMenu[] = {
-    {0x121, 8, {0x10, 0x1C, 0x7F, 0x55, 0x55, 0xFF, 0x60, 0x03}, false},
-    {0x121, 8, {0x21, 0x4D, 0x45, 0x4E, 0x55, 0x00, 0x00, 0x00}, false},
-    {0x121, 8, {0x22, 0x00, 0x10, 0x4D, 0x45, 0x4E, 0x55, 0x00}, false},
-    {0x121, 8, {0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false},
-    {0x121, 8, {0x24, 0x00, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81}, false},
-};
-
 const Frame kSetStateEnable[] = {
     {0x1B1, 8, {0x04, 0x52, 0x02, 0xFF, 0xFF, 0x81, 0x81, 0x81}, false},
 };
@@ -87,9 +77,7 @@ struct Rig {
   affatest::FakeClock clk;
   Panel d;
 
-  // The glass reaches the panel constructor. It is one class for both variants now, so the
-  // two rigs differ by an argument rather than by a type.
-  explicit Rig(UpdateListGlass glass = UpdateListGlass::Segment) : d(link, clk, glass) {}
+  Rig() : d(link, clk) {}
 
   // THE OPENING, AS THIS FAMILY NOW RUNS IT. Two frames from the panel, not one.
   //
@@ -134,14 +122,10 @@ struct Rig {
   }
 };
 
-// ONE CLASS, TWO GLASSES — see UpdateListDisplay.h for why the LCD stopped being a subclass
-// and became an argument. The two rigs exist so a test can say which panel it means.
-struct SegRig : Rig<UpdateListDisplay> {
-  SegRig() : Rig(UpdateListGlass::Segment) {}
-};
-struct LcdRig : Rig<UpdateListDisplay> {
-  LcdRig() : Rig(UpdateListGlass::Lcd) {}
-};
+// ONE ENCODING, EVERY GLASS — see UpdateListDisplay.h. There used to be a second rig here
+// for an "LCD panel"; the byte that distinguished it turned out to be a command flavour and
+// not a panel type, so there is one rig because there is one thing to send.
+struct SegRig : Rig<UpdateListDisplay> {};
 
 int g_keys = 0;
 Key g_lastKey = Key::Load;
@@ -323,21 +307,38 @@ void test_segment_setText_pads_both_fields_with_NUL(void) {
   drain(r.link);
 }
 
-void test_lcd_setText_is_five_frames(void) {
-  LcdRig r;
+void test_the_wire_carries_twelve_cells_but_the_panel_only_promises_eight(void) {
+  // THE WHOLE ARGUMENT FOR ONE ENCODING, in one test.
+  //
+  // The radio cannot tell which glass answered, so it always sends the full 12-cell "new
+  // text" field: a wider display shows all of it, a segment display shows the first eight.
+  // panelGeometry() reports the GUARANTEED width, not the field width, because a fitter
+  // that trusts 12 writes text the segment panel silently truncates.
+  SegRig r;
   r.up();
-  ASSERT_RESULT(Ok, r.d.setText("MENU"));
-  pumpUntilIdle(r.d);
-  expectFrames(r.link, kLcdMenu, 5, "LCD setText(\"MENU\") — 30 bytes, last PCI 0x24");
-}
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(8, r.d.panelGeometry().mainChars,
+                                  "mainChars is the promise, not the field");
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(12, updatelist::kNewCells,
+                                  "…while the wire still carries twelve");
 
-void test_the_two_encodings_declare_different_lengths(void) {
-  // 0x19 covers data[2..26], 0x1C covers data[2..29]. It is NOT "0x19 + 3" by coincidence:
-  // the two encodings carry different amounts of content, and both length bytes are right.
-  TEST_ASSERT_EQUAL_HEX8(0x19, updatelist::kSegFfDl);
-  TEST_ASSERT_EQUAL_HEX8(0x1C, updatelist::kLcdFfDl);
-  TEST_ASSERT_EQUAL_UINT8(29, updatelist::kSegPayload);
-  TEST_ASSERT_EQUAL_UINT8(30, updatelist::kLcdPayload);
+  // And nothing else is claimed: no menu window, no info rows, no image layer.
+  TEST_ASSERT_EQUAL_UINT8(0, r.d.panelGeometry().menuRows);
+  TEST_ASSERT_EQUAL_UINT8(0, r.d.panelGeometry().infoRows);
+  TEST_ASSERT_EQUAL_UINT8(0, r.d.panelGeometry().listMaxItems);
+
+  ASSERT_RESULT(Ok, r.d.setText("ABCDEFGHIJKL"));
+  pumpUntilIdle(r.d);
+
+  // Frame 4 of 4 ends the 12-cell field: cells 9..12 are 'I','J','K','L', then the 0x00
+  // terminator and the two 0x81 payload bytes. If a "width" ever starts truncating the
+  // send, this is the assertion that catches it.
+  Frame f;
+  for (int i = 0; i < 3; ++i) TEST_ASSERT_TRUE(r.link.takeSent(f));
+  TEST_ASSERT_TRUE(r.link.takeSent(f));
+  const uint8_t kTail[8] = {0x23, 'I', 'J', 'K', 'L', 0x00, 0x81, 0x81};
+  TEST_ASSERT_EQUAL_HEX8_ARRAY_MESSAGE(kTail, f.data, 8,
+                                       "all twelve cells reach the bus");
+  drain(r.link);
 }
 
 // ---------------------------------------------------------------------------
@@ -447,8 +448,7 @@ int main(int, char**) {
   RUN_TEST(test_segment_setText_is_four_frames);
   RUN_TEST(test_segment_setText_channel_byte_follows_the_digit);
   RUN_TEST(test_segment_setText_pads_both_fields_with_NUL);
-  RUN_TEST(test_lcd_setText_is_five_frames);
-  RUN_TEST(test_the_two_encodings_declare_different_lengths);
+    RUN_TEST(test_the_wire_carries_twelve_cells_but_the_panel_only_promises_eight);
   RUN_TEST(test_a_malformed_key_frame_is_not_acknowledged);
   RUN_TEST(test_ams_banner_is_three_renders_100ms_apart);
   RUN_TEST(test_ams_disabled_suppresses_the_fall_through);

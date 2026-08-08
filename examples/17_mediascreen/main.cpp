@@ -718,6 +718,47 @@ Cmd dispatch(PsychicRequest* r) {
     if (!g_carminat) return fail("Carminat only");
     return fromResult(g_carminat->navTick(N("n",0) != 0));
   }
+
+  // THE NAV HEADER SWEEP — fourteen bytes, ten of them unmeasured.
+  //
+  // showNavBitmap() welded all fourteen into the builder, which is the same defect the list
+  // screen's gutter glyph and scrollbar had: a capability that does not exist as far as this
+  // library is concerned, because the byte that selects it is unreachable.
+  //
+  // WHY IT IS DRIVEN BY HAND, one step at a time. A scripted sweep is the obvious idea and it
+  // does not work here: the panel ACKs a screen it never lights, so 256 automated steps
+  // produce 256 rows of "ok" and no information. THE ORACLE IS A HUMAN LOOKING AT GLASS. So
+  // the console sends one value and logs exactly what went out; the operator supplies the one
+  // bit no machine on this bus has.
+  //
+  //   op=navhdr                    send the captured header (the baseline)
+  //   op=navhdr&b3=0x2E            send it with byte [3] changed
+  //   op=navhdr&b3=0x2E&b11=0x02   …or several at once, though ONE AT A TIME is the rule:
+  //                                three co-varying captures are what produced the "one icon
+  //                                field" misreading the list sweep took apart.
+  //
+  // [12] and [13] are the geometry and are refused: the declared ISO-TP length is computed
+  // from the 288-byte image, so a header claiming a different size describes a payload that
+  // is not there.
+  if (op == "navhdr") {
+    if (!g_carminat) return fail("Carminat only");
+    uint8_t hdr[sizeof(affa::carminat::kNavHeader)];
+    memcpy(hdr, affa::carminat::kNavHeader, sizeof(hdr));
+    for (uint8_t i = 0; i < sizeof(hdr) - 2; ++i) {     // 0..11; the geometry is fixed
+      char key[6];
+      snprintf(key, sizeof(key), "b%u", i);
+      if (r->hasParam(key)) hdr[i] = static_cast<uint8_t>(N(key, hdr[i]));
+    }
+    const affa::Submitted s =
+        g_carminat->showNavBitmapWithHeader(hdr, g_frame[g_drawInto ^ 1]);
+    // LOG THE BYTES, NOT THE VERDICT. "ok" is what the panel says about every one of these;
+    // what a sweep needs afterwards is which fourteen bytes produced which glass, in a form
+    // that pastes next to docs/captures/*.csv.
+    logmsg("navhdr %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+           hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5], hdr[6],
+           hdr[7], hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13]);
+    return fromResult(s);
+  }
   if (op == "opening") { g_open.done = false; g_open.step = 0; g_open.nextMs = ::millis();
                          return kOk; }
 

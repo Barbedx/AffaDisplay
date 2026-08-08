@@ -42,13 +42,17 @@
 #  define AFFA_PANEL_UPDATELIST 0      // UpdateList/AFFA2 8-segment: 0x3DF, 0x121 + 0x1B1
 #endif
 
-// AFFA_PANEL_UPDATELIST_MENU WAS HERE AND IS GONE, 2.0. It selected UpdateListMenuDisplay,
-// a subclass and a build gate that existed to override exactly ONE method — and whose name
-// lied, because nothing about it was a menu. The LCD is a constructor argument now:
+// AFFA_PANEL_UPDATELIST_MENU WAS HERE AND IS GONE, 2.0, and so is what replaced it.
 //
-//     affa::UpdateListDisplay lcd(link, clock, affa::UpdateListGlass::Lcd);
+// It selected UpdateListMenuDisplay: a subclass and a build gate that existed to override
+// exactly ONE method, whose name lied because nothing about it was a menu. I first demoted
+// it to a constructor argument (UpdateListGlass) and then deleted the distinction outright,
+// because the byte it branched on is a COMMAND FLAVOUR and not a panel type — 0x76, 0x7E and
+// 0x7F have all been seen in that position, and independent projects have driven both 0x76
+// and 0x7F into UpdateList displays.
 //
-// Not one byte on the wire moved: both headers are still built exactly as captured.
+// One radio, one frame, every glass. Use UpdateListDisplay and let the panel render what it
+// can; panelGeometry().mainChars reports the width that is guaranteed on all of them.
 
 // The dashboard cluster: a THIRD sync profile, transcribed from ONE capture and NEVER RUN
 // against hardware. It is NOT in AFFA_PANEL_DEFAULT_ALL and it is not on by any other
