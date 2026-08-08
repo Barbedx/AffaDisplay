@@ -65,21 +65,11 @@ class UpdateListBase : public AffaDisplayBase {
   // call this first — UpdateListDisplay does.
   void onPoll() override;
 
-#if AFFA_ENABLE_ISOTP_RX
-  // 0x121 is the id WE render on, so inbound text there is another head unit's. Feeds
-  // onText(), which delivers the whole reassembled string — onRadioText(bool) below stays
-  // as it is: a single-frame AUX heuristic for the panel's own re-assert reaction, and
-  // deliberately not the same thing.
-  uint16_t textRxId() const override { return updatelist::kIdSetText; }
-  bool decodeText(const uint8_t* payload, uint8_t len, char* out,
-                  uint8_t outSize) const override;
-#endif
 
   // Called when another node (the radio) transmits the segment text encoding on 0x121.
   // `isAux` is a heuristic and nothing more: the first three cells of the sender's "old
   // text" field spell AUX. Exists for the one library-side reaction that is a panel
   // concern — re-asserting our own content after someone else overwrote it.
-  virtual void onRadioText(bool isAux) { (void)isAux; }
 
   // True while the banner owns the screen: from the gesture until kAmsRepeats *
   // kAmsRepeatMs has elapsed. A renderer that would overwrite it must hold off for exactly

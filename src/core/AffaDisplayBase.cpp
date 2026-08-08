@@ -191,9 +191,6 @@ void AffaDisplayBase::pumpRx() {
       sendGenericAck(static_cast<uint16_t>(f.id));
     }
 
-#if AFFA_ENABLE_ISOTP_RX
-    pumpText(f);
-#endif
     onFrame(f);
   }
 

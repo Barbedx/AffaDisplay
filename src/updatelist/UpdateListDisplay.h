@@ -9,9 +9,6 @@
 #if AFFA_PANEL_UPDATELIST
 
 #include "UpdateListBase.h"
-#if AFFA_ENABLE_MARQUEE
-#  include "../widget/Marquee.h"
-#endif
 
 namespace affa {
 
@@ -36,82 +33,14 @@ class UpdateListDisplay : public UpdateListBase {
   // so a repeated render supersedes a queued one instead of stacking behind it.
   Submitted setText(const char* text, uint8_t digit = 255) override;
 
-#if AFFA_ENABLE_MARQUEE
-  // ---- marquee ------------------------------------------------------------
-  // THE STATE MACHINE IS NOT HERE. It is widget::Marquee, which knows nothing about this
-  // panel; what these four methods add is the eight-cell geometry, the render, and the
-  // "hold off while the AMS banner owns the screen" rule. Everything below forwards.
-
-  // The text to scroll through the eight-cell window. Transliterated and cleaned with
-  // affa::normalizeTitle(), then given a blank tail so the wrap reads as a gap rather than
-  // a collision. nullptr, or a string that normalises to nothing, switches the marquee off
-  // and transmits nothing.
-  //
-  // Re-setting the SAME text is a no-op that does NOT reset the position, so an
-  // application re-publishing the current track every second does not freeze the scroll on
-  // character 0. That check is why this takes a const char* and copies.
-  void setScrollText(const char* text);
-
-  // Frozen draws the current window ONCE and then transmits nothing. Resuming continues
-  // where it froze: the position is a base plus an elapsed-time offset, not accumulated
-  // per call.
-  void setScrollActive(bool on);
-  bool scrollActive() const { return _marquee.active(); }
-
-  // Draw the current window on the next poll even though nothing changed. The one
-  // library-side reaction to another node overwriting our screen.
-  void reassert() { _needsRedraw = true; }
-
-  // The window this panel scrolls: 8 cells, 400 ms a step, an 8-cell gap before the wrap.
-  // Exposed so a caller can see what it got rather than assume the OEM numbers.
-  static widget::MarqueeGeometry geometry() {
-    return widget::MarqueeGeometry{updatelist::kScrollWidth, updatelist::kScrollGap,
-                                   updatelist::kScrollStepMs};
-  }
-#endif
-
-#if AFFA_ENABLE_MARQUEE
-  // On by default (the OEM-plausible behaviour), but it is a reaction to a RADIO, so it is
-  // a replaceable default; with it off, the policy is the application's.
-  void setReassertOnAux(bool on) { _reassertOnAux = on; }
-  bool reassertOnAux() const { return _reassertOnAux; }
-#endif
 
  protected:
-  void onPoll() override;
-  void onRadioText(bool isAux) override;
-
-#if AFFA_ENABLE_MARQUEE
-  // For a VARIANT whose glass is not this one. The 8-segment panel shows kScrollWidth = 8
-  // cells; the LCD's visible field is kNewCells = 12 (WIRE-SPEC §9.2), so scrolling an
-  // 8-wide window into it would leave four cells permanently blank. Call from the derived
-  // constructor, before anything renders — the geometry is sanitised in Marquee's own
-  // constructor, so a bad value is clamped rather than divided by.
-  void setMarqueeGeometry(const widget::MarqueeGeometry& g) { _marquee = widget::Marquee{g}; }
-#endif
 
   // Copy `cells` bytes of `src` into `dst`, padding the tail with NUL — not space. Every
   // capture and every golden vector in docs/WIRE-SPEC.md shows 0x00 there; do not "fix"
   // this to spaces.
   static void copyCells(const char* src, uint8_t* dst, uint8_t cells);
 
- private:
-#if AFFA_ENABLE_MARQUEE
-  void renderWindow(uint16_t pos);
-
-  widget::Marquee _marquee{geometry()};
-  uint16_t _lastPos       = 0;      // last position actually transmitted
-  bool     _needsRedraw   = false;
-  bool     _reassertOnAux = true;
-
-  // The gap is reserved out of the marquee's buffer, so at or below this bound there is no
-  // room for one window of actual text and it could never move. Marquee::sane() also
-  // clamps, but a panel whose OEM geometry does not fit should say so at compile time
-  // rather than silently scroll something narrower than its glass.
-  static_assert(AFFA_TEXT_MAX > updatelist::kScrollGap + updatelist::kScrollWidth,
-                "AffaDisplay: AFFA_TEXT_MAX must exceed kScrollGap + kScrollWidth or the "
-                "UpdateList marquee has nothing to scroll");
-#endif
 };
 
 }  // namespace affa

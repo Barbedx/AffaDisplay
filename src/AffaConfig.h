@@ -72,22 +72,22 @@
 // Feature gates
 // ---------------------------------------------------------------------------
 
-// src/widget/ + CarminatMenuRenderer + MenuController + IPage + nav() + getMenu(). The
-// largest optional block, and OFF by default: the panel's whole menu contract is
-// showMenu(header,row0,row1,scroll) + highlightItem(rowTag), both always available
-// regardless of this flag, and everything above them is one opinion about UI state.
-// Gated on this flag ALONE, so src/widget/ compiles on the host with no panel header.
-// docs/MENU-WIDGET.md.
-#ifndef AFFA_ENABLE_MENU
-#  define AFFA_ENABLE_MENU 0
-#endif
-
-// src/widget/Marquee and UpdateListDisplay's setScrollText / setScrollActive / reassert.
-// A widget like the menu, gated on this flag alone — but ON by default: it is small, and
-// eight segment cells do not hold a track title.
-#ifndef AFFA_ENABLE_MARQUEE
-#  define AFFA_ENABLE_MARQUEE 1
-#endif
+// THERE ARE NO WIDGET GATES LEFT, and that is the shape of this library now.
+//
+// AFFA_ENABLE_MENU and AFFA_ENABLE_MARQUEE were here. Between them they gated src/widget/ —
+// a menu state machine, a scrolling text window and a three-row live screen — plus the
+// Carminat menu adapter and UpdateListDisplay's setScrollText / setScrollActive / reassert.
+//
+// THE RULE, OWNER'S, 2026-08-08: the library is a plain implementation of the transport
+// protocol. It is not UI. Which item is selected, what a hold-Load gesture means, how fast a
+// title scrolls and when to repaint are all decisions about a product, and a CAN driver that
+// makes them is a CAN driver you cannot use for a different product.
+//
+// What replaced them is nothing, because nothing was needed: the panel's contract is the
+// render calls, and they are unconditional. showMenu, showMenuN, highlightItem,
+// selectMenuItem, setText, showInfoMenu. An application that wants a scrolling title calls
+// setText with a different window every 400 ms — which is what the widget did, on the
+// library's task, where it did not belong.
 
 
 // showPopupText / hidePopup (the mode 0x74 overlay). 0: both return NotSupported.
@@ -252,16 +252,6 @@
 #  define AFFA_TASK_LATE_FACTOR 8
 #endif
 
-// The ISO-TP reassembler, the screen decoder, and the onText() callback they feed. For
-// reading a channel somebody else writes; the radio role never needs it, so it is off on
-// target and on for the host. docs/API.md §2.14.
-#ifndef AFFA_ENABLE_ISOTP_RX
-#  if defined(ARDUINO)
-#    define AFFA_ENABLE_ISOTP_RX 0
-#  else
-#    define AFFA_ENABLE_ISOTP_RX 1
-#  endif
-#endif
 
 // ---------------------------------------------------------------------------
 // Sizing knobs
@@ -551,20 +541,6 @@
 // ~256 B of static RAM and a linear scan of it per frame per direction — for an API that
 // nineteen shipped examples never called once. See the comment above Direction in
 // core/AffaTypes.h. The surviving observation seam, onFrame(), costs one pointer.
-
-// Menu capacity. addItem() returns -1 past the limit and the item is silently absent.
-#ifndef AFFA_MENU_MAX_ITEMS
-#  define AFFA_MENU_MAX_ITEMS 12
-#endif
-// Fields per item; extras are dropped at addItem().
-#ifndef AFFA_MENU_MAX_FIELDS
-#  define AFFA_MENU_MAX_FIELDS 3
-#endif
-// Rendered row buffer. The Carminat window row is 26 usable bytes; below 27 truncates
-// rows that would have fitted on screen.
-#ifndef AFFA_MENU_ROW_MAX
-#  define AFFA_MENU_ROW_MAX 32
-#endif
 
 // Transliteration scratch buffer on the stack of each render call. Below the longest
 // string you pass: silently truncated (never mid-sequence, always NUL-terminated).

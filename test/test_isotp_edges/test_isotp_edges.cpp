@@ -11,7 +11,7 @@
 #include "../affa_test_support.h"
 
 #include "carminat/CarminatDisplay.h"
-#include "proto/IsoTp.h"
+#include "../affa_decode.h"
 
 using namespace affa;
 using affatest::drain;
@@ -202,7 +202,7 @@ void test_an_ack_for_a_function_that_is_not_waiting_is_dropped(void) {
 }
 
 // ---------------------------------------------------------------------------
-// The fence between isotp::fragment() and the transmit FSM
+// The fence between affadec::fragment() and the transmit FSM
 // ---------------------------------------------------------------------------
 
 void test_fragment_matches_the_transmit_fsm_for_every_length(void) {
@@ -215,13 +215,13 @@ void test_fragment_matches_the_transmit_fsm_for_every_length(void) {
   uint8_t payload[AFFA_MAX_PAYLOAD];
   fill(payload, sizeof(payload));
 
-  Frame want[isotp::frameCount(AFFA_MAX_PAYLOAD)];
+  Frame want[affadec::frameCount(AFFA_MAX_PAYLOAD)];
   char msg[96];
 
   for (uint8_t len = 1; len <= AFFA_MAX_PAYLOAD; ++len) {
-    const uint8_t n = isotp::fragment(0x151, payload, len, carminat::kFiller,
+    const uint8_t n = affadec::fragment(0x151, payload, len, carminat::kFiller,
                                       want, static_cast<uint8_t>(sizeof(want) / sizeof(want[0])));
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(isotp::frameCount(len), n, "frameCount() disagrees");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(affadec::frameCount(len), n, "frameCount() disagrees");
 
     TEST_ASSERT_NOT_EQUAL(kNoTicket, r.d.enqueue(0x151, payload, len).ticket);
     pumpUntilIdle(r.d);
@@ -259,7 +259,7 @@ void test_the_continuation_counter_wraps_rather_than_reaching_0x30(void) {
 void test_the_reassembler_stops_at_the_ceiling_rather_than_wrapping(void) {
   // A wrapped reassembler decodes a plausible-looking WRONG screen, which is the one
   // failure mode a semantic oracle must never have.
-  isotp::Reassembler ra;
+  affadec::Reassembler ra;
   Frame f;
   f.id = 0x151;
   f.len = 8;
@@ -289,7 +289,7 @@ void test_the_reassembler_stops_at_the_ceiling_rather_than_wrapping(void) {
 // stayed false, and all 43 continuations were refused behind it: the message decoded to
 // nothing while the documentation claimed the case was handled.
 void test_a_12_bit_first_frame_opens_a_message(void) {
-  isotp::Reassembler ra;
+  affadec::Reassembler ra;
   Frame f;
   f.id  = 0x1F1;
   f.len = 8;
@@ -310,7 +310,7 @@ void test_a_12_bit_first_frame_opens_a_message(void) {
 
   // The whole 0x11..0x1F range opens a message, not just 0x11.
   for (uint8_t lo = 0x1; lo <= 0xF; ++lo) {
-    isotp::Reassembler r2;
+    affadec::Reassembler r2;
     Frame g = f;
     g.data[0] = static_cast<uint8_t>(0x10 | lo);
     TEST_ASSERT_TRUE(r2.onFrame(g));

@@ -31,46 +31,10 @@
 #include "../core/AffaDisplayBase.h"
 #include "CarminatConstants.h"
 
-// THE MENU IS NOT PART OF THIS CLASS ANY MORE. It is affa::CarminatMenu, in
-// carminat/CarminatMenu.h, and the application owns it — see that header for why. Only the
-// type aliases below stay here, because they are the application-facing spelling and every
-// example uses them; they name types in widget/, which is where the menu lives.
-#if AFFA_ENABLE_MENU
-#  include "../widget/MenuModel.h"
-#endif
-
+// THE MENU IS NOT PART OF THIS LIBRARY ANY MORE. The state machine, its adapter and the
+// affa::Menu / MenuItem / field-builder aliases are all gone: they were UI policy, and this
+// is a transport. What a menu IS on this panel is four render calls below.
 namespace affa {
-
-#if AFFA_ENABLE_MENU
-// THE TYPE BEHIND THE MENU CHANGED, AND THESE NAMES DID NOT.
-//
-// `affa::Menu` used to be src/carminat/Menu/Menu.{h,cpp} — a two-row sliding-window menu with
-// the panel welded into it (row0/row1, a fixed pair of char[AFFA_MENU_ROW_MAX], the count<=2
-// scroll rule, IPanel calls in the middle of the state machine). That file is GONE. The same
-// state machine now lives once, in src/widget/MenuModel, with the panel behind IMenuRenderer;
-// the Carminat side of the seam is CarminatMenuRenderer, above.
-//
-// The names stay because they are the application-facing API: docs/API.md §2.12 and every
-// example spell `affa::Menu`, `affa::MenuItem` and the three field builders. They are ALIASES,
-// not a compatibility layer — there is exactly one implementation and these are its other
-// spelling. Two differences a caller can observe:
-//
-//   * MenuModel::render() returns void. Whether a frame reached the panel is not something a
-//     UI state machine can act on; the adapter is the layer that can, so the verdict is
-//     menuRenderer().lastResult().
-//   * the geometry is injected (CarminatMenuRenderer::geometry(), 2 x 26), so rows are
-//     truncated at 26 characters rather than at AFFA_MENU_ROW_MAX - 1.
-//
-// New code should prefer the widget:: spelling; it is the one that works on a panel that is
-// not this one.
-using Menu = widget::MenuModel;
-using widget::Field;
-using widget::FieldType;
-using widget::MenuItem;
-using widget::integerField;
-using widget::readOnlyField;
-using widget::listField;
-#endif
 
 class CarminatDisplay final : public AffaDisplayBase {
  public:
@@ -318,13 +282,6 @@ class CarminatDisplay final : public AffaDisplayBase {
 
   bool onFrame(const Frame& f) override;
 
-#if AFFA_ENABLE_ISOTP_RX
-  // 0x151 is the id WE render on, so inbound text there is another head unit's — the only
-  // way text arrives at a node in the radio role. Feeds onText().
-  uint16_t textRxId() const override { return carminat::kIdSetText; }
-  bool decodeText(const uint8_t* payload, uint8_t len, char* out,
-                  uint8_t outSize) const override;
-#endif
 
  private:
   // enqueue() + "translate kNoTicket into the reason". Every builder ends in this.

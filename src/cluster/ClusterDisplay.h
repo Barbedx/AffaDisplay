@@ -38,7 +38,6 @@ class ClusterDisplay final : public AffaDisplayBase {
     switch (f) {
       case Feature::Power:     return true;    // [CAP] 1B1 03 52 00 00 observed
       case Feature::KeyTx:     return true;    // the cluster owns 0x1C1
-      case Feature::RadioText: return AFFA_ENABLE_ISOTP_RX != 0;
       // Text is NOT supported: the capture contains no text frame, so the encoding is
       // unknown. Saying true here and guessing an encoding would be a capability lie.
       default: return false;

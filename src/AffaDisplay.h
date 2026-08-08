@@ -27,30 +27,20 @@
 #include "util/AffaLog.h"
 #include "util/AffaText.h"
 
-// The display-agnostic menu. It is not panel code — MenuModel drives any IMenuRenderer, and
-// the Carminat adapter is one of them (carminat/CarminatMenuRenderer.h, below) — so it sits
-// above the panel gates and only the feature gate applies.
-#if AFFA_ENABLE_MENU
-#  if __has_include("widget/MenuModel.h")
-#    include "widget/MenuGeometry.h"
-#    include "widget/IMenuRenderer.h"
-#    include "widget/MenuModel.h"
-#  endif
-#endif
-
-// Same story, same layer: a scrolling text window that knows nothing about a panel, and
-// three of them arranged as a live screen. Both transmit nothing and hold no display — the
-// application samples them and calls the render primitive itself, exactly as MenuModel is
-// sampled through an IMenuRenderer.
-#if AFFA_ENABLE_MARQUEE
-#  if __has_include("widget/Marquee.h")
-#    include "widget/Marquee.h"
-#  endif
-#  if __has_include("widget/RowScreen.h")
-#    include "widget/RowScreen.h"
-#  endif
-#endif
-
+// THE MENU STATE MACHINE IS GONE, 2.0. MenuModel, MenuController, IPage, IMenuRenderer and
+// CarminatMenu were 1090 lines of UI policy — which item is selected, which field is being
+// edited, what a hold-Load gesture means — inside a CAN driver, and no shipping build ever
+// compiled them: AFFA_ENABLE_MENU defaulted to 0 and only the host test env turned it on.
+//
+// WHAT REMAINS IS THE PROTOCOL, and it is all an application needs to draw a menu:
+// showMenu(header, row0, row1, scroll), showMenuN() for a list the panel scrolls itself,
+// highlightItem() and selectMenuItem(). Deciding what is IN the list, and what a key press
+// means, is the application's — which is where it was always going to end up.
+//
+// src/widget/ went with it, for the same reason one layer down: a scrolling title and a
+// three-row live screen are decisions about a product, and this library implements a
+// transport. An application that wants a marquee calls setText with a different window every
+// 400 ms, on its own task, where a slow repaint cannot stall the protocol.
 #include "link/LoopbackLink.h"
 // The same seam over collin80's esp32_can instead of raw TWAI, for applications that
 // already own that stack. Off unless the build asks: it needs an external library.
@@ -67,27 +57,10 @@
 #  endif
 #endif
 
-#if AFFA_ENABLE_ISOTP_RX
-#  if __has_include("proto/IsoTp.h")
-#    include "proto/IsoTp.h"
-#    include "proto/ScreenModel.h"
-#    include "proto/ScreenDecode.h"
-#  endif
-#endif
-
 #if AFFA_PANEL_CARMINAT
 #  if __has_include("carminat/CarminatDisplay.h")
 #    include "carminat/CarminatConstants.h"
 #    include "carminat/CarminatDisplay.h"
-#    if AFFA_ENABLE_MENU
-#      include "carminat/CarminatMenuRenderer.h"
-#      include "carminat/MenuController.h"
-#      include "carminat/IPage.h"
-// The three above, wired, as one object the APPLICATION owns. It is not a member of
-// CarminatDisplay any more — see the header for why a CAN driver should not hold a UI state
-// machine, and what that cost every panel that had no menu.
-#      include "carminat/CarminatMenu.h"
-#    endif
 #  endif
 #endif
 
@@ -103,7 +76,7 @@
 #    include "updatelist/UpdateListConstants.h"
 #    include "updatelist/UpdateListBase.h"
 #    include "updatelist/UpdateListDisplay.h"
-#    if AFFA_PANEL_UPDATELIST_MENU && __has_include("updatelist/UpdateListMenuDisplay.h")
+#    if AFFA_PANEL_UPDATELIST_MENU
 #      include "updatelist/UpdateListMenuDisplay.h"
 #    endif
 #  endif
