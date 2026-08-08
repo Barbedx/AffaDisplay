@@ -55,6 +55,7 @@ struct ArduinoClock final : affa::IClock {
 
 affa::CanCommonLink g_link;
 ArduinoClock        g_clock;
+affa::rtos::AffaTask g_task;      // the library polls itself; loop() never calls poll()
 PsychicHttpServer   g_server;
 
 // The panel family is a BOOT choice: Carminat syncs on 0x3AF, UpdateList on 0x3DF, and the
@@ -852,6 +853,33 @@ void routes() {
     String j("{");
     j += "\"family\":\"";  j += (g_family == Family::Carminat) ? "carminat" : "updatelist"; j += "\"";
     j += ",\"phase\":\"";  j += affa::phaseName(g_base->phase()); j += "\"";
+    // THE FOUR NUMBERS THAT SAY WHY IT BROKE, not merely that it did. Every one is COUNTED
+    // rather than sampled, so a fault that lasted 300 ms an hour ago is still visible.
+    //
+    //   lost/why      the panel taking the session away — invisible for a whole 96-minute
+    //                 soak once, because nothing counted it
+    //   posted        renders from another task waiting to be admitted; a number that never
+    //                 falls means the poll task is stuck
+    //   dropped       …and ones refused because the ring was full
+    //   foreign       poll() called by a task that does not own it — should be 0 for ever
+    //   cbworst/cbms  WHICH callback blocked the poll task, and for how long. `cbat` is when:
+    //                 a peak at boot is WiFi associating, a peak that keeps moving is a
+    //                 callback that blocks every time, and without the timestamp they are
+    //                 the same number.
+    {
+      const affa::rtos::Status st = g_task.status();
+      j += ",\"lost\":";     j += st.sessionsLost;
+      j += ",\"why\":\"";    j += affa::lossReasonName(st.lastLossReason); j += "\"";
+      j += ",\"posted\":";   j += st.posted;
+      j += ",\"dropped\":";  j += st.postDropped;
+      j += ",\"foreign\":";  j += st.foreignPolls;
+      j += ",\"cbworst\":\"";j += affa::cbName(st.slowestCb); j += "\"";
+      j += ",\"cbms\":";     j += st.slowestCbMs;
+      j += ",\"cbat\":";     j += st.slowestCbAtMs;
+      j += ",\"cbover\":";   j += st.cbOverruns;
+      j += ",\"latemax\":";  j += st.pollLateMaxUs;
+      j += ",\"stackfree\":";j += st.stackFreeBytes;
+    }
     j += ",\"live\":";     j += g_link.isLive() ? "true" : "false";
     j += ",\"opened\":";   j += g_open.done ? "true" : "false";
     j += ",\"nav\":";      j += g_carminat ? "true" : "false";
@@ -1033,13 +1061,24 @@ void setup() {
   g_base->onSync(&onSyncChanged, nullptr);
   if (!g_base->begin()) Serial.println("[media] display begin FAILED");
 
+  // THE LIBRARY POLLS ITSELF FROM HERE. Callbacks first, begin(), then start() — that order
+  // is the contract, and start() refuses a display that was never begun.
+  //
+  // WHY THIS CONSOLE IS THE ONE THAT HAD TO CHANGE. Every /api/cmd handler below calls the
+  // display from the HTTP server's task while loop() used to call poll() from the Arduino
+  // task, and both mutate the transmit queue. It was an unguarded data race that happened
+  // not to have bitten yet. Since 2.0 a render from any task builds its bytes on that task's
+  // stack and crosses into the poll task as data, so the handlers are correct as written.
+  if (!g_task.start(*g_base))
+    Serial.println("[media] AffaTask::start() FAILED — nothing will be polled");
+
   startWifi();
   startHttp();
   logmsg("boot: %s", g_family == Family::Carminat ? "carminat" : "updatelist");
 }
 
 void loop() {
-  g_base->poll();
+  // NO poll() HERE — g_task owns it. loop() may block without costing a timed-out ACK.
   ElegantOTA.loop();
   openingPoll();
 

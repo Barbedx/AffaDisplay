@@ -229,8 +229,8 @@ void test_the_transmitted_key_frame_is_byte_exact(void) {
   r.up();
 
   // The terminating gesture of the legacy sendPasswordSequence(): emulateKey(Load, true).
-  // examples/08_radio_mitm expresses it as pressKey(Load, Hold, Wire), and this is the
-  // assertion that the two are byte-identical.
+  // Application code expresses it as pressKey(Load, Hold, Wire), and this is the assertion
+  // that the two are byte-identical.
   ASSERT_RESULT(Ok, r.d.pressKey(Key::Load, KeyEdge::Hold, KeySource::Wire));
   static const Frame kHoldLoad[] = {
       {0x1C1, 8, {0x03, 0x89, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00}, false},

@@ -2,11 +2,16 @@
 // screen and a confirm box. Sync on 0x3AF/0x3CF, data on 0x151 and 0x1F1, keys in on
 // 0x1C1.
 //
-// It supplies four things to AffaDisplayBase and nothing more:
+// It supplies three things to AffaDisplayBase and nothing more:
 //   * its SyncProfile and its function table (ORDER IS ON THE WIRE),
 //   * its packet filler (0x00) and its key transmit id (0x1C1),
-//   * the frame BUILDERS for every operation the family supports,
-//   * the menu seams (menuOpen / openMenu / routeKeyToMenu) and the page stack.
+//   * the frame BUILDERS for every operation the family supports.
+//
+// AND IT HOLDS NO STATE AT ALL. Every builder below is a pure function of its arguments into
+// a stack buffer, which is what makes a render safe to call from any task with nothing to
+// check (docs/REFACTOR-2.0.md §2). It used to own the menu renderer, model and page stack as
+// well — a fourth bullet, and the only members it had; those are affa::CarminatMenu now, and
+// the application owns one.
 //
 // The duplicated tick() sync machine is GONE — the base owns it, once, for both families.
 // Every render goes through enqueue() with a RenderSlot so latest-value-wins coalescing
@@ -15,9 +20,9 @@
 // The application couplings the extracted class carried — NVS/Preferences, `extern bool
 // _autoTime`, MediaInfo, the now-playing screen, MediaRouter, ANCS, ELM/DiagController,
 // the analogRead voltage helper, sendPasswordSequence() and emulateKey() — are all gone.
-// They are application policy: one car, one radio, one phone. The password sequence is
-// rebuilt as examples/08_radio_mitm against subscribe() + pressKey(..., KeySource::Wire),
-// which is public API and produces the identical bytes.
+// They are application policy: one car, one radio, one phone. A password sequence is
+// application code built on the frame tap plus pressKey(..., KeySource::Wire), which is
+// public API and produces the identical bytes.
 #pragma once
 #include "../AffaConfig.h"
 
