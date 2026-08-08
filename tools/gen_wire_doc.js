@@ -57,11 +57,34 @@ function leadComment(src, at) {
 function parseSuite(file) {
   const src = fs.readFileSync(file, 'utf8');
   const vectors = [];
-  // const Frame kName[] = { … };   and   const Frame kName = { … };
-  const DECL = /const\s+Frame\s+(k[A-Za-z0-9_]+)\s*(\[\])?\s*=\s*([\s\S]*?);\n/g;
+  // `const Frame kName[] = { … };` at FILE SCOPE. `^` with the `m` flag, never a literal \n:
+  // an anchor that CONSUMES the newline matches the first of two back-to-back declarations
+  // and skips the second, which is how this same line lost two Carminat vectors on its
+  // second attempt. Column 0 is what keeps a function-local fixture out of a document about
+  // the bus.
+  //
+  // FOUR THINGS THIS ONE REGEX GOT WRONG, every one of them silent:
+  //   * `;\n` does not match `;\r\n`, so a CRLF file contributed NOTHING — and
+  //     test_updatelist_wire is CRLF, so an entire panel family was missing from WIRE.md;
+  //   * `const` does not match `constexpr`, so test_session_epoch's eight vectors vanished;
+  //   * no column anchor, so test_latency's function-local ordering fixtures were published
+  //     as though they were measured protocol;
+  //   * a consuming anchor drops every second adjacent declaration.
+  // The declared-vs-parsed check below exists because all four failed without a word.
+  const DECL = /^(?:static\s+)?(?:const|constexpr)\s+Frame\s+(k[A-Za-z0-9_]+)\s*(\[\])?\s*=\s*([\s\S]*?);\r?$/gm;
   let m;
   while ((m = DECL.exec(src))) {
     vectors.push({ name: m[1], frames: frames(m[3]), comment: leadComment(src, m.index) });
+  }
+
+  // THE GUARD. Count declarations the crude way — any line that begins a file-scope Frame —
+  // and refuse to write a document that silently lost one. A generator that cannot fail is
+  // just prose with extra steps.
+  const declared = (src.match(/^(?:static\s+)?(?:const|constexpr)\s+Frame\s+k/gm) || []).length;
+  if (declared !== vectors.length) {
+    throw new Error(
+      `${path.basename(file)}: ${declared} file-scope Frame declarations, ${vectors.length} parsed. ` +
+      `A vector is being dropped — fix the parser, do not publish an incomplete wire.`);
   }
   // void test_name(void) { … }
   const tests = [];

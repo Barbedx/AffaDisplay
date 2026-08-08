@@ -222,75 +222,74 @@ asserted by `test_showConfirmBox_is_a_one_button_box`
 
 asserted by `test_showInfoPopup_is_three_messages_space_padded`
 
-### `kSelect0`
+## `test_session_epoch`
+
+### `kHello`
 
 ```
-151  03 29 05 00 00 00 00 00
+3AF  B0 14 11 00 1F 00 00 00
 ```
 
-asserted by `test_selectBoxButton_is_a_three_byte_single_frame`
+asserted by `test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9`
 
-### `kSecondProbe`
+### `kAlive`
+
+```
+3AF  B9 00 00 00 00 00 00 00
+```
+
+asserted by `test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9`
+
+### `kRequest`
+
+```
+3AF  BA 00 00 00 00 00 00 00
+```
+
+asserted by `test_bare_first_69_gets_one_discovery_ba_but_never_unlocks_output`, `test_busy_ba_retries_only_ba_and_never_grows_a_b9`
+
+### `kReg151`
+
+```
+151  70 00 00 00 00 00 00 00
+```
+
+asserted by `test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9`
+
+### `kReg1F1`
 
 ```
 1F1  70 00 00 00 00 00 00 00
 ```
 
-asserted by `test_first_send_after_a_resync_registers_both_functions_in_order`
+asserted by `test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9`
 
-### `kWantPayload`
+### `kPanelChannelAck`
+
+> The reflex reply we owe the display's own `1C1 70` channel registration. [CAP] 12/12
+> across the four OEM captures, answered in 0.288/0.453/0.470/0.483 ms.
+
+```
+5C1  74 00 00 00 00 00 00 00
+```
+
+asserted by `test_a_ping_on_the_heartbeat_boundary_still_yields_exactly_one_b9`
+
+### `kPowerOn`
 
 ```
 151  03 52 09 00 00 00 00 00
 ```
 
-asserted by `test_first_send_after_a_resync_registers_both_functions_in_order`
+asserted by `test_late_reassert_ack_cannot_clear_the_next_session_restore`
 
-## `test_keys`
-
-### `kHoldLoad`
+### `kTime1000`
 
 ```
-1C1  03 89 00 C0 00 00 00 00
+151  05 56 31 30 30 30 00 00
 ```
 
-asserted by `test_the_transmitted_key_frame_is_byte_exact`
-
-### `kRollDown`
-
-```
-1C1  03 89 01 41 00 00 00 00
-```
-
-asserted by `test_the_transmitted_key_frame_is_byte_exact`
-
-## `test_latency`
-
-### `kSecondProbe`
-
-```
-1F1  70 00 00 00 00 00 00 00
-```
-
-asserted by `test_abortPending_never_touches_a_registration_job`
-
-### `kOrder`
-
-```
-1F1  70 00 00 00 00 00 00 00
-151  E1 E2 E3 E4 00 00 00 00
-151  A1 A2 A3 A4 00 00 00 00
-```
-
-asserted by `test_urgent_overtakes_normal_but_never_a_registration_job`
-
-### `kWant`
-
-```
-151  99 88 77 66 00 00 00 00
-```
-
-asserted by `test_coalescing_keeps_one_entry_carrying_the_last_value`, `test_abortAll_abandons_at_a_frame_boundary_and_the_next_message_starts_clean`
+asserted by `test_late_registration_ack_cannot_revive_a_torn_down_session`, `test_late_reassert_ack_cannot_clear_the_next_session_restore`
 
 ## `test_sync_profiles`
 
@@ -373,37 +372,24 @@ asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `
 
 asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00`, `test_phase_walks_the_measured_opening_in_order`
 
-### `kLegacyH0`
+## `test_updatelist_wire`
+
+### `kRegister`
 
 ```
-3AF  70 1A 11 00 00 00 00 01
+121  70 81 81 81 81 81 81 81
+1B1  70 81 81 81 81 81 81 81
 ```
 
-asserted by `test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00`
+asserted by `test_registration_walks_the_function_table_with_0x81_filler`
 
-### `kH0`
+### `kHello`
 
 ```
 3DF  70 1A 11 00 00 00 00 01
 ```
 
-asserted by `test_updatelist_hello_is_exactly_one_frame`
-
-### `kPanelRegistrationAck`
-
-```
-5C1  74 00 00 00 00 00 00 00
-```
-
-asserted by `test_carminat_acks_panel_registration_as_a_reflex_without_unlocking_output`
-
-### `kPowerOff`
-
-```
-151  03 52 00 00 00 00 00 00
-```
-
-asserted by `test_an_application_that_owns_power_is_not_overridden`
+asserted by `test_updatelist_sync_frames_are_byte_exact`
 
 ### `kAlive`
 
@@ -411,8 +397,66 @@ asserted by `test_an_application_that_owns_power_is_not_overridden`
 3DF  79 00 81 81 81 81 81 81
 ```
 
-asserted by `test_the_request_argument_asymmetry_is_preserved`
+asserted by `test_updatelist_sync_frames_are_byte_exact`
+
+### `kSyncRequest`
+
+```
+3DF  7A 01 81 81 81 81 81 81
+```
+
+asserted by `test_updatelist_sync_frames_are_byte_exact`
+
+### `kSegAux`
+
+> setText("AUX", 255): digit > 9 -> chan 0x7A. Four frames, exactly full, last PCI 0x23.
+
+```
+121  10 19 76 7A 01 41 55 58
+121  21 00 00 00 00 00 10 41
+121  22 55 58 00 00 00 00 00
+121  23 00 00 00 00 00 81 81
+```
+
+asserted by `test_segment_setText_is_four_frames`
+
+### `kSegHelloChan3`
+
+> setText("HELLO", 3): only data[3] changes, to 0x70 + 3.
+
+```
+121  10 19 76 73 01 48 45 4C    .....HEL
+121  21 4C 4F 00 00 00 10 48    .LO....H
+121  22 45 4C 4C 4F 00 00 00    .ELLO...
+121  23 00 00 00 00 00 81 81
+```
+
+asserted by `test_segment_setText_channel_byte_follows_the_digit`
+
+### `kSetStateEnable`
+
+```
+1B1  04 52 02 FF FF 81 81 81
+```
+
+asserted by `test_registration_walks_the_function_table_with_0x81_filler`, `test_setPower_declares_0x04_and_pads_with_0x81`
+
+### `kSetStateDisable`
+
+```
+1B1  04 52 00 FF FF 81 81 81
+```
+
+asserted by `test_setPower_declares_0x04_and_pads_with_0x81`
+
+### `kAckToKeyId`
+
+```
+4A9  74 81 81 81 81 81 81 81
+```
+
+asserted by `test_key_ack_id_is_computed_not_tabulated`, `test_registration_walks_the_function_table_with_0x81_filler`, `test_a_malformed_key_frame_is_not_acknowledged`
 
 ---
 
-102 frames across 36 vectors.
+111 frames across 40 vectors.

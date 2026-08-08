@@ -9,9 +9,6 @@
 #include "IPanel.h"
 #include "../util/AffaLog.h"
 #include "AffaDispatch.h"
-#if AFFA_ENABLE_ISOTP_RX
-#  include "../proto/IsoTp.h"
-#endif
 
 namespace affa {
 
@@ -110,19 +107,6 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // This is the whole seam now. See the comment above Direction in AffaTypes.h for what
   // the other two layers were and why nineteen examples never called either.
   void onFrame(FrameTap cb, void* ctx);
-
-#if AFFA_ENABLE_ISOTP_RX
-  // Text ANOTHER node drew on the panel's text channel: reassembled from its ISO-TP frames
-  // by the base, decoded by the panel, delivered once per complete message. In the radio
-  // role nothing else produces it — we are the node that normally writes that channel — so
-  // this is the sniff/MITM seam, which is why it costs AFFA_ENABLE_ISOTP_RX.
-  //
-  // `text` POINTS INTO LIBRARY STORAGE and is valid only for the duration of the callback.
-  // Copy it if you need it afterwards. Fired from inside poll(); rendering from it is safe,
-  // blocking in it is not.
-  using TextCb = void (*)(const char* text, void* ctx);
-  void onText(TextCb cb, void* ctx);
-#endif
 
   // Passive mode: a real radio owns the handshake, so we send no sync frames, no hello and
   // no 0x74 ACK, and never latch FUNCSREG — we only inject data. On a vehicle bus, set it.
@@ -347,20 +331,6 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // acknowledged 0x1C1 before it validated the key bytes.
   virtual bool onFrame(const Frame& f) { (void)f; return false; }
 
-#if AFFA_ENABLE_ISOTP_RX
-  // The id inbound text arrives on — Carminat 0x151, UpdateList 0x121. 0 (the default)
-  // means this panel decodes no inbound text, and the reassembler is never fed.
-  virtual uint16_t textRxId() const { return 0; }
-
-  // Decode one reassembled payload into a NUL-terminated string. Panel-specific because
-  // the command byte is: Carminat text is 0x74/0x77, UpdateList 0x76/0x7F. Return false
-  // for a payload that is not text — a screen, an info row — and nothing is delivered.
-  virtual bool decodeText(const uint8_t* payload, uint8_t len, char* out,
-                          uint8_t outSize) const {
-    (void)payload; (void)len; (void)out; (void)outSize; return false;
-  }
-#endif
-
   // Veto the generic 0x74 auto-ACK for one frame. The base already suppresses it in passive
   // mode, for the sync ids, for reply-flagged ids and for every id in the function table.
   // Panels override only for a family quirk — UpdateList does not acknowledge a malformed
@@ -449,9 +419,6 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // caps instead.
   void pumpLink();
   void pumpRx();            // delivers keys; second only to pumpLink()
-#if AFFA_ENABLE_ISOTP_RX
-  void pumpText(const Frame& f);   // reassemble + decode inbound text, from pumpRx()
-#endif
   void pumpSync();
   void pumpTx();            // ALWAYS last; never reached before pumpRx() has returned
 
@@ -765,10 +732,6 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   CompleteCb _cplCb  = nullptr;   void* _cplCtx  = nullptr;
   SyncCb     _syncCb = nullptr;   void* _syncCtx = nullptr;
   FrameTap   _tap    = nullptr;   void* _tapCtx  = nullptr;
-#if AFFA_ENABLE_ISOTP_RX
-  TextCb     _textCb = nullptr;   void* _textCtx = nullptr;
-  isotp::Reassembler _textAsm;
-#endif
 };
 
 } // namespace affa

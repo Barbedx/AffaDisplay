@@ -379,7 +379,6 @@ enum class CbKind : uint8_t {
   Sync,       // onSync      — a state-word change
   Complete,   // onComplete  — a render's delivery verdict
   FrameTap,   // onFrame     — EVERY frame, both directions; the easiest one to make slow
-  Text,       // onText      — a reassembled inbound string
 };
 
 inline const char* cbName(CbKind k) {
@@ -389,7 +388,6 @@ inline const char* cbName(CbKind k) {
     case CbKind::Sync:     return "SyncCb";
     case CbKind::Complete: return "CompleteCb";
     case CbKind::FrameTap: return "FrameTap";
-    case CbKind::Text:     return "TextCb";
   }
   return "?";
 }

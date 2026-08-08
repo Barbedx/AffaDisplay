@@ -10,8 +10,6 @@
 // from observe() for that reason. A sniffer sees the whole bus in wire order precisely
 // because these two sit next to each other and nothing else touches the link.
 //
-// WHY pumpText() IS HERE. It is inbound text ANOTHER node drew on the panel — the sniff
-// seam, costed by AFFA_ENABLE_ISOTP_RX. It reassembles and delivers; it never renders.
 #include "AffaBaseInternal.h"
 #include "AffaDisplayBase.h"
 
@@ -29,9 +27,6 @@ void AffaDisplayBase::onKey(KeyCb cb, void* ctx)      { _keyCb = cb;  _keyCtx = 
 void AffaDisplayBase::onComplete(CompleteCb cb, void* ctx) { _cplCb = cb; _cplCtx = ctx; }
 void AffaDisplayBase::onSync(SyncCb cb, void* ctx)    { _syncCb = cb; _syncCtx = ctx; }
 void AffaDisplayBase::onFrame(FrameTap cb, void* ctx) { _tap = cb;   _tapCtx = ctx; }
-#if AFFA_ENABLE_ISOTP_RX
-void AffaDisplayBase::onText(TextCb cb, void* ctx)    { _textCb = cb; _textCtx = ctx; }
-#endif
 
 // THE WHOLE SEAM, and it is now what it always should have been: hand the frame to the
 // tap. The subscription table that used to be walked twice here, for every frame, in both
@@ -110,40 +105,5 @@ TxDisposition AffaDisplayBase::txFrame(Frame f, bool observeAccepted) {
   return disposition;
 }
 
-#if AFFA_ENABLE_ISOTP_RX
-// Reached only for a frame that came off the wire (fromSelf is dropped above), so this
-// never decodes our own renders back into onText.
-void AffaDisplayBase::pumpText(const Frame& f) {
-  const uint16_t id = textRxId();
-  if (!_textCb || id == 0 || f.id != id) return;
-  if (!_textAsm.onFrame(f)) return;                 // not an ISO-TP data frame
-
-  const uint8_t* p   = _textAsm.buffer();
-  const uint8_t  len = _textAsm.len();
-  if (len < 2) return;
-
-  // COMPLETION IS THE DECLARED LENGTH, not a frame count: payload[1] is the content length
-  // and payload[0..1] are not content, so the message ends at 2 + p[1]. Emitting per
-  // appended frame instead would deliver the same screen once per continuation.
-  //
-  // The second arm is the ceiling: Reassembler stops appending at AFFA_MAX_PAYLOAD, so a
-  // message declaring more than that never satisfies the first and would otherwise be
-  // dropped in silence. We deliver what we have — short, which the decoders reject on
-  // length if it is too short to mean anything.
-  const uint16_t need = static_cast<uint16_t>(2u + p[1]);
-  if (len < need && len < AFFA_MAX_PAYLOAD) return;
-
-  char out[AFFA_TEXT_MAX];
-  const bool ok = decodeText(p, len, out, sizeof(out));
-  // Reset BEFORE the callback, never after: the callback may render, and a render may
-  // re-enter poll() in an application that pumps from one. It must not find a transfer
-  // this call has already consumed.
-  _textAsm.reset();
-  if (ok) {
-    CbTimer t(*this, CbKind::Text);
-    _textCb(out, _textCtx);
-  }
-}
-#endif
 
 } // namespace affa
