@@ -44,7 +44,8 @@ openspec view                       # dashboard
 
 **The library owns the protocol and nothing else.** Wire format, sync, queueing and
 delivery verdicts are its job. Scrolling, animation, menus, screen layout, reconnect policy
-and clock sources are application policy or an opt-in widget under `src/widget/`.
+and clock sources are application policy. **The library ships no widgets**: it is a plain
+implementation of the transport protocol, not UI.
 
 When a feature is proposed, the first question is which capability it belongs to. If the
 answer is "none of them", it probably belongs in an example.

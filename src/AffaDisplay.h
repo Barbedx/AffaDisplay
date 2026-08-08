@@ -30,7 +30,7 @@
 // THE MENU STATE MACHINE IS GONE, 2.0. MenuModel, MenuController, IPage, IMenuRenderer and
 // CarminatMenu were 1090 lines of UI policy — which item is selected, which field is being
 // edited, what a hold-Load gesture means — inside a CAN driver, and no shipping build ever
-// compiled them: AFFA_ENABLE_MENU defaulted to 0 and only the host test env turned it on.
+// compiled them: the widget gates defaulted to 0 and only the host test env turned them on.
 //
 // WHAT REMAINS IS THE PROTOCOL, and it is all an application needs to draw a menu:
 // showMenu(header, row0, row1, scroll), showMenuN() for a list the panel scrolls itself,

@@ -54,7 +54,7 @@ yours that slept inside a callback was stalling the pump that feeds it.
 
 ```cpp
 - CarminatDisplay display;  display.setBus(bus); display.setClock(clock);
-+ affa::Esp32CanLink    link;
++ affa::CanCommonLink    link;
 + ArduinoClock          clock;
 + affa::CarminatDisplay display(link, clock);
 ```
@@ -177,50 +177,44 @@ and what you cannot avoid rewriting.
 | --- | ---: | --- | --- |
 | `src/core/` | ~1950 | **No.** Transport, sync FSM, transmit FSM, queue, key decode, event seam. The only panel knowledge is *parameterised* — `SyncProfile` supplies the ids and the handshake bytes. | you are still speaking AFFA to *something*, on any transport |
 | `src/util/` | ~430 | **No.** `AffaText` (UTF-8 → panel charset transliteration) and `AffaLog`. | you need transliteration; the OEM charset table is genuinely reusable for any 7-bit display |
-| `src/link/` | ~350 | **No**, but ESP32-specific. `ICanLink` is three methods; `Esp32CanLink` is the only file in the repository that includes `<esp32_can.h>`; `LoopbackLink` is a header-only test double. | you keep CAN. Replacing the MCU means writing one new `ICanLink` and nothing else. |
-| `src/proto/IsoTp.*` | ~200 of 544 | **No.** Plain ISO-TP-style fragmentation and reassembly over 8-byte frames. | you keep any multi-frame CAN protocol |
-| `src/proto/ScreenDecode.*`, `ScreenModel.h` | ~340 of 544 | **Yes** — every offset is a Carminat/UpdateList payload layout. `ScreenModel` itself (header + two rows + a mode) is generic enough to survive. | you decode panel traffic |
-| `src/widget/` | ~940 | **No.** `MenuModel` + `IMenuRenderer` + `MenuGeometry` are a list UI with no wire knowledge; `Marquee` is a scrolling window with none either. Both take their geometry as data and reach a display through an interface. | you want either widget on your own glass (see B.3) |
-| `src/carminat/` | ~1250 | **Yes**, except the menu adapter, which is just the seam between `src/widget/` and this panel's frames. | you keep a Carminat panel |
-| `src/updatelist/` | ~805 | **Yes** — the 8-segment and LCD encodings. The marquee they drive is **not** here; it moved to `src/widget/Marquee`. | you keep an UpdateList panel |
-| `src/rtos/` | ~480 | **No**, but it is the **one directory in this library that requires FreeRTOS** and therefore the one a port to anything else omits entirely. `AffaTask` owns the poll task; `AffaCommand.h` (the command POD, the dispatch table and the ticket→request map) needs nothing but C++17 and is host-tested. Compiled only under `AFFA_ENABLE_TASK=1`, which is an `#error` off ESP-IDF / Arduino-ESP32. | your target has FreeRTOS and you want the library to own its own task (docs/API.md §4b) |
+| `src/link/` | ~350 | **No**, but ESP32-specific. `ICanLink` is three methods; `CanCommonLink` is the only file in the repository that includes `<esp32_can.h>`; `LoopbackLink` is a header-only test double. | you keep CAN. Replacing the MCU means writing one new `ICanLink` and nothing else. |
+| `src/rtos/` | ~415 | **No**, but FreeRTOS-specific. The owned poll task and the cross-task dispatch — the one directory a non-FreeRTOS port omits. | you want renders callable from any task |
+| `src/carminat/` | ~1455 | **Yes.** | you keep a Carminat panel |
+| `src/updatelist/` | ~455 | **Yes** — one text encoding for every glass in the family. | you keep an UpdateList panel |
+| `src/cluster/` | ~215 | **Yes**, and unverified besides. | you keep an instrument cluster |
 
-`src/vpanel/` (~825 lines) was here: panel twins used as a test oracle and a no-hardware
-dev loop. **Deleted** — they were application-shaped code shipped as library surface.
-`setSelfAck()` covers the dev loop, and a decoder over `isotp::Reassembler` +
-`affa::screen` covers the oracle in about thirty lines; `test_bench_surface` and
-`examples/90_bench_ota` each carry one.
+Two things that were in this table are gone. `src/vpanel/` (~825 lines) held panel twins
+used as a test oracle and a no-hardware dev loop; `src/proto/` (~544) held the ISO-TP
+reassembler and screen decoder. Both were **deleted** — they were test-shaped code shipped as
+library surface. `setSelfAck()` covers the dev loop, and `test/affa_decode.h` holds the
+decoder, where it costs a consumer nothing at all.
 
-**The short version:** `core/` + `util/` + `link/` + `proto/IsoTp.*` + `widget/` is the
-reusable transport, protocol and UI machinery — roughly 3 900 lines with no panel knowledge
-that is not supplied as data. Everything under `carminat/`, `updatelist/` and
-`proto/ScreenDecode.*` is one specific panel family's wire format, roughly 2 400 lines.
+**The short version:** `core/` + `util/` + `link/` is the reusable transport — roughly
+2 700 lines with no panel knowledge that is not supplied as data. Everything under
+`carminat/`, `updatelist/` and `cluster/` is one specific panel family's wire format,
+roughly 2 100 lines.
 
 ### B.2 Moving to an OLED (or any display that is not an AFFA panel)
 
-Two ways, and they are genuinely different projects:
+**`IDisplay` is the render interface**, and its method set is honestly panel-shaped:
+`setText`, `setTime`, `setPower`, `showMenu(header, row0, row1, scrollIndicator)`,
+`showMenuN`, `highlightItem(row)`, `selectMenuItem`, popup, fullscreen, confirm box, info
+popup, and the 48 × 48 nav pane. Implement that against your OLED and everything the library
+renders reaches it.
 
-**(a) Keep the library, add a display.** `IDisplay` is the render interface, and its method
-set is honestly panel-shaped: `setText`, `setTime`, `setPower`, `showMenu(header, row0,
-row1, scrollIndicator)`, `highlightItem(row)`, popup, fullscreen, confirm box, info popup.
-Implement that against your OLED and everything the library renders reaches it — including
-`CarminatDisplay`'s own menu, which draws through `affa::CarminatMenuRenderer` and therefore
-through exactly `showMenu()` + `highlightItem()`. What you inherit along with it is a
-**two-row window** — the geometry of the OEM screen — which on a 128×64 OLED is a
-constraint you did not need. Worth it if you are driving both a panel and an OLED from one
-menu; not worth it otherwise. If the geometry is the part you object to, you want (b): the
-model takes the shape of the display as a constructor argument.
+What you inherit along with it is a **two-row window** — the geometry of the OEM screen —
+which on a 128 × 64 OLED is a constraint you did not need. Ask `panelGeometry()` rather than
+assuming it: every field is zero unless that surface exists, so a renderer can tell what it
+is being asked for.
 
-**(b) Keep only the menu.** `widget/MenuGeometry.h`, `widget/IMenuRenderer.h` and
-`widget/MenuModel.{h,cpp}` contain no wire bytes, no CAN, no ISO-TP and **no panel header**:
-fixed-capacity items, three field kinds (integer / list / read-only), function-pointer
-callbacks with a `ctx`, a `MenuGeometry` you choose, and a `render()` that emits
-`beginFrame(header, mask)` / one `row(index, text, selected)` per visible row / `endFrame()`.
-Lift those three files, write ~20 lines of `IMenuRenderer` against your own draw calls, and
-you have kept the part that took the longest to get right while dropping every byte of AFFA.
-`docs/MENU-WIDGET.md` §5 is a worked example for a display the library has never seen.
-`carminat/MenuController` and `IPage` are the optional fourth file: a page stack and a
-`(Key, KeyEdge)` → intent map, which is navigation policy and probably yours to write.
+> **There used to be a second option here, and it is gone.** `widget/MenuModel` +
+> `IMenuRenderer` + `MenuGeometry` were a display-agnostic sliding-window menu you could lift
+> out and drive your own glass with, and this section recommended it. All of it was deleted
+> in 2.0: **the library is a plain implementation of the transport protocol, and not UI.**
+>
+> If that is the part you wanted, it is ~940 lines in the history — `git log -- src/widget/`
+> — and it was self-contained by design, so lifting it out of an old tag still works. It is
+> just not something this library ships, or maintains, or tests any more.
 
 If you are dropping the panel entirely, **stop including `core/`.** It exists to speak to a
 panel; carrying it for `AffaRing` (a 40-line power-of-two ring) is not a trade worth making.

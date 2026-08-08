@@ -35,17 +35,19 @@ knowing by name, because when you break something one of them tells you *what*:
 | --- | --- |
 | `test_core` | ring, transliteration, heartbeat pacing, peer watchdog, registration, coalescing, key decode |
 | `test_carminat_wire` | every Carminat builder, byte for byte, against the golden vectors |
-| `test_updatelist_wire` | both UpdateList encodings, the `0x4A9` ACK, the AMS banner |
-| `test_sync_profiles` | both handshakes through the real panel classes, including the short-DLC trap |
+| `test_updatelist_wire` | the `0x121` text encoding, the `0x4A9` ACK, and the promise that `panelGeometry()` is narrower than the field on the wire |
+| `test_cluster_wire` | the third family, pinned to PROTOCOL-NOTES §9 — **including one test that passes on broken behaviour on purpose**, because the cluster's opening cannot complete and pretending otherwise would hide it |
+| `test_sync_profiles` | every handshake through the real panel classes, including the short-DLC trap |
 | `test_isotp_edges` | the 113-byte ceiling, "DONE while bytes remain", `fragment()` vs the transmit FSM |
 | `test_keys` | the `03 89` guard, the hold mask, the wheel collision, unknown codes |
 | `test_keysource` | `Local` / `Wire` / `Both`, and the three `fromSelf` drop points |
-| `test_nav` | a full menu script through `CarminatDisplay`, decoded back with the independent screen decoder, asserting the FRAME COUNT of every step |
-| `test_menu_widget` | `widget::MenuModel` alone, at `rows` = 2, 3 and 6, against a recording renderer — no panel, no CAN (`docs/MENU-WIDGET.md` §6) |
-| `test_seam` | subscriptions, the tap, and every event kind |
+| `test_dispatch` | `AffaMpsc` — the cross-task ring, including a real four-thread stress test rather than a single-threaded one that only looked like a race |
+| `test_owned_task` | the poll-owner seam, through the function pointer that keeps `core/` from knowing what a task is |
+| `test_seam` | the frame tap, on both directions |
 | `test_latency` | key delivery in exactly one `poll()`, coalescing, preemption |
-| `test_bench_surface` | the console's acceptance list, and a local wire decoder standing in for the deleted twin |
-| `test_marquee` | `widget::Marquee` alone — the window as a function of the clock, at widths and step rates that are not this panel's |
+| `test_tx_disposition` | what happens to a queued render when the world changes underneath it |
+| `test_recovery` | link loss, resync, and what survives it |
+| `test_session_epoch` | that a stale ticket from before a resync cannot be mistaken for a live one |
 
 Run one suite while you iterate:
 
@@ -166,7 +168,7 @@ curl "http://affabench.local/api/mode?panel=virtual"
 or the button on the page. `real` and `virtual` are a **runtime flag on one `ICanLink`**
 (`BenchLink`), not a second display and not a driver mode change:
 
-* **real** — `send()`/`recv()` go to `Esp32CanLink`;
+* **real** — `send()`/`recv()` go to `CanCommonLink`;
 * **virtual** — `send()` accepts the frame and puts it nowhere; `setSelfAck(true)` supplies
   the per-frame ACK and `loop()` injects the two sync frames a panel would send.
 

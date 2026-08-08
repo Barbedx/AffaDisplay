@@ -1,20 +1,26 @@
 # Direct ESP-IDF TWAI contract
 
+> **Renamed, 2.0.** This document said `Esp32CanLink` and described a raw `<driver/twai.h>`
+> seam. That class is deleted — nothing built against it — and the transport is
+> `CanCommonLink`, over `can_common` / `esp32_can`. **The ownership rules below are unchanged
+> and still binding**: one controller, one owner, no application calls behind its back. What
+> changed is which layer installs the driver, not who is allowed to touch it.
+
 > This historical filename is retained for existing links. It documents AffaDisplay's
 > direct ESP-IDF TWAI transport, not `collin80/esp32_can` or `can_common`.
 
-`Esp32CanLink` is the Arduino/ESP32 implementation of the library's non-blocking
+`CanCommonLink` is the Arduino/ESP32 implementation of the library's non-blocking
 `ICanLink` seam. It uses the ESP32 Arduino core's built-in `<driver/twai.h>` driver and
 has no third-party CAN-library dependency.
 
 ## Ownership
 
-One `Esp32CanLink` owns one process-global TWAI controller, its lifecycle mutex, and one
+One `CanCommonLink` owns one process-global TWAI controller, its lifecycle mutex, and one
 RX task. A second link cannot take that controller while the first one owns it.
 
 Application code must not call `twai_driver_install`, `twai_start`, `twai_stop`,
 `twai_driver_uninstall`, `twai_initiate_recovery`, `twai_transmit`, or direct mode changes
-for the controller used by `Esp32CanLink`. Competing lifecycle calls can race a controlled
+for the controller used by `CanCommonLink`. Competing lifecycle calls can race a controlled
 recovery or delete the controller under the RX task.
 
 Use the link surface instead:
@@ -38,7 +44,7 @@ CanPins pins{GPIO_NUM_3, GPIO_NUM_4};  // { rx, tx }
 link.begin(pins, 500000);
 ```
 
-ESP-IDF's `TWAI_GENERAL_CONFIG_DEFAULT` macro takes **TX then RX**. `Esp32CanLink` performs
+ESP-IDF's `TWAI_GENERAL_CONFIG_DEFAULT` macro takes **TX then RX**. `CanCommonLink` performs
 that inversion in one place, so callers must continue to pass `{rx, tx}`.
 
 `begin()` accepts the driver's standard timing presets (25 kbit/s through 1 Mbit/s,
@@ -101,7 +107,7 @@ application-level TWAI watchdog.
 
 ## Operational rules
 
-1. Construct and `begin()` one `Esp32CanLink` for the controller.
+1. Construct and `begin()` one `CanCommonLink` for the controller.
 2. Pass pins as `{rx, tx}`; for the bench C3 wiring this is `{GPIO_NUM_3, GPIO_NUM_4}`
    (`CRX/RXD -> GPIO3`, `CTX/TXD -> GPIO4`).
 3. Call `poll()` regularly, or use `AFFA_ENABLE_TASK=1`.

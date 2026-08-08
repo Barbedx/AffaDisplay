@@ -222,12 +222,13 @@
 #  define AFFA_TASK_STACK 4096
 #endif
 
-// Command slots. Matches AFFA_TX_QUEUE_DEPTH + 2 for the same reason the transmit queue is
-// 6: a deeper command queue than transmit queue only defers QueueFull to a worse place,
-// where the caller has already been told the render was accepted.
-#ifndef AFFA_TASK_QUEUE_DEPTH
-#  define AFFA_TASK_QUEUE_DEPTH 8
-#endif
+// AFFA_TASK_QUEUE_DEPTH WAS HERE AND IS GONE, 2.0. It sized the COMMAND queue — the ring of
+// hand-transcribed `Op` values that 2.0 deleted when the task boundary moved down into
+// enqueue(). After that deletion it named nothing; it survived only as the default for
+// AFFA_DISPATCH_DEPTH, which now carries its own 8 and its own reasoning.
+//
+// A knob that sizes a structure the library no longer has is worse than no knob: someone
+// tunes it, nothing changes, and they go looking for the bug somewhere real.
 
 // Bytes per string argument in a queued command, three per command. A command is copied by
 // value into the queue — no pointer into a caller's stack ever crosses a task boundary —
@@ -523,9 +524,9 @@
 // what makes "callable from any task" true for EVERY render — including ones written after
 // this comment — rather than for the handful somebody remembered to mirror.
 //
-// Sized like the transmit queue and for the same reason AFFA_TASK_QUEUE_DEPTH was: a deeper
-// dispatch ring than transmit queue only defers QueueFull to a worse place, where the caller
-// has already been told the render was accepted.
+// Sized like the transmit queue, and for the same reason it is 6: a deeper dispatch ring
+// than transmit queue only defers QueueFull to a worse place, where the caller has already
+// been told the render was accepted.
 //
 // Costs sizeof(DispatchItem) ~= AFFA_MAX_PAYLOAD + 20 per slot, and NOTHING in CPU when
 // unused — a call already on the owning task never touches it. Must be a power of two.
@@ -533,7 +534,7 @@
 // 0 removes the ring entirely. Do that only for a build with no owned task at all, where the
 // contract is the original one: poll() from exactly one task, and render from that task too.
 #ifndef AFFA_DISPATCH_DEPTH
-#  define AFFA_DISPATCH_DEPTH AFFA_TASK_QUEUE_DEPTH
+#  define AFFA_DISPATCH_DEPTH 8
 #endif
 
 // AFFA_MAX_SUBSCRIPTIONS WAS HERE AND IS GONE. It sized the Layer 1 FrameMatch table —

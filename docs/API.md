@@ -1,23 +1,31 @@
 # AffaDisplay — public API and configuration surface
 
-Version of this contract: **0.1.0**. Namespace: `affa`. Language: **C++17**, built with
-`-fno-exceptions`, `-fno-rtti`. Public signatures use `const char*`; Arduino `String`
-never appears in a public signature and never appears in `core/` or `util/` at all.
+Namespace `affa`. **C++17**, `-fno-exceptions`, `-fno-rtti`. Public signatures use
+`const char*`; Arduino `String` never appears in one, and never appears in `core/` or
+`util/` at all.
 
-This document is the specification the core implementer codes against. Every type
-referenced here is declared here. Where a declaration in this document and a comment in
-the source disagree, this document wins until it is amended.
+> **THIS DOCUMENT DOES NOT COPY DECLARATIONS, and that is the most important thing about
+> it.** It used to. §2 was 1691 lines of pasted headers and §5 was `AffaConfig.h`
+> reproduced in full — and by the time 2.0 landed, both described a library that no longer
+> existed: `proto/`, `widget/`, `Esp32CanLink`, `MenuModel`, `UpdateListMenuDisplay`,
+> `subscribe()`, `EventKind` and four build gates were all still documented here and all
+> gone from `src/`. A copy of the source is a second source that nothing checks.
+>
+> So: **the headers are the declarations.** They are commented at the density this project
+> uses everywhere else, and `src/` is 8.5k lines — smaller than this file used to be. What
+> lives here is only what a header cannot say: the guarantees that span several files, the
+> ones a test enforces, and the reasons a shape is odd.
 
-> **Direct-TWAI migration notice.** Transport-specific statements below that name
-> `esp32_can`, `CAN0`, callbacks, or `watchFor()` are historical context from the former
-> wrapper implementation, not requirements for the current code. The current ESP32 link
-> contract is the direct ESP-IDF TWAI contract in `docs/ESP32CAN-CONTRACT.md`.
+Where this document and a comment in the source disagree about a **contract**, this
+document wins until it is amended. Where they disagree about a **declaration**, the source
+wins, always — see the box above.
 
 Companion documents:
 
-* `docs/WIRE-SPEC.md` — the byte-level frame layouts and where each byte was observed.
-* `docs/ESP32CAN-CONTRACT.md` — the direct ESP-IDF TWAI ownership, RX/TX, and recovery
-  contract.
+* `docs/WIRE-SPEC.md` — byte-level frame layouts and where each byte was observed.
+* `docs/PROTOCOL-NOTES.md` — what is known, how it is known, and what is still a guess.
+* `docs/ESP32CAN-CONTRACT.md` — driver ownership, RX/TX and recovery.
+* `docs/REFACTOR-2.0.md` — why the surface has the shape it now has.
 
 ---
 
@@ -61,1771 +69,115 @@ first so that a reviewer can check the design against its purpose.
 
 ---
 
-## 1. Header inventory
-
-`Host` = must compile for `platform = native` with nothing but the C++17 standard
-library (`<cstdint>`, `<cstddef>`, `<cstring>`, `<atomic>`, `<type_traits>`). No
-`<Arduino.h>`, no `<driver/twai.h>`, no FreeRTOS headers, no `String`, no `std::vector`,
-no `std::function`, no heap after `begin()`.
-
-| File | Contents | May include | Host |
-| --- | --- | --- | --- |
-| `src/AffaDisplay.h` | Umbrella. The only header a consumer includes. Pulls `AffaConfig.h`, all of `core/`, `util/`, and — each behind its own gate — the selected panels and links. Declares no types of its own. | everything below | yes |
-| `src/AffaConfig.h` | Every `#define` gate and sizing knob. Includes nothing. Included first by every other file in the library. | — | yes |
-| `core/AffaTypes.h` | `Frame`, `Key`, `KeyEdge`, `Result`, `SyncState` (+ bit ops), `Feature`, `NavCommand`, `TxTicket`, `RenderSlot`, `Priority`, `TxOptions`, `Stats`. | `AffaConfig.h`, `<cstdint>`, `<cstddef>`, `<type_traits>` | yes |
-| `core/ICanLink.h` | `ICanLink`. | `AffaTypes.h` | yes |
-| `core/IClock.h` | `IClock`. | `<cstdint>` | yes |
-| `core/IPanel.h` | `IPanel` — the four-primitive rendering port an `IPage` and `CarminatMenuRenderer` draw through. `widget::MenuModel` does **not** see it. | `AffaTypes.h` | yes |
-| `core/IDisplay.h` | `IDisplay` — the panel-agnostic surface an application holds a reference to. | `AffaTypes.h` | yes |
-| `core/AffaConstants.h` | Protocol constants shared by all panels: `kPacketLength`, `kKeyHoldMask`, `kReplyFlag`, ISO-TP opcodes, ACK bytes. No panel-specific IDs. | `<cstdint>` | yes |
-| `core/AffaSyncProfile.h` | `SyncProfile`; the two profile constants live in the panel folders, not here. | `<cstdint>` | yes |
-| `core/AffaRing.h` | `AffaRing<T,N>` — lock-free single-producer/single-consumer ring. | `<cstdint>`, `<atomic>` | yes |
-| `core/AffaDisplayBase.h` | The whole class. One header, four implementation files below — split 2026-08-04 when it passed 2100 lines spanning four unrelated jobs. | `core/*`, `util/*` | yes |
-| `core/AffaDisplayBase.cpp` | Lifecycle, `poll()` orchestration, the RX drain, the key decoder, `pressKey`/`nav`, the public surface, the capability defaults. | `core/*`, `util/*` | yes |
-| `core/AffaSync.cpp` | The opening: the `Phase` table, the announce, the hello burst, the panel-channel reflex, the heartbeat, the peer watchdog. | `core/*`, `util/*` | yes |
-| `core/AffaTx.cpp` | The transmit queue, ISO-TP segmentation, flow control, retries, registration probes, the durable-control cache. | `core/*`, `util/*` | yes |
-| `core/AffaObserve.cpp` | The three-layer observation seam (tap, subscription table, event sink), `txFrame()` — the choke point every frame passes through in both directions — and inbound text reassembly. | `core/*`, `util/*` | yes |
-| `util/AffaLog.h` | `ILogSink`, `AFFA_LOG*` macros, level gating. | `AffaConfig.h`, `<cstdarg>` | yes |
-| `util/AffaLog.cpp` | Formatter + sink dispatch. **Entire body gated on `AFFA_ENABLE_LOG`.** | `<cstdio>` | yes |
-| `util/AffaText.{h,cpp}` | `toAscii`, `normalizeTitle`. Pure C API, no allocation. **`.cpp` body gated on `AFFA_ENABLE_TRANSLITERATION`.** | `<cstdint>`, `<cstddef>`, `<cstring>` | yes |
-| `link/LoopbackLink.h` | `LoopbackLink` — header-only test double: records TX, injects RX, optional synthetic ACK. | `core/*` | yes |
-| `link/Esp32CanLink.h` | `CanPins`, `Esp32CanLink`. Includes `<driver/gpio.h>` **only** for `gpio_num_t`. Entire body gated on `AFFA_ENABLE_ESP32CAN_LINK`. | `core/*`, `<driver/gpio.h>` | no |
-| `link/Esp32CanLink.cpp` | **The only file in the library permitted to `#include <driver/twai.h>`.** Direct driver lifecycle, bounded RX task, and non-blocking TX gate. Entire body gated. | `<driver/twai.h>` | no |
-| `proto/IsoTp.{h,cpp}` | `IsoTp::fragment()` (the transmit layout, shared with the TX FSM) and `IsoTp::Reassembler` (the receive direction). Entire `.cpp` body gated on `AFFA_ENABLE_ISOTP_RX`. | `core/AffaTypes.h` | yes |
-| `proto/ScreenModel.h` | `ScreenModel` — the decoded "what is on the panel" state. A plain aggregate, no methods beyond `clear()`. Header-only, so it costs nothing unless something instantiates it. | `<cstdint>` | yes |
-| `proto/ScreenDecode.{h,cpp}` | Payload offsets and `menu()` / `segText()` / `frame()` / `asciiz()` — reassembled bytes → `ScreenModel`. Same gate as `IsoTp.cpp`. | `ScreenModel.h`, `core/AffaTypes.h` | yes |
-| `widget/Marquee.{h,cpp}` | `MarqueeGeometry` + `Marquee` — a scrolling text window, no panel knowledge. Gated on `AFFA_ENABLE_MARQUEE`. | `AffaConfig.h`, `util/AffaText.h` | yes |
-| `carminat/CarminatConstants.h` | `0x3AF`, `0x3CF`, `0x151`, `0x1F1`, `0x1C1`, filler `0x00`, scroll-indicator values, the Carminat `SyncProfile` instance. | `core/*` | yes |
-| `carminat/CarminatDisplay.{h,cpp}` | Carminat frame builders: `setText`, `setTime`, `showMenu`, `highlightItem`, popup/fullscreen/confirm/info, key decode for `0x1C1`. Gated on `AFFA_PANEL_CARMINAT`. | `core/*`, `util/*`, `<Arduino.h>` permitted in the **.cpp only** | `.h` yes, `.cpp` yes if it avoids `<Arduino.h>` — it must |
-| `widget/MenuGeometry.h` | `MenuGeometry` — `rows`, `rowChars`, `wrap`. The shape of the display, injected. Gated on `AFFA_ENABLE_MENU`. | `AffaConfig.h` | yes |
-| `widget/IMenuRenderer.h` | The panel seam: `beginFrame` / `row` / `endFrame`, plus the non-pure `highlightOnly`. Same gate. | `AffaConfig.h` | yes |
-| `widget/MenuModel.{h,cpp}` | `FieldType`, `Field`, `MenuItem`, `MenuModel` — the sliding-window menu state machine, display-agnostic. Fixed-capacity, no `String`, no `vector`, no `std::function`, **no panel header**. Gated on `AFFA_ENABLE_MENU` alone: it is not panel code. | `AffaConfig.h`, `util/*` | yes |
-| `carminat/CarminatMenuRenderer.{h,cpp}` | The `IMenuRenderer` for this panel: 2 x 26 geometry, the `0x7E`/`0x7F` row tags, `showMenu` + `highlightItem`, the cheap `highlightOnly` path, and the `Result` the model does not carry. Gated on `AFFA_ENABLE_MENU && AFFA_PANEL_CARMINAT`. | `core/*`, `widget/*` | yes |
-| `carminat/MenuController.{h,cpp}` | Page stack + key routing (page first, then menu, then fall through to the application callback). Owns the `(Key, KeyEdge)` → `MenuModel` intent map. Gated on `AFFA_ENABLE_MENU && AFFA_PANEL_CARMINAT`. | `core/*`, `IPage.h`, `widget/MenuModel.h` | yes |
-| `carminat/IPage.h` | `IPage` — `onEnter/onExit/onTick/handleKey`. | `core/AffaTypes.h` | yes |
-| `updatelist/UpdateListConstants.h` | `0x3DF`, `0x3CF`, `0x121`, `0x1B1`, `0x0A9`, filler `0x81`, the UpdateList `SyncProfile` instance. | `core/*` | yes |
-| `updatelist/UpdateListBase.{h,cpp}` | Shared AFFA2 behaviour: `setPower`, `0x121` radio-text sniffing. Gated on `AFFA_PANEL_UPDATELIST`. | `core/*`, `util/*` | yes |
-| `updatelist/UpdateListDisplay.{h,cpp}` | The 8-segment panel; non-blocking title scroll driven from `poll()`. Same gate. | as above | yes |
-| `updatelist/UpdateListMenuDisplay.{h,cpp}` | The LCD variant; different `setText` channel/location encoding. Gated on `AFFA_PANEL_UPDATELIST_MENU`. | as above | yes |
-| `rtos/AffaCommand.h` | `TxRequest`, `Op`, `Command`, `setArg`, `applyCommand`, `RequestTable` — one posted render as data, the dispatch table, and the ticket→request map. Header-only and **not gated**: it needs nothing but C++17 and `AffaDisplayBase`, which is what makes the interesting half of the owned-task mode host-testable. | `core/AffaDisplayBase.h`, `<cstring>` | yes |
-| `rtos/AffaTask.{h,cpp}` | `TaskOptions`, `Status`, `AffaTask` — creates the task, drains the command queue, calls `poll()`, publishes `Status`. **The only file in the library that includes FreeRTOS**, the only `vTaskDelayUntil`, and the one directory a non-FreeRTOS port omits. Entire body gated on `AFFA_ENABLE_TASK`, which is itself an `#error` off ESP-IDF / Arduino-ESP32. | `AffaCommand.h`, `core/*`, `util/AffaLog.h`, `<freertos/*>`, `<esp_timer.h>` | **no** |
-
-**Enforced rules.**
-
-* **`src/rtos/` is the single exception to "Host" above, and it is fenced.** FreeRTOS
-  headers appear in `rtos/AffaTask.h` and nowhere else; `core/`, `util/`, `proto/` and
-  `widget/` remain compilable against nothing but C++17, which is why the 259-case host
-  suite is untouched by the owned-task mode. The poll-owner guard the mode needs inside
-  `core/` is a **function pointer** (`AffaDisplayBase::TaskIdFn`) precisely so that `core/`
-  does not learn what a task is — and it is host-tested through that seam
-  (`test_owned_task`).
-
-* `<driver/twai.h>` is confined to `link/Esp32CanLink.cpp`. The original wrapper's
-  `CAN_FRAME` type is not part of the public API; `affa::Frame` keeps `core/` portable.
-* `<Arduino.h>` is permitted only in `link/Esp32CanLink.cpp` and in panel `.cpp` files,
-  and even there only if something genuinely needs it. Prefer `<cstring>`/`<cstdio>`.
-  `AuxModeTracker` and `Menu` used to include it; the port did not, and `AuxModeTracker`
-  is gone entirely (§7b.7b).
-* `core/` and `util/` are compiled by `test/` for `platform = native`. If a change
-  breaks that build, the change is wrong, not the test.
-* `proto/` and `widget/` are host-compilable for the same reason and a stronger one: the
-  decoder is the test oracle and the widgets have no panel to need (§2.14).
-  A `<Arduino.h>` or a driver type anywhere in either folder destroys their only
-  purpose. They talk to `ICanLink` and `IClock` and to nothing else.
 
 ---
 
-## 2. Complete declarations
+## 1. What is in `src/`
 
-### 2.1 `core/AffaTypes.h`
+Thirty-six files, 8.5k lines. **`Host` means it compiles for `platform = native` against
+nothing but the C++17 standard library** — no `<Arduino.h>`, no `<driver/twai.h>`, no
+FreeRTOS, no `String`, no `std::vector`, no `std::function`, and no heap after `begin()`.
+That property is why the host suite can test the interesting half of a CAN driver on a
+laptop, and it is worth more than any single feature in here.
 
-```cpp
-#pragma once
-#include "../AffaConfig.h"   // AFFA_TX_COALESCE, for the TxOptions default
-#include <cstdint>
-#include <cstddef>
-#include <type_traits>
+### The umbrella and the gates
 
-namespace affa {
-
-// Portable CAN frame. Deliberately not the driver's CAN_FRAME: this type crosses
-// every seam in the library, including the ones compiled for the host.
-struct Frame {
-  uint32_t id   = 0;
-  uint8_t  len  = 0;
-  uint8_t  data[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-  bool     ext  = false;      // extended (29-bit) identifier; AFFA never uses one
-
-  // Set by the library on every frame it hands to ICanLink::send(), and NEVER set by
-  // an application. A real CAN controller does not receive its own transmissions, but
-  // LoopbackLink does — so without this flag pressKey(..., Both) would fire once on
-  // hardware and twice on the host, and every host test would be lying about the
-  // target. The RX key decoder ignores any frame with fromSelf set, unconditionally.
-  // See the echo rule in §7b.6.
-  bool     fromSelf = false;
-};
-
-// Wire codes. DO NOT RENUMBER — these values are transmitted and received verbatim
-// in bytes 2..3 of the 0x1C1 key frame.
-enum class Key : uint16_t {
-  Load     = 0x0000,   // the button at the bottom of the stalk
-  SrcNext  = 0x0001,
-  SrcPrev  = 0x0002,
-  VolUp    = 0x0003,
-  VolDown  = 0x0004,
-  Pause    = 0x0005,
-  RollUp   = 0x0101,   // wheel, one detent up
-  RollDown = 0x0141,   // wheel, one detent down
-
-  // AND ANY OTHER uint16_t VALUE IS A RAW WIRE CODE. This enum is OPEN, deliberately.
-  // The eight names above are [REF]-attested (affa3.h) and the encoder exemption is
-  // provable, but NOTHING establishes that the list is COMPLETE — a different stalk, a
-  // different model year or an unlisted button would produce a code not named here. Such
-  // a code must never be dropped, so the decoder delivers `static_cast<Key>(raw & 0xFF3F)`
-  // — a valid Key carrying the wire code, with the two hold bits stripped into KeyEdge.
-  //
-  // There is deliberately NO `Unknown` sentinel: a single sentinel value cannot carry the
-  // code, and carrying the code is the whole requirement. Compare against the names you
-  // handle and pass anything else through with its numeric value:
-  //
-  //     default: LOGI("unmapped key 0x%04X", static_cast<uint16_t>(k)); break;
-  //
-  // A switch over Key therefore always needs a `default:`; -Wswitch cannot help here.
-};
-
-// Click vs hold. The panel encodes hold as bits 0x80|0x40 set in the LOW byte of the
-// key code — but only for the non-wheel keys; see §8.3 for why that matters.
-enum class KeyEdge : uint8_t { Click = 0, Hold = 1 };
-
-// Where an emulated key press is to have its effect. A press on the real system is
-// transmitted by the PANEL and received by us, so "emulate a key" legitimately means
-// two things at once, and an application wants each of them separately at different
-// times. One function with a source, not two lookalike functions — see §7b.6.
-enum class KeySource : uint8_t {
-  Local = 1,   // as if a key arrived: drive our menu + fire the Key event. Nothing goes
-               // on the bus. THE DEFAULT, because in the radio role that is what a key
-               // press IS from our side.
-  Wire  = 2,   // impersonate the panel: encode and transmit the key frame. Only
-               // meaningful when a REAL radio is on the bus and you are driving it.
-  Both  = 3,   // both at once. Rarely what you want — see §7b.6.
-};
-constexpr bool hasSource(KeySource v, KeySource f) noexcept {
-  return (static_cast<uint8_t>(v) & static_cast<uint8_t>(f)) != 0;
-}
-
-// Values 0..5 keep the numeric identities of the legacy AffaCommon::AffaError so a
-// migrating application that logged the raw number sees the same number.
-enum class Result : uint8_t {
-  Ok          = 0,
-  NoSync      = 1,   // link not established (was AffaError::NoSync)
-  UnknownFunc = 2,   // funcId not in this panel's function table
-  SendFailed  = 3,   // panel answered something that was neither DONE nor PARTIAL
-  Timeout     = 4,   // no ACK within AFFA_ACK_TIMEOUT_MS
-  TooLong     = 5,   // payload exceeds AFFA_MAX_PAYLOAD (was StrTooLong)
-  QueueFull   = 6,
-  NotSupported= 7,   // this panel does not implement this Feature
-  BadArgument = 8,   // null pointer, len == 0, index out of range
-  LinkDown    = 9,   // ICanLink::isLive() was false
-  Cancelled   = 10,  // job discarded because sync was lost or begin() was re-run
-  // 11 was Busy, returned only by sendBlocking(); both are gone and 11 is NOT reused.
-  Aborted     = 12,  // discarded by the APPLICATION before any byte reached the wire:
-                     // abortPending(), abortAll(), or superseded by a newer render of
-                     // the same RenderSlot. onComplete only — never returned by an
-                     // enqueue call. See §3b.
-};
-
-// Bit flags, exactly the legacy bit assignment. FuncsReg is dropped whenever Failed
-// is raised — registration does not survive a resync.
-enum class SyncState : uint8_t {
-  None      = 0x00,
-  Failed    = 0x01,
-  PeerAlive = 0x02,
-  Start     = 0x04,
-  FuncsReg  = 0x08,
-};
-
-constexpr SyncState  operator|(SyncState a, SyncState b) noexcept {
-  return static_cast<SyncState>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
-}
-constexpr SyncState  operator&(SyncState a, SyncState b) noexcept {
-  return static_cast<SyncState>(static_cast<uint8_t>(a) & static_cast<uint8_t>(b));
-}
-constexpr SyncState  operator~(SyncState a) noexcept {
-  return static_cast<SyncState>(static_cast<uint8_t>(~static_cast<uint8_t>(a)));
-}
-inline SyncState& operator|=(SyncState& a, SyncState b) noexcept { a = a | b; return a; }
-inline SyncState& operator&=(SyncState& a, SyncState b) noexcept { a = a & b; return a; }
-constexpr bool hasFlag(SyncState v, SyncState f) noexcept {
-  return (static_cast<uint8_t>(v) & static_cast<uint8_t>(f)) == static_cast<uint8_t>(f);
-}
-
-// Optional capabilities. supports() answers before you call; an unsupported call
-// returns Result::NotSupported (§6).
-enum class Feature : uint8_t {
-  Text,         // setText
-  Time,         // setTime
-  Power,        // setPower
-  Menu,         // getMenu / showMenu / highlightItem / nav
-  Popup,        // showPopupText / hidePopup
-  Fullscreen,   // showFullscreenText
-  ConfirmBox,   // showConfirmBox
-  InfoPopup,    // showInfoPopup
-  KeyTx,        // this panel family has a key-transmit id, so pressKey(..., Wire)
-                // can put a frame on the bus (§7b.6)
-  RadioText,    // the ISO-TP reassembler is compiled in (AFFA_ENABLE_ISOTP_RX), so
-                // inbound text is reconstructed and delivered to onText() (§2.14.1)
-};
-
-// Navigation intent. Mapped to (Key, KeyEdge) by AffaDisplayBase::nav() — see §8.
-enum class NavCommand : uint8_t {
-  Open,      // hold-Load: open the menu
-  Next,      // RollDown click  (in edit mode: next value)
-  Prev,      // RollUp   click  (in edit mode: previous value)
-  Select,    // Load click: activate item / enter edit / advance to next field
-  Back,      // hold-Load: leave edit / close the menu
-  Increase,  // RollDown hold: coarse step (Field::stepMultiplier)
-  Decrease,  // RollUp   hold: coarse step
-};
-
-// Handle for one enqueued transmission. Strictly increasing, wraps 0xFFFF -> 1.
-// Zero is never issued and means "no ticket" / "rejected at enqueue".
-using TxTicket = uint16_t;
-inline constexpr TxTicket kNoTicket = 0;
-
-// What a queued message is FOR, so a newer one can supersede an older one that has not
-// started yet. Latest value wins, per slot. None opts out of coalescing entirely: a
-// None message never replaces anything and is never replaced. See §3b.4.
-enum class RenderSlot : uint8_t {
-  Text,        // setText
-  Clock,       // setTime
-  Menu,        // showMenu (the 96-byte screen)
-  Highlight,   // highlightItem (the single-frame selection move)
-  Popup,       // showPopupText / hidePopup
-  Fullscreen,  // showFullscreenText
-  ConfirmBox,  // showConfirmBox
-  InfoPopup,   // showInfoPopup
-  Control,     // setPower and other non-rendering control payloads
-  None,        // raw enqueue(); never coalesced
-};
-
-// Urgent jumps the queue ahead of Normal work. It never splits a message that is
-// already on the wire, and it never overtakes a pending function-registration job —
-// the panel rejects payloads sent before registration completes.
-enum class Priority : uint8_t { Normal = 0, Urgent = 1 };
-
-// Named, so the three trailing arguments cannot be swapped at the call site.
-struct TxOptions {
-  RenderSlot slot     = RenderSlot::None;
-  Priority   priority = Priority::Normal;
-  bool       coalesce = (AFFA_TX_COALESCE != 0);  // per-message opt-out
-};
-
-// Free-running counters. Cleared only by Esp32CanLink::begin(). Read from any
-// context; each field is a plain uint32_t updated by a single writer, so a torn
-// read is impossible on a 32-bit target and harmless on the host.
-struct Stats {
-  uint32_t rxFrames    = 0;  // frames pushed into the RX ring by the driver callback
-  uint32_t txFrames    = 0;  // frames accepted by the driver
-  uint32_t txDropped   = 0;  // send() refused: TX gate closed, or driver said no
-  uint32_t ringOverflow= 0;  // RX ring was full — frames LOST. Non-zero means poll()
-                             // is not being called often enough, or the ring is small.
-  uint32_t txErr       = 0;  // controller TX error counter (driver status, read-only)
-  uint32_t rxErr       = 0;  // controller RX error counter
-  uint32_t txFailed    = 0;  // controller TX failure count (arbitration/ack loss)
-};
-
-// ---------------------------------------------------------------------------
-// The three-layer observation seam. Rationale, firing context and worked
-// examples are in §7b; the declarations live here because every layer speaks
-// only in types this header already owns.
-// ---------------------------------------------------------------------------
-
-// Which way a frame went. A tap that cannot tell inbound from outbound is
-// useless to a sniffer, and a subscription that cannot say "only what the panel
-// sent" would fire on our own echo of the same id — 0x151 carries both.
-//
-// A frame arriving through ICanLink::recv() with Frame::fromSelf set is our own
-// transmission coming back off a link that echoes. It is presented to Layer 0 and
-// Layer 1 as Direction::Tx, never as Rx, so a `dir = Rx` subscription means "what
-// the other node actually sent" on every link, echoing or not (§7b.6).
-enum class Direction : uint8_t { Rx = 1, Tx = 2, Both = 3 };
-
-// Layer 0: every frame, in and out, unfiltered. One tap, replaces the previous.
-using FrameTap = void (*)(const Frame& f, Direction d, void* ctx);
-
-// Layer 1: filtered raw subscription.
-using FrameCb  = void (*)(const Frame& f, void* ctx);
-
-// Match an id under a mask, then optionally match payload bytes under a mask.
-// A DEFAULT-CONSTRUCTED FrameMatch matches id 0x000 inbound and nothing else: AFFA
-// uses no such id, so a half-filled match is inert rather than a firehose. Matching
-// every id is the explicit opt-in `idMask = 0`. The matching rule is in §7b.4.
-struct FrameMatch {
-  uint32_t  id      = 0;        // frame id to match
-  uint32_t  idMask  = 0x7FF;    // 0x7FF exact, 0 = any id
-  uint8_t   data[8]    = {0};   // expected bytes
-  uint8_t   dataMask[8]= {0};   // which of those bytes must match (0 = don't care)
-  uint8_t   len     = 0;        // significant bytes of data[]/dataMask[]; 0 = id only
-  Direction dir     = Direction::Rx;
-};
-
-// Opaque, non-zero when valid. Encodes slot index and a generation counter, so a
-// stale handle from a slot that was freed and reused cannot unsubscribe the new
-// owner — the failure mode of a bare index, and it is silent.
-struct SubHandle {
-  uint16_t v = 0;
-  bool valid() const { return v != 0; }
-};
-inline constexpr SubHandle kNoSub{};
-
-// Layer 2: decoded protocol events.
-enum class EventKind : uint8_t {
-  SyncChanged,   // ev.sync   — the state word changed
-  Registered,    // ev.sync   — FUNCSREG latched
-  PeerLost,      // ev.sync   — the peer-alive deadline expired
-  Key,           // ev.key    — decoded from the wire OR from pressKey/nav with a
-                 //             source that includes Local (§7b.6)
-  TxComplete,    // ev.tx     — same information as CompleteCb
-  LinkError,     // ev.error  — ring overflow, dropped TX, controller error
-  // RadioText and ScreenChanged were declared here and NOTHING ever constructed
-  // either — reassembly lives in proto/ and the panels do not depend on it. Two
-  // events that cannot arrive are two false promises, so both were removed. Re-add
-  // one WITH its emitter, never before it.
-};
-
-enum class LinkErrorKind : uint8_t {
-  RingOverflow,     // Stats::ringOverflow advanced: frames were LOST
-  TxDropped,        // ICanLink::send() refused a frame
-  ControllerError,  // the driver's own error counters advanced
-};
-
-// A tagged union, not std::variant and not a class hierarchy. std::variant costs
-// an index, alignment padding and a valueless-by-exception state this library
-// (built -fno-exceptions) cannot even reach; a hierarchy costs a vtable pointer
-// per event and forces the event to outlive the callback. This is 12 bytes of
-// POD built on the poll() stack, copied nowhere, allocated never.
-struct Event {
-  EventKind kind;
-  union {
-    struct { SyncState prev; SyncState now; }            sync;
-    struct { Key key; KeyEdge edge; }                    key;
-    struct { TxTicket ticket; Result result; }           tx;
-    struct { LinkErrorKind kind; uint32_t count; }       error;
-  };
-};
-
-using EventCb = void (*)(const Event& ev, void* ctx);
-
-} // namespace affa
-```
-
-No arm of `Event` currently carries a pointer, because the two that did — `text` and
-`screen` — went with `EventKind::RadioText` and `EventKind::ScreenChanged`. **If one comes
-back, its rule comes back with it:** a pointer inside an `Event` points at library-internal
-storage and is valid **only for the duration of the callback**. Copy what you need; do not
-store the pointer. That is the one rule of the event seam a reviewer must check by eye,
-because keeping the pointer compiles and works right up until the next frame arrives.
-
-### 2.2 `core/ICanLink.h`
-
-```cpp
-#pragma once
-#include "AffaTypes.h"
-
-namespace affa {
-
-// The CAN seam, deliberately a PULL port.
-//
-// The obvious design is a push callback (`onReceive(cb)`), and that is what the code
-// this library was extracted from used. It is also what made the ACK deadlock
-// possible: the protocol layer blocked waiting for a frame that only a push from
-// somewhere else could deliver. With recv(), the protocol layer owns its own drain
-// and cannot wait on a thing it is preventing.
-struct ICanLink {
-  virtual ~ICanLink() = default;
-
-  // Hand one frame to the controller. MUST NOT BLOCK. Returns false if the frame was
-  // not accepted (TX gate closed, driver queue full, bus off). Never retries.
-  virtual bool send(const Frame& f) = 0;
-
-  // Pop one buffered received frame. Returns false when the buffer is empty.
-  // MUST NOT BLOCK. Called in a tight loop by AffaDisplayBase::poll().
-  virtual bool recv(Frame& out) = 0;
-
-  // False disables all transmission at the protocol layer: enqueue() returns
-  // LinkDown and in-flight jobs complete LinkDown. Default true.
-  virtual bool isLive() const { return true; }
-
-  virtual Stats stats() const { return Stats{}; }
-};
-
-} // namespace affa
-```
-
-### 2.3 `core/IClock.h`
-
-```cpp
-#pragma once
-#include <cstdint>
-
-namespace affa {
-
-// There is deliberately NO delayMs(). Nothing in this library is allowed to sleep.
-// If an implementation wants one, the state machine is wrong.
-struct IClock {
-  virtual ~IClock() = default;
-  virtual uint32_t millis() const = 0;
-};
-
-} // namespace affa
-```
-
-All time comparisons in the library are wrap-safe and written exactly one way:
-
-```cpp
-if (static_cast<int32_t>(now - deadline) >= 0) { /* expired */ }
-```
-
-Never `now > deadline`, never `now - last > interval` with unsigned `last` sourced
-from a different epoch.
-
-### 2.4 `core/IPanel.h`
-
-```cpp
-#pragma once
-#include "AffaTypes.h"
-
-namespace affa {
-
-// The minimal RENDERING port: "how to draw", nothing else.
-//
-// An IPage, and the menu ADAPTER (carminat/CarminatMenuRenderer), draw through this
-// rather than through the concrete display, so both are unit-testable against a fake
-// panel and a future WebPanel (render to a browser, no CAN) satisfies the same four
-// calls. The menu STATE MACHINE does not: widget::MenuModel draws through
-// widget::IMenuRenderer and has no idea this interface exists. No defaults: a
-// rendering caller passes every argument explicitly.
-struct IPanel {
-  virtual ~IPanel() = default;
-
-  virtual Result showMenu(const char* header, const char* row0, const char* row1,
-                          uint8_t scrollIndicator) = 0;
-  virtual Result setText(const char* text, uint8_t digit) = 0;
-  virtual Result highlightItem(uint8_t row) = 0;
-  virtual Result showPopupText(const char* text, uint8_t icon,
-                               uint8_t srcIcon, uint8_t fmt) = 0;
-};
-
-} // namespace affa
-```
-
-### 2.5 `core/IDisplay.h`
-
-```cpp
-#pragma once
-#include "AffaTypes.h"
-
-namespace affa {
-
-// The panel-agnostic surface. An application that wants to work across Carminat and
-// UpdateList holds an IDisplay&; AffaDisplayBase implements it.
-//
-// Every render call ENQUEUES and returns immediately (§3). The Result is an
-// ACCEPTANCE verdict, never a delivery verdict.
-//
-// EVERY ONE OF THEM IS [[nodiscard]], and so is every override in AffaDisplayBase and in
-// the panels, plus enqueue(), pressKey(), nav() and subscribe(). The
-// Result is the only thing separating "queued" from NoSync / QueueFull / TooLong /
-// NotSupported, and a dropped Result is a screen that silently never appears — the exact
-// legacy failure §6 exists to stop repeating. Ignore one on purpose and say so:
-//     (void)display.setText("RENAULT", 0);
-struct IDisplay {
-  virtual ~IDisplay() = default;
-
-  virtual bool     begin() = 0;
-  virtual void     poll()  = 0;
-  virtual bool     supports(Feature f) const = 0;
-  virtual SyncState syncState() const = 0;
-
-  [[nodiscard]] virtual Result setText(const char* text, uint8_t digit = 255) = 0;
-  [[nodiscard]] virtual Result setTime(const char* hhmm)                      = 0;
-  [[nodiscard]] virtual Result setPower(bool on)                              = 0;
-
-  [[nodiscard]] virtual Result showMenu(const char* header, const char* row0,
-                                        const char* row1,
-                                        uint8_t scrollIndicator = 0x0B)       = 0;
-  [[nodiscard]] virtual Result highlightItem(uint8_t row)                     = 0;
-
-  [[nodiscard]] virtual Result showPopupText(const char* text, uint8_t icon = 0x09,
-                                             uint8_t srcIcon = 0xFF,
-                                             uint8_t fmt = 0x60)              = 0;
-  [[nodiscard]] virtual Result hidePopup()                                    = 0;
-  [[nodiscard]] virtual Result showFullscreenText(const char* l1, const char* l2,
-                                                  const char* l3)             = 0;
-  [[nodiscard]] virtual Result showConfirmBox(const char* caption, const char* row0,
-                                              const char* row1)               = 0;
-  [[nodiscard]] virtual Result showInfoPopup(const char* l1, const char* l2,
-                                             const char* l3)                  = 0;
-};
-
-} // namespace affa
-```
-
-Note the difference from the code being extracted: the legacy `IDisplay` gave these
-methods **silently no-op defaults**. Here they are pure virtual on the interface and
-`AffaDisplayBase` supplies a single default body that returns `Result::NotSupported`.
-See §6.
-
-### 2.6 `util/AffaLog.h`
-
-```cpp
-#pragma once
-#include "../AffaConfig.h"
-#include <cstdint>
-
-namespace affa {
-
-// Levels are ordered; AFFA_LOG_LEVEL compiles out everything above it.
-// 0 = off, 1 = error, 2 = warn, 3 = info, 4 = debug, 5 = trace.
-struct ILogSink {
-  virtual ~ILogSink() = default;
-  virtual void write(uint8_t level, const char* tag, const char* msg) = 0;
-};
-
-namespace detail {
-#if AFFA_ENABLE_LOG
-void setSink(ILogSink* s);
-void emit(uint8_t level, const char* tag, const char* fmt, ...)
-     __attribute__((format(printf, 3, 4)));
-#else
-inline void setSink(ILogSink*) {}
-#endif
-} // namespace detail
-
-} // namespace affa
-
-#if AFFA_ENABLE_LOG
-#  define AFFA_LOG_(lvl, tag, ...) ::affa::detail::emit((lvl), (tag), __VA_ARGS__)
-#else
-#  define AFFA_LOG_(lvl, tag, ...) do {} while (0)
-#endif
-
-#if AFFA_ENABLE_LOG && AFFA_LOG_LEVEL >= 1
-#  define AFFA_LOGE(tag, ...) AFFA_LOG_(1, tag, __VA_ARGS__)
-#else
-#  define AFFA_LOGE(tag, ...) do {} while (0)
-#endif
-// ... AFFA_LOGW (2), AFFA_LOGI (3), AFFA_LOGD (4), AFFA_LOGT (5) follow the same shape.
-```
-
-**The disabled macro discards its arguments entirely.** A format string that is never
-referenced is never emitted into `.rodata`; that is the whole point of the knob. The
-consequence: *never put a side effect inside a log argument.* `AFFA_LOGD("X", "%d",
-counter++)` compiles to nothing and the increment disappears. A CI grep rejects `++`,
-`--` and `=` inside `AFFA_LOG*` argument lists.
-
-### 2.7 `core/AffaSyncProfile.h`
-
-```cpp
-#pragma once
-#include <cstdint>
-
-namespace affa {
-
-// One sync FSM, two panel families. Everything that differed between
-// CarminatDisplay::tick() and UpdateListBase::tick() is data in here; the code is
-// in AffaDisplayBase::pumpSync(). Duplicating the FSM is what let the same two
-// defects live twice.
-struct SyncProfile {
-  uint16_t syncId;        // Carminat 0x3AF   UpdateList 0x3DF   (we transmit here)
-  uint16_t syncReplyId;   // both 0x3CF                          (panel transmits here)
-  uint16_t replyFlag;     // both 0x400
-  uint8_t  aliveByte;     // 0xB9 / 0x79   heartbeat, data[0]
-  uint8_t  requestByte;   // 0xBA / 0x7A   sync request, data[0]
-  uint8_t  requestArg;    // Carminat 0x00, UpdateList 0x01 — data[1] of the request
-  uint8_t  filler;        // 0x00 / 0x81   pads every frame we build
-  const uint8_t (*hello)[8];  // the announce burst, in order. On Carminat it is drawn by a
-                              // `61 11 xx` that arrives AFTER our `BA` — specifically the
-                              // panel's NEXT one — and timed +31 ms from that request, not
-                              // from `BA`. The `xx` byte is not read. See §2.7.
-  uint8_t  helloCount;    // Carminat 3, UpdateList 1
-  bool replyToPing = false;   // MUST stay false for Carminat: `B9` is a free-running 500 ms
-                              // heartbeat, not a pong. Setting it true doubles our `B9` rate.
-                              // CONFIRMED false for UpdateList too, on glass 2026-08-04: its
-                              // panel pings ~500 ms, is never ponged, and the session holds.
-                              // Its reference driver pongs every `0x69`; ours does not, and
-                              // the panel does not care.
-  bool waitForPanel = false;      // stay silent until the panel speaks
-  bool sendSyncRequest = true;    // may we probe with `BA` as periodic recovery
-  bool requireAuthRequest = false;// a bare `69` is not permission; a complete `61 11 xx` is
-  uint32_t helloMinMs = 0;
-  uint32_t helloFirstDelayMs = 0;
-  uint32_t helloFrameGapMs = 0;
-  uint32_t payloadAfterRegistrationMs = 0;
-  uint32_t syncIntervalMs = 0;
-  bool registerAfterHello = false;    // registration is part of the OPENING, not of rendering
-  uint32_t announceWhenSilentMs = 0;  // break a two-way silence; 0 = never
-  bool helloRequiresAnnounce = false; // our `BA` first; the panel's NEXT request draws the
-                                      // burst
-};
-
-} // namespace affa
-```
-
-Carminat exposes the opening choice without exposing a mutable `SyncProfile`:
-
-```cpp
-enum class affa::carminat::CarminatHelloProfile : uint8_t {
-  CapturedB0x3,          // default
-  MeganeCanLegacy70B0B0  // explicit compatibility profile
-};
-
-affa::CarminatDisplay display(
-    link, clock,
-    affa::carminat::CarminatHelloProfile::CapturedB0x3);
-```
-
-`CapturedB0x3` announces one bounded bare `BA` into silence, then sends three identical
-`B0 14 11 00 1F 00 00 00` frames at +31 ms intervals in answer to a `3CF 61 11 xx` that
-arrives after that `BA`. It waits for link acceptance of the third frame before inserting the
-`151` / `1F1` registration work, waits 400 ms after the final registration ACK before a
-zero-padded power command, and free-runs `B9` at 500 ms.
-
-> **Corrected 2026-08-04 against four OEM captures** (`docs/captures/*.csv`, derivation in
-> `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`). This paragraph used to read *"holds the strict
-> `61 11 00` gate … the **sequential** `151` / `1F1` registration work … **paces** B9/69
-> liveness at about 500 ms. **Its `01` path is one `B9` + `BA` discovery pair only.**"* Four
-> corrections:
-> * **There is no `00` gate.** `61 11 00` and `61 11 01` are the same request; one capture
->   completes a whole session on sixteen `01` frames and zero `00`.
-> * **The trigger is our `BA`, positionally, not the byte value** — and the burst answers the
->   panel's *second* request, ~104 ms after the one that armed it. Anchored on the request the
->   31 ms holds to 0.79 ms across four captures; anchored on `BA` it scatters over 80 ms.
-> * **Registration is part of the opening and is pipelined** — both probes 0.1–0.3 ms after
->   B0#3, `1F1 70` on the wire 0.29 ms after `151 70`, before either ACK returns.
-> * **`B9` is not paced against `69`; it free-runs.** See §2.7.
-> * **The announce is a bare `BA`, with no `B9` in front of it.** §3.0.
->
-> The six profile flags those corrections settled — `authRequestByte2`,
-> `helloAfterBootstrapRequest`, `helloOnNonAuthRequest`, `oneShotResyncOnStart`,
-> `oneShotResyncOnPeerAlive`, `bootstrapAliveFrame` — were deleted on 2026-08-04 and are
-> library rules now. A profile carries identity, timing, and the four questions the families
-> genuinely answer differently. See `docs/REFACTOR-PLAN.md`.
-
-`MeganeCanLegacy70B0B0` keeps the same bounded recovery policy but substitutes the historical
-immediate MeganeCAN `70 1A 11 ...`, `B0 ...`, `B0 ...` opening — a frame that appears in
-**zero** of the 579 OEM frames. It is for a panel that has demonstrated that legacy
-requirement; it is never selected automatically or mixed into the default sequence.
-
-The UpdateList profile remains separate: `3DF` / `79` / `7A 01`, filler `81`, and
-function IDs `121` / `1B1`. Its old `affa3.c` reference is not a Carminat authority.
-
-#### 2.7.1 Auth-clock POC capture and TX terms
-
-`examples/06_authclock` arms its LittleFS boot capture before CAN starts. It writes the
-first history of the experiment to `/can-boot.bin`; `GET /api/capture` downloads that
-binary record stream, while `/api/boot` shows paged decoded rows. The record is intentionally
-first-history-wins rather than a wrapping tail, so the opening handshake remains available
-after a long run.
-
-The POC uses direct TWAI controller alerts, so its labels have a stronger distinction than
-the generic library:
-
-| POC record | Meaning |
-|---|---|
-| `TXQ` | TWAI accepted the frame into its transmit path. It is not proof that the bus transmitted it. |
-| `TX+` | the controller later reported a successful transmit outcome. |
-| `TX-` / `TX!` | a controller failure after acceptance / a local refusal before acceptance. |
-
-The generic `ICanLink` API only reports whether `send()` accepted a frame. Therefore the
-library-side Carminat gate is based on **link acceptance**, not a claim that a controller
-`TX+` occurred. The direct POC can additionally wait for `TX+` before treating its own
-opening step or ACK timeout as progressed.
-
-### 2.8 `core/AffaRing.h`
-
-```cpp
-#pragma once
-#include <cstdint>
-#include <atomic>
-
-namespace affa {
-
-// Lock-free single-producer / single-consumer ring.
-//
-// Producer = the esp32_can general callback, running in task_CAN (prio 15).
-// Consumer = whatever task calls AffaDisplayBase::poll().
-// Exactly one thread may call push(); exactly one may call pop(). Two producers or
-// two consumers corrupt it silently — there is no lock and there is not going to be
-// one, because push() runs in a driver task and must not be able to block it.
-//
-// N must be a power of two: the modulo is a mask, and the head/tail counters are
-// free-running so a full ring is distinguishable from an empty one without a spare
-// slot or a count.
-template <typename T, uint16_t N>
-class AffaRing {
-  static_assert(N >= 2 && (N & (N - 1)) == 0, "AffaRing capacity must be a power of two");
-
- public:
-  // Producer side. Returns false and bumps overflow() when full; the frame is LOST.
-  // Dropping the newest is deliberate: overwriting the oldest would hand the protocol
-  // layer a sequence with a hole in the middle of an ISO-TP transfer.
-  bool push(const T& v) {
-    const uint16_t h = _head.load(std::memory_order_relaxed);
-    const uint16_t t = _tail.load(std::memory_order_acquire);
-    if (static_cast<uint16_t>(h - t) >= N) {
-      _overflow.fetch_add(1, std::memory_order_relaxed);
-      return false;
-    }
-    _buf[h & (N - 1)] = v;
-    _head.store(static_cast<uint16_t>(h + 1), std::memory_order_release);
-    return true;
-  }
-
-  // Consumer side.
-  bool pop(T& out) {
-    const uint16_t t = _tail.load(std::memory_order_relaxed);
-    const uint16_t h = _head.load(std::memory_order_acquire);
-    if (h == t) return false;
-    out = _buf[t & (N - 1)];
-    _tail.store(static_cast<uint16_t>(t + 1), std::memory_order_release);
-    return true;
-  }
-
-  bool     empty() const { return _head.load(std::memory_order_acquire) ==
-                                  _tail.load(std::memory_order_acquire); }
-  uint16_t size()  const { return static_cast<uint16_t>(_head.load(std::memory_order_acquire) -
-                                                        _tail.load(std::memory_order_acquire)); }
-  static constexpr uint16_t capacity() { return N; }
-  uint32_t overflow() const { return _overflow.load(std::memory_order_relaxed); }
-  // Consumer side only, and only while the producer is known idle (before begin()).
-  void reset() { _head.store(0); _tail.store(0); _overflow.store(0); }
-
- private:
-  T _buf[N];
-  std::atomic<uint16_t> _head{0};   // written by producer only
-  std::atomic<uint16_t> _tail{0};   // written by consumer only
-  std::atomic<uint32_t> _overflow{0};
-};
-
-} // namespace affa
-```
-
-### 2.9 `core/AffaDisplayBase.h`
-
-```cpp
-#pragma once
-#include "../AffaConfig.h"
-#include "AffaTypes.h"
-#include "AffaSyncProfile.h"
-#include "ICanLink.h"
-#include "IClock.h"
-#include "IDisplay.h"
-#include "IPanel.h"
-#include "../util/AffaLog.h"
-
-namespace affa {
-
-// NOTHING MENU-SHAPED IS DECLARED HERE, not even a forward declaration. The base reaches the
-// menu through three virtual hooks (menuOpen / openMenu / routeKeyToMenu, §7b) and never
-// through a type, which is what lets widget::MenuModel exist without core/ knowing it does.
-
-// Implements both interfaces. The four IPanel primitives (showMenu, setText,
-// highlightItem, showPopupText) are declared with SIGNATURES IDENTICAL to IDisplay's,
-// so a single override in a panel satisfies both bases with no ambiguity. Interfaces
-// carry no data, so there is no diamond. Do not "tidy" either signature.
-class AffaDisplayBase : public IDisplay, public IPanel {
- public:
-  // Callback signatures. C function pointers, not std::function: no allocation, no
-  // hidden vtable, and a plain pointer can be compared and reset.
-  using KeyCb      = void (*)(Key k, KeyEdge e, void* ctx);
-  using CompleteCb = void (*)(TxTicket t, Result r, void* ctx);
-  using SyncCb     = void (*)(SyncState s, void* ctx);
-
-  // The link, the clock and the profile are constructor arguments because none of
-  // them is optional and none of them may change after begin().
-  AffaDisplayBase(ICanLink& link, IClock& clock, const SyncProfile& profile,
-                  const uint16_t* funcIds, uint8_t funcCount);
-  ~AffaDisplayBase() override = default;
-
-  AffaDisplayBase(const AffaDisplayBase&)            = delete;
-  AffaDisplayBase& operator=(const AffaDisplayBase&) = delete;
-
-  // ---- lifecycle ----------------------------------------------------------
-  // Resets the FSMs, clears the queue (queued tickets complete Cancelled), arms the
-  // peer deadline and the heartbeat. Transmits NOTHING by itself — the first frame
-  // leaves on the first poll(). Safe to call again; idempotent apart from the reset.
-  bool begin() override;
-
-  // The single pump. In this order, every call, no exceptions:
-  //   1. drain the RX ring; per frame: tap -> subscriptions -> library consumption
-  //      (sync frames, ACKs, auto-ACK, key frames -> KeyCb)
-  //   2. advance the sync FSM
-  //   3. advance the TX FSM
-  //   4. onPoll() panel hook
-  // Step 1 strictly precedes step 3 so that key latency is bounded by the poll period
-  // alone and is independent of the transmit queue (§3b.3). See §4 for the
-  // frequency-independence contract.
-  void poll() override;
-
-  // ---- ports and options --------------------------------------------------
-  void setLogSink(ILogSink* s);
-  void onKey(KeyCb cb, void* ctx);
-  void onComplete(CompleteCb cb, void* ctx);
-  void onSync(SyncCb cb, void* ctx);        // fires only on an actual state change
-
-  // ---- observation seam (§7b) ----------------------------------------------
-  // Layer 0: every frame in and out, unfiltered, for sniffers and consoles.
-  // One tap; a second call replaces the first. Pass nullptr to remove it.
-  void onFrame(FrameTap cb, void* ctx);
-
-  // Layer 1: filtered raw subscription. Fixed table of AFFA_MAX_SUBSCRIPTIONS
-  // entries, no allocation. Returns kNoSub when the table is full or the match
-  // is unsatisfiable (dir == 0, or len > 8).
-  SubHandle subscribe(const FrameMatch& m, FrameCb cb, void* ctx);
-  bool      unsubscribe(SubHandle h);       // false if the handle is stale
-  uint8_t   subscriptions() const;          // slots in use, for diagnostics
-
-  // Layer 2: decoded protocol events. One sink; a second call replaces the
-  // first. Fires IN ADDITION TO KeyCb/CompleteCb/SyncCb, never instead of them.
-  void onEvent(EventCb cb, void* ctx);
-
-  // Passive mode: a real radio is on the bus and owns the handshake. We then send no
-  // sync frames, no hello, no generic 0x74 ACK, and never latch FUNCSREG — we only
-  // inject data. This was `setSkipFuncReg`. On a vehicle bus, set it.
-  void setPassive(bool on);
-  bool passive() const;
-
-  // Bench self-ACK. With no panel on the bus the per-frame ACK never arrives and only
-  // the first frame of a multi-frame message would go out. With this on, the TX FSM
-  // acknowledges its own frames (PARTIAL while bytes remain, DONE on the last) so the
-  // complete, real frame sequence is emitted for a PC-side decoder. The wire bytes are
-  // identical to a real send; only the external ACK is skipped.
-  void setSelfAck(bool on);
-
-  // ---- observation --------------------------------------------------------
-  SyncState syncState() const override;
-  bool      synced()     const;   // !hasFlag(state, Failed)
-  bool      registered() const;   //  hasFlag(state, FuncsReg)
-  bool      busy()       const;   // a job is in flight or queued
-  Result    lastResult() const;   // Result of the most recently COMPLETED ticket
-  TxTicket  lastTicket() const;   // that ticket
-  // The ticket issued by the most recent successful enqueue, INCLUDING one made
-  // inside a render call — which is how an application that used setText() rather
-  // than enqueue() learns which ticket to match in onComplete. kNoTicket if the last
-  // enqueue was rejected. Read it immediately after the call; it is overwritten by
-  // the next one, including by a render the menu makes on your behalf.
-  TxTicket  lastEnqueued() const;
-  uint8_t   queued()     const;   // jobs waiting behind the active one
-  Stats     stats()      const;   // forwarded from the link
-
-  // ---- capability ---------------------------------------------------------
-  bool supports(Feature f) const override = 0;   // each panel answers for itself
-
-  // ---- transmit -----------------------------------------------------------
-  // Copy `len` bytes into a queue slot and return immediately. The bytes need not
-  // outlive the call. Returns kNoTicket on rejection; the reason is in lastResult().
-  // `opt` carries the coalescing slot, the priority and the per-message coalescing
-  // opt-out (§3b). The default is a plain FIFO append — slot None never coalesces —
-  // which is what a raw protocol send wants.
-  TxTicket enqueue(uint16_t funcId, const uint8_t* data, uint8_t len,
-                   TxOptions opt = TxOptions{});
-
-  // ---- preemption (§3b.5) --------------------------------------------------
-  // Drop every job that is QUEUED AND NOT YET STARTED — i.e. every job of which not
-  // one byte has been handed to ICanLink::send(). The job on the wire is NOT touched.
-  // Each dropped ticket is reported through onComplete with Result::Aborted. Returns
-  // how many were dropped. The queue is mutated BEFORE any callback fires, so a nested
-  // abortPending() from inside one of those callbacks finds nothing and returns 0.
-  uint8_t abortPending();
-
-  // abortPending(), plus abandon the message currently on the wire. The abandon
-  // happens at the next FRAME BOUNDARY — after the in-flight frame's ACK arrives or
-  // its deadline expires — never mid-frame, and the ISO-TP continuation counter is
-  // reset so the next message starts clean at its own frame 0. Returns true if a job
-  // was actually abandoned. Bench and shutdown use: the panel is left holding a
-  // half-received transfer, and how it recovers is the panel's business, not ours.
-  // Routine preemption is coalescing + abortPending() + Priority::Urgent.
-  bool abortAll();
-
-  // Is a not-yet-started job for this slot sitting in the queue? Cheap, exact, and
-  // the thing to assert in a test rather than counting frames.
-  bool pending(RenderSlot s) const;
-
-  // NOTE: there is no sendBlocking(). One existed — it pumped poll() until a ticket
-  // completed — and it was the only call in the library that waited for anything.
-  // Nothing in src/, examples/ or test/ ever used it, so it was removed rather than
-  // maintained. Watch onComplete() from your own loop.
-
-  // ---- input seam (see §8 and §7b.6) ---------------------------------------
-  // Emulate a key press. The Local half takes the IDENTICAL path to a key decoded off
-  // the wire, so anything a test or a web page can drive is provably what the panel
-  // drives. Safe from an application task; NOT safe from an ISR (it can render, which
-  // enqueues). BOTH default to Local: in the radio role we are the RECEIVER of key
-  // frames, so transmitting one does not make the emulation more faithful — it puts a
-  // frame on the bus that nothing is listening for (§7b.6).
-  Result pressKey(Key k, KeyEdge e, KeySource src = KeySource::Local);
-  Result nav(NavCommand c,          KeySource src = KeySource::Local);
-
-#if AFFA_ENABLE_MENU
-  // The gesture that OPENS the menu. "Hold Load opens the menu" is the OEM convention
-  // for this panel, so it ships as the default — but it is UI policy, not wire format,
-  // and an application with its own remote or its own idea must be able to replace it.
-  // Affects opening ONLY: once the menu is open, key routing into it is rendering
-  // behaviour and is not configurable (§7b.7c).
-  void setMenuHotkey(Key k, KeyEdge e);   // default: Key::Load, KeyEdge::Hold
-  void clearMenuHotkey();                 // no gesture opens the menu; only nav(Open)
-  bool menuHotkey(Key& k, KeyEdge& e) const;   // false when cleared
-
-  // NOTE: getMenu() is NOT here. It is declared on CarminatDisplay, the panel that owns
-  // a Menu; the base declares no Menu accessor and no `virtual Menu* menu()` seam,
-  // because UpdateList has no menu at all. nav() above is the panel-agnostic half. See
-  // §8.7 — the library still hands out an EMPTY menu that the application fills.
-#endif
-
-  // ---- rendering: default bodies return NotSupported ------------------------
-  Result setText(const char*, uint8_t digit = 255) override;
-  Result setTime(const char*) override;
-  Result setPower(bool) override;
-  Result showMenu(const char*, const char*, const char*, uint8_t = 0x0B) override;
-  Result highlightItem(uint8_t) override;
-  Result showPopupText(const char*, uint8_t = 0x09, uint8_t = 0xFF, uint8_t = 0x60) override;
-  Result hidePopup() override;
-  Result showFullscreenText(const char*, const char*, const char*) override;
-  Result showConfirmBox(const char*, const char*, const char*) override;
-  Result showInfoPopup(const char*, const char*, const char*) override;
-
- protected:
-  // ---- panel hooks ---------------------------------------------------------
-  // Every frame we build pads with this. Carminat 0x00, UpdateList 0x81.
-  virtual uint8_t packetFiller() const = 0;
-
-  // Called for each received frame the base did not consume itself (i.e. not a sync
-  // frame on syncReplyId and not an ACK on funcId|replyFlag). Panels decode their key
-  // frame and their radio-text frame here. Return true if consumed.
-  virtual bool onFrame(const Frame& f) { (void)f; return false; }
-
-  // Called after a key has been decoded (from the wire, or from pressKey/nav with a
-  // source that includes Local). The base implementation applies the menu hotkey,
-  // routes to MenuController when AFFA_ENABLE_MENU, then falls through to the
-  // application's KeyCb and fires EventKind::Key. Panels override only to add routing,
-  // never to replace the fall-through.
-  virtual void routeKey(Key k, KeyEdge e);
-
-  // Build and transmit the panel's key frame: keyId : 03 89 <hi> <lo|hold> <filler x4>.
-  // The Wire half of pressKey(). Returns NotSupported when the panel has no key
-  // transmit id, or for a hold edge on a wheel code (§7b.6). Not queued: a key frame
-  // is a single frame on its own id with no ACK and no function registration, so
-  // putting it behind the ISO-TP queue would give it exactly the latency §3b exists
-  // to remove. Tagged fromSelf, and reported to the tap as Direction::Tx.
-  Result transmitKey(Key k, KeyEdge e);
-
-  // Called from poll() once per pass, after the sync and TX FSMs. Panels put their
-  // own time-driven work here (the UpdateList title scroll). MUST be deadline-driven
-  // against _clock, never a call counter.
-  virtual void onPoll() {}
-
-  // Decoded a hold edge from a raw wire code: shared helper so both panels use the
-  // same mask. Wheel codes (0x0101/0x0141) never carry the hold bits — see §8.3.
-  static void decodeKey(uint16_t raw, Key& out, KeyEdge& edge);
-
-  ICanLink&          _link;
-  IClock&            _clock;
-  const SyncProfile& _profile;
-
- private:
-  enum class TxState : uint8_t { Idle, SendingFrame, WaitAck, Done, Failed };
-  enum class JobKind : uint8_t { Payload, Registration };
-
-  struct TxJob {
-    uint16_t   funcId;
-    TxTicket   ticket;      // kNoTicket for Registration jobs — they are invisible
-    JobKind    kind;
-    RenderSlot slot;        // coalescing key, with funcId
-    Priority   prio;
-    bool       coalesce;    // false = this message is never replaced
-    bool       started;     // true once ONE byte has gone to ICanLink::send().
-                            // The single authority for "not yet started" (§3b.4).
-    bool       abandon;     // abortAll() asked for it; honoured at the frame boundary
-    uint8_t    len;
-    uint8_t    sent;        // bytes already handed to the link
-    uint8_t    frameIndex;  // ISO-TP continuation counter `num`
-    uint8_t    data[AFFA_MAX_PAYLOAD];
-  };
-
-  // One subscription slot. `gen` is bumped on every unsubscribe so a stale SubHandle
-  // cannot unsubscribe the slot's next owner — the silent failure mode of a bare index.
-  struct Sub {
-    FrameMatch m;
-    FrameCb    cb  = nullptr;
-    void*      ctx = nullptr;
-    uint8_t    gen = 0;
-    bool       used = false;
-  };
-
-  void pumpRx();            // ALWAYS first in poll(); delivers keys (§3b.3)
-  void pumpSync();
-  void pumpTx();            // ALWAYS last; never reached before pumpRx() has returned
-  // The single choke point every frame passes through, in BOTH directions: tap first,
-  // then the subscription table. Called from pumpRx() for each received frame and from
-  // txFrame() for each transmitted one, so a sniffer sees the whole bus in order.
-  void observe(const Frame& f, Direction d);
-  bool txFrame(const Frame& f);     // stamps fromSelf, calls _link.send(), observes
-  void emit(const Event& ev);       // fires the Layer 2 sink if one is installed
-  int  findCoalescable(uint16_t funcId, RenderSlot s) const;  // -1 if none
-  uint8_t insertIndexFor(Priority p) const;   // after started + Registration jobs
-  bool handleSyncFrame(const Frame& f);
-  bool handleAckFrame(const Frame& f);
-  void sendGenericAck(uint16_t id);      // the 0x74 reply on id|replyFlag
-  bool pushJob(uint16_t funcId, const uint8_t* d, uint8_t len, JobKind kind, TxTicket t);
-  void finishJob(Result r);
-  void failAllQueued(Result r);
-  void setSync(SyncState s);             // single choke point; fires SyncCb on change
-
-  TxJob     _queue[AFFA_TX_QUEUE_DEPTH];
-  uint8_t   _qHead = 0, _qCount = 0;
-  TxState   _tx = TxState::Idle;
-  uint32_t  _ackDeadlineMs = 0;
-  uint32_t  _nextSyncMs    = 0;
-  uint32_t  _peerDeadlineMs= 0;
-  SyncState _sync = SyncState::Failed;
-  TxTicket  _nextTicket = 1;
-  TxTicket  _lastCompleted = kNoTicket;
-  Result    _lastResult = Result::Ok;
-  const uint16_t* _funcIds;
-  uint8_t   _funcCount;
-  bool      _passive = false;
-  bool      _selfAck = false;
-  bool      _inPoll  = false;   // re-entrancy guard, see §4.3
-  KeyCb      _keyCb = nullptr;      void* _keyCtx = nullptr;
-  CompleteCb _cplCb = nullptr;      void* _cplCtx = nullptr;
-  SyncCb     _syncCb = nullptr;     void* _syncCtx = nullptr;
-  FrameTap   _tap   = nullptr;      void* _tapCtx = nullptr;
-  EventCb    _evCb  = nullptr;      void* _evCtx  = nullptr;
-  Sub        _subs[AFFA_MAX_SUBSCRIPTIONS];
-#if AFFA_ENABLE_MENU
-  Key        _hotkey     = Key::Load;      // §7b.7c — OEM default, replaceable
-  KeyEdge    _hotkeyEdge = KeyEdge::Hold;
-  bool       _hotkeyOn   = true;
-#endif
-};
-
-} // namespace affa
-```
-
-#### 2.9.1 The sync FSM, specified
-
-`pumpSync()` runs once per `poll()`. Nothing here is conditional on how often `poll()`
-is called.
-
-> **Carminat override — rewritten 2026-08-04.** Read the following as generic FSM structure,
-> not as the Carminat wire sequence. Carminat announces one bounded bare `BA` into
-> silence; a complete `3CF 61 11 xx` (DLC ≥ 3, **`xx` unread — `00` and `01` are the same
-> request**) that arrives after that `BA` arms the announce, and the panel's **next** request
-> ~104 ms later stages B0/B0/B0 at +31 ms gaps from *that request*. Each B0 only needs
-> `ICanLink::send()` acceptance at the library boundary. Registration starts after the third
-> acceptance, as part of the opening, with `151 70` and `1F1 70` **pipelined** 0.29 ms apart.
-> `B9` free-runs at 500 ms and does not start until registration completes; no timer emits
-> `BA`. See section 2.7, `WIRE-SPEC.md` §5.3, and `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md`.
->
-> *This note previously read "`01` schedules one `B9` + `BA` discovery pair and remains
-> locked, while `00` stages default B0/B0/B0" and "in strict `151` then `1F1` ACK order".
-> Both are disproven — see §2.7.*
-
-```
-if (_passive) return;                      // the radio owns the handshake
-
-if ((int32_t)(now - _nextSyncMs) < 0) return;
-_nextSyncMs = now + AFFA_SYNC_INTERVAL_MS;   // NOT `+=`: a stalled caller must not
-                                             // produce a catch-up burst of heartbeats
-
-emit  syncId : { aliveByte, 0x00, filler x6 }          // TX 3AF B9 00 00 ...
-
-if (hasFlag(_sync, Failed) || hasFlag(_sync, Start)) {
-    emit syncId : { requestByte, requestArg, filler x6 }  // TX 3AF BA 00 00 ...
-    _sync &= ~Start;
-    _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;        // fresh window for the peer
-    // the legacy delay(100) that lived here is DELETED, not replaced
-} else if (hasFlag(_sync, PeerAlive)) {
-    _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;
-    _sync &= ~PeerAlive;
-} else if ((int32_t)(now - _peerDeadlineMs) >= 0) {
-    setSync(Failed);                 // clears FuncsReg with it — registration does
-    _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;   // not survive a resync
-}
-```
-
-RX side, on `syncReplyId`:
-
-* `61 11 xx …` — the panel asks us to announce. Emit `helloCount` frames from
-  `profile.hello`, in order, on `syncId` — paced to at most one burst per
-  `AFFA_HELLO_MIN_MS`, because an unacknowledged panel repeats the request at line rate
-  and answering each one is a 4400 f/s flood no TX queue can drain. Clear `Failed`.
-  **If `FuncsReg` is currently set, the panel is declaring the REGISTRATION VOID** — set
-  `Start` and drop every registration so the next render re-registers from function zero,
-  and stop application traffic until the session is re-opened. The drop is guarded on
-  `FuncsReg`, not on the edge of `Start` — `pumpSync()` clears `Start` once a second, and an
-  edge trigger would re-drop mid-registration and livelock the pass it provoked. (Leaving
-  `FuncsReg` set here was the historic bug: every implementation believed it was still
-  registered, the panel believed the opposite, and only a power cycle ever ended the
-  argument. Observed live 2026-07-29 as `3CF 61 11 01` repeated at ~1500 f/s.)
-
-  > **Corrected 2026-08-04:** the void test used to be `len >= 3 && data[2] == 0x01`. **The
-  > third byte plays no part.** A registered panel sends **no** `61 11` at all — `00` or `01`
-  > — in any of the four OEM captures; the arrival of a complete request while we hold
-  > registrations *is* the void indication. On the bench the panel sent `61 11 **00**` forty-one
-  > times while firmware keyed on `01` kept pushing fullscreens at a panel that had already
-  > dropped us. Test `len >= 3` for well-formedness only, then ignore `data[2]`.
-
-* `69 …` — peer alive. Set `PeerAlive` and **return**. Transmit **nothing**. The legacy code
-  called `tick()` from here, which emitted an extra heartbeat per ping. `B9` is a free-running
-  500.08 ms timer (σ 0.33 ms) and the panel's `69` runs at 507.83 ms (σ 4.60) on a completely
-  independent clock — their phase slides monotonically and wraps past zero, so `B9` cannot be
-  a reply to it. Exactly one `B9` leaves per `AFFA_SYNC_INTERVAL_MS`.
-* anything else — ignored, logged at trace.
-
-Any received frame, when `!_passive` and the id does not carry `replyFlag`, is answered with
-the generic ACK `id|replyFlag : { 0x74, filler x7 }`. That is the `RX 1C1 70 …` →
-`TX 5C1 74 00 …` pair in the capture.
-
-> **For Carminat that ACK is UNCONDITIONAL — corrected 2026-08-04.** This note used to gate
-> it ("*after a complete `61 11 xx` opening request*… *allowed during `01` bootstrap and the
-> good-`00` hello burst*"). **Every frame received on `0x1C1` must be answered within ~0.5 ms,
-> at any phase, regardless of payload and regardless of session state** — 12/12 in the OEM
-> captures, latencies 0.249–0.483 ms. The panel's `1C1 70` arrives *during* the announce
-> burst, between B0#1 and B0#2, ~61 ms before our own `151`/`1F1` probes and before anything
-> resembling authorization has completed. Build it as a raw reflex on the receive path,
-> deliberately separate from the gate that releases application traffic. It still does not
-> make `linkReady()` true or authorize registration, power, text or clock writes.
-
-#### 2.9.2 The transmit FSM, specified
-
-```
-Idle
- └─ queue non-empty ────────────────────────────────► SendingFrame
-SendingFrame
- ├─ build the next ISO-TP frame from the head job:
- │     frame 0 : data[0..7]   = payload[0..7]
- │     frame n : data[0]      = 0x20 + n, data[1..7] = payload[...]
- │     tail    : padded with packetFiller()
- ├─ _link.send(frame) == false  ──► finishJob(SendFailed)
- ├─ job.started = true   ── from here the job is no longer preemptable (§3b.4)
- ├─ _selfAck  ──► synthesise DONE (no bytes left) or PARTIAL, stay in WaitAck for
- │                exactly one pass so the sequence is identical to a real send
- └─ _ackDeadlineMs = now + AFFA_ACK_TIMEOUT_MS ──────► WaitAck
-WaitAck                                    ← the ONLY place a job may be abandoned
- ├─ ACK 0x74            ──► finishJob(Ok)
- ├─ ACK 30 01 00 and bytes remain ──► job.abandon ? finishJob(Aborted)
- │                                                 : frameIndex++ ──► SendingFrame
- ├─ ACK 30 01 00 and no bytes remain ──► finishJob(SendFailed)   [legacy behaviour]
- ├─ any other ACK byte  ──► finishJob(SendFailed)
- ├─ deadline expired    ──► job.abandon ? finishJob(Aborted) : finishJob(Timeout)
- └─ !_link.isLive()     ──► finishJob(LinkDown)
-```
-
-`abandon` is only ever consulted in `WaitAck`, which is exactly what "abandoned at a
-frame boundary, never mid-frame" means: the CAN frame already handed to the link is
-always transmitted whole, and the next frame of that job is simply never built.
-`finishJob()` unconditionally clears `frameIndex`, `sent` and `started` as it pops, so
-an abandoned transfer cannot leave a continuation counter behind for the following
-message to inherit — the next job's first frame is its own frame 0 (byte 0 of its
-payload, `0x10` for any multi-frame Carminat screen), never a stray `0x2n`.
-
-`finishJob(r)`: pop the head job; if `kind == Registration` and `r == Ok` and it was
-the last registration job, latch `FuncsReg`. If `kind == Registration` and `r != Ok`,
-call `failAllQueued(r)` — the payload behind it completes with the registration's
-failure, exactly as the legacy `affa3_send` propagated it. If `ticket != kNoTicket`,
-record `_lastCompleted = ticket`, `_lastResult = r`, and fire `CompleteCb`.
-
-**Lazy function registration — A FALLBACK ON BOTH FAMILIES NOW, not the opening.** Inside
-`enqueue()`, before pushing the payload job:
-
-> **This is a fallback on Carminat, not the wire contract — corrected 2026-08-04.** The OEM
-> radio emits `151 70` **0.10 ms after B0#3** and `1F1 70` 0.29 ms after that, as part of the
-> opening, unconditionally, with **no application involvement whatsoever**: the first
-> application payload does not exist until 400 ms later. `[OEM 4/4]` Registering lazily means
-> a build that never renders never finishes a session — it will sit looking registered and be
-> silently unregistered on the panel side. The enqueue-time push below must remain as a
-> safety net for a lost registration, but the opening path is what should normally emit these
-> probes, and it should emit them **pipelined** (both on the wire before either ACK returns),
-> not serialised. See `docs/CARMINAT-HANDSHAKE-GROUND-TRUTH.md` §2.1 steps A11–A12.
-
-```
-if (!_passive && !hasFlag(_sync, FuncsReg) && no Registration job is already queued) {
-    for (i = 0; i < _funcCount; ++i)
-        pushJob(_funcIds[i], {0x70}, 1, Registration, kNoTicket);   // always FIFO tail
-}
-// then the payload, subject to coalescing and priority — §3b.4, §3b.5
-pushJob(funcId, data, len, Payload, ticket, opt);
-```
-
-Registration jobs are pushed with `slot = None`, `prio = Normal` and `coalesce =
-false`: nothing may replace them and nothing, not even `Priority::Urgent`, may overtake
-them. A payload that reached the panel before its function was registered is rejected
-by the panel, and the resulting `SendFailed` would look like a wire-format bug.
-`abortPending()` does not drop Registration jobs either — it drops a payload and leaves
-the registration that was pushed for it, which then completes harmlessly and latches
-`FuncsReg` for the next send.
-
-Carminat therefore emits, on the first send after a resync:
-`0x151 : 70 00 00 00 00 00 00 00`, wait ACK, `0x1F1 : 70 00 …`, wait ACK, latch
-`FuncsReg`, then the payload. That is the legacy loop in `affa3_send`, turned inside
-out into a queue without changing a byte or an order.
-
-> **The bytes are right; the *shape* differs from the OEM radio.** It pipelines — `1F1 70`
-> goes out 0.29 ms after `151 70`, before `551 74` returns, and the panel answers
-> `551 74` then `5F1 74` 0.47 ms apart. Serialising is functionally equivalent and safe, but
-> it costs one extra round trip inside a latency-sensitive window and it makes a bench
-> capture harder to diff against an OEM trace. Do not read the serialised form as the wire
-> contract. `[OEM 4/4]`
-
-The queue must have room for `_funcCount + 1` jobs on the first send, so
-`AFFA_TX_QUEUE_DEPTH` must be at least 3 for either panel. The default 4 leaves one
-spare.
-
-### 2.10 `link/Esp32CanLink.h`
-
-```cpp
-#pragma once
-#include "../AffaConfig.h"
-#if AFFA_ENABLE_ESP32CAN_LINK
-
-#include <driver/gpio.h>          // gpio_num_t ONLY. Not <esp32_can.h>.
-#include "../core/ICanLink.h"
-#include "../core/AffaRing.h"
-
-namespace affa {
-
-// Named so the two pins cannot be swapped at the call site. They have been, and the
-// symptom is a silent bus: no TX error, no RX, nothing.
-//   this board (ESP32-C3 SuperMini) : rx = GPIO_NUM_3, tx = GPIO_NUM_4
-//   pre-2026-08-03 bench wiring     : rx = GPIO_NUM_4, tx = GPIO_NUM_3 (historical)
-struct CanPins { gpio_num_t rx; gpio_num_t tx; };
-
-// THE ONLY CLASS IN THIS LIBRARY THAT KNOWS A DRIVER EXISTS.
-//
-// PROHIBITION, not advice. After begin() returns, this class never touches the driver
-// again except to call sendFrame() and to read status counters. Specifically it must
-// never call setListenOnlyMode, setNoACKMode, enable, disable, or any twai_* function,
-// and it implements no bus-off recovery of its own (AffaDisplayBase's peer watchdog
-// owns that). The runtime mode setters in esp32_can are implemented as
-// disable()+enable(), i.e. reinstalling the driver on a live bus, and that is what
-// repeatedly left the controller stopped in the previous project. MeganeCAN worked for
-// months precisely because it never touched the driver after begin().
-class Esp32CanLink final : public ICanLink {
- public:
-  Esp32CanLink() = default;
-
-  // Exactly this sequence, exactly once:
-  //   CAN0.setCANPins(pins.rx, pins.tx);   // signature IS (rx, tx) — verified in
-  //                                        // esp32_can_builtin.h:
-  //                                        // setCANPins(gpio_num_t rxPin, gpio_num_t txPin)
-  //   CAN0.begin(bitrate);
-  //   CAN0.setGeneralCallback(&trampoline);
-  //   CAN0.watchFor();
-  bool begin(CanPins pins, uint32_t bitrate = 500000);
-
-  bool  send(const Frame& f) override;   // never blocks; false if the gate is shut
-  bool  recv(Frame& out) override;       // pops the RX ring
-  bool  isLive() const override;         // began, and the TX gate is open
-  Stats stats() const override;
-
-  // "Silent mode" is a SOFTWARE TX GATE: send() simply returns false. It is NOT a
-  // driver mode change, and it never will be. See the prohibition above.
-  void setTxEnabled(bool on);
-  bool txEnabled() const;
-
- private:
-  friend struct Esp32CanTrampoline;   // defined in the .cpp, where CAN_FRAME exists
-
-  // Called from task_CAN (prio 15) via the driver's general callback. Pushes into the
-  // ring and returns. It does not log, allocate, block, or call user code — the whole
-  // reason ICanLink is a pull port.
-  void ingest(const Frame& f);
-
-  AffaRing<Frame, AFFA_RX_RING_DEPTH> _rx;
-  Stats _stats{};
-  bool  _began = false;
-  bool  _txEnabled = true;
-};
-
-} // namespace affa
-#endif // AFFA_ENABLE_ESP32CAN_LINK
-```
-
-`Esp32CanLink` is effectively a singleton: `setGeneralCallback` takes a plain function
-pointer with no context argument, so the `.cpp` holds a `static Esp32CanLink* s_self`
-set by `begin()`. A second `begin()` on a second instance returns `false` and logs an
-error rather than silently stealing the callback.
-
-### 2.11 `link/LoopbackLink.h`
-
-```cpp
-#pragma once
-#include "../core/ICanLink.h"
-#include "../core/AffaRing.h"
-
-namespace affa {
-
-// Header-only test double. Records everything the library transmits, lets a test
-// inject what the panel would have said, and can synthesise the per-frame ACK so a
-// test does not have to hand-write one per ISO-TP frame.
-template <uint16_t N = 128>
-class LoopbackLink final : public ICanLink {
- public:
-  bool send(const Frame& f) override {
-    if (!_live) { ++_stats.txDropped; return false; }
-    if (!_sent.push(f)) { ++_stats.txDropped; return false; }
-    ++_stats.txFrames;
-    if (_autoAck) synthesiseAck(f);
-    return true;
-  }
-  bool  recv(Frame& out) override { return _rx.pop(out); }
-  bool  isLive() const override   { return _live; }
-  Stats stats()  const override   { return _stats; }
-
-  // ---- test side ----
-  void inject(const Frame& f)  { _rx.push(f); ++_stats.rxFrames; }   // panel -> library
-  bool takeSent(Frame& out)    { return _sent.pop(out); }            // library -> test
-  uint16_t sentCount() const   { return _sent.size(); }
-  void setLive(bool v)         { _live = v; }
-  // Answers each transmitted frame on id|0x400 with 0x74 (or 30 01 00 while the
-  // library still has bytes to send, if `partialFrames` > 0 for this transfer).
-  void setAutoAck(bool v)      { _autoAck = v; }
-  void setAckReplyFlag(uint16_t f) { _replyFlag = f; }
-  void clear() { _rx.reset(); _sent.reset(); _stats = Stats{}; }
-
- private:
-  void synthesiseAck(const Frame& f);
-  AffaRing<Frame, N> _rx;
-  AffaRing<Frame, N> _sent;
-  Stats    _stats{};
-  uint16_t _replyFlag = 0x400;
-  bool     _live = true;
-  bool     _autoAck = false;
-};
-
-} // namespace affa
-```
-
-`test/` additionally provides a `FakeClock` (`uint32_t millis() const` returning a
-member the test advances). It lives in `test/`, not in `src/` — it is not part of the
-library's surface.
-
-### 2.12 `widget/MenuModel.h` — the application-facing menu API
-
-The menu is **not panel code**. It used to be: `carminat/Menu/Menu.{h,cpp}` was a two-row
-sliding window with `IPanel` calls in the middle of the state machine and `row0`/`row1`
-welded into the arithmetic. That file is gone. What is left is one implementation —
-`widget::MenuModel` — with the display behind `widget::IMenuRenderer` and its shape in a
-`widget::MenuGeometry`. `carminat/CarminatMenuRenderer` is this panel's adapter, and it is
-what `CarminatDisplay` constructs for you. The full account is **docs/MENU-WIDGET.md**.
-
-`affa::Menu`, `affa::MenuItem`, `affa::Field`, `affa::FieldType` and the three field builders
-are still spelled that way in `carminat/CarminatDisplay.h` — as **aliases**, not a second
-implementation. Two differences a caller can observe:
-
-* `MenuModel::render()` returns **void**. Whether a frame reached the panel is not something
-  a UI state machine can act on; the adapter is the layer holding the `IPanel`, so the
-  verdict is `CarminatDisplay::menuRenderer().lastResult()`.
-* the geometry is injected (`CarminatMenuRenderer::geometry()`, 2 x 26), so a row is
-  truncated at 26 characters rather than at `AFFA_MENU_ROW_MAX - 1`.
-
-There is **no `handleKey`**. The model has six intents and no key vocabulary at all; mapping
-`(Key, KeyEdge)` onto them is `MenuController`'s job (§7b), and its `default:` is what keeps
-SrcNext / SrcPrev / VolUp / VolDown / Pause reaching the application while the menu is open.
-
-```cpp
-#pragma once
-#include "../AffaConfig.h"
-#if AFFA_ENABLE_MENU
-
-#include "IMenuRenderer.h"
-#include "MenuGeometry.h"
-
-namespace affa {
-namespace widget {
-
-enum class FieldType : uint8_t { Integer, List };
-
-// One editable value inside a menu item. Fixed layout, no allocation. `unit` and the
-// strings in `list` are CALLER-OWNED and must outlive the model — they are pointed at,
-// never copied. String literals and static tables are the intended sources.
-struct Field {
-  FieldType type           = FieldType::Integer;
-  int32_t   value          = 0;     // Integer: the value.  List: the index.
-  int32_t   minValue       = 0;
-  int32_t   maxValue       = 0;
-  int32_t   step           = 1;
-  int32_t   stepMultiplier = 1;     // multiplies `step` on increase()/decrease() (hold)
-  const char*        unit  = nullptr;              // Integer only, may be null
-  const char* const* list  = nullptr;              // List only
-  uint8_t   listCount      = 0;
-  bool      readOnly       = false;
-};
-
-// Builders — the whole item-construction API an application needs.
-Field integerField(int32_t value, int32_t min, int32_t max,
-                   int32_t step = 1, int32_t stepMultiplier = 10,
-                   const char* unit = nullptr);
-Field readOnlyField(int32_t value, const char* unit = nullptr);
-Field listField(const char* const* values, uint8_t count, uint8_t index = 0);
-
-struct MenuItem {
-  const char* label = nullptr;                   // caller-owned, must outlive the model
-  Field    fields[AFFA_MENU_MAX_FIELDS];
-  uint8_t  fieldCount = 0;
-  char     separator  = ' ';                     // between label/value and fields
-  bool     editable   = true;                    // false -> select() does nothing
-  // Fired after a field's value changed. Never called from an interrupt.
-  void   (*onChange)(const MenuItem& item, uint8_t fieldIndex, void* ctx) = nullptr;
-  // If set, select() on this item calls this INSTEAD of entering edit mode.
-  void   (*onActivate)(void* ctx) = nullptr;
-  void*    ctx = nullptr;
-};
-
-class MenuModel {
- public:
-  using CloseCb = void (*)(void* ctx);
-
-  MenuModel(IMenuRenderer& renderer, const MenuGeometry& geom, const char* header);
-
-  // ---- content, owned by the application ----------------------------------
-  void      setHeader(const char* h);
-  int       addItem(const MenuItem& item);   // index, or -1 if full
-  MenuItem* item(uint8_t index);             // nullptr if out of range
-  uint8_t   count() const;
-  void      clear();                         // also closes the menu, silently
-  // Change a value from outside (a sensor, a web request). Redraws only if the item
-  // is currently inside the visible window.
-  bool      setFieldValue(uint8_t itemIndex, uint8_t fieldIndex, int32_t value);
-  void      onClose(CloseCb cb, void* ctx);  // default: nothing. CarminatDisplay sets
-                                             // setText("RENAULT", 0), as today.
-
-  // ---- state --------------------------------------------------------------
-  bool    isOpen()        const;
-  bool    isEditing()     const;
-  uint8_t selectedIndex() const;
-  uint8_t selectedRow()   const;             // 0 = top row of the window
-  uint8_t editingField()  const;
-  uint8_t topIndex()      const;             // the item shown on row 0
-  uint8_t scrollMask()    const;             // 0x00 / 0x07 / 0x0B / 0x0C, see §8.6
-  const MenuGeometry& geometry() const;
-
-  // ---- navigation: one method per intent, no Key enum ----------------------
-  // Each returns true when the model consumed the intent; false means "the menu is
-  // closed, this key is the application's" — the contract Menu::handleKey had.
-  bool next();       // wheel down:      edit ? +1 step : selection down
-  bool prev();       // wheel up:        edit ? -1 step : selection up
-  bool increase();   // wheel down held: edit ? +coarse : selection down
-  bool decrease();   // wheel up   held: edit ? -coarse : selection up
-  bool select();     // activate / enter edit / advance to the next field
-  bool back();       // leave the menu
-
-  void open();                               // no-op on an EMPTY menu
-  void close();                              // clears editing state; see §8.5
-
-  // ---- rendering -----------------------------------------------------------
-  void render();                             // re-emit the whole window. VOID: the
-                                             // panel's verdict lives on the adapter
-  void rowText(uint8_t itemIndex, char* out, size_t outSize) const;
-};
-
-}  // namespace widget
-}  // namespace affa
-#endif
-```
-
-### 2.13 `proto/` — ISO-TP and screen decoding
-
-The transmit frame layout is specified once, in §2.9.2, and `AffaDisplayBase::pumpTx()`
-builds frames inline from it — the core does **not** call into `proto/`, so a consumer
-who never enables `AFFA_ENABLE_ISOTP_RX` links none of this. `isotp::fragment()` is the
-same layout expressed as a function, for the twins and the tests.
-
-That duplication is deliberate and it is fenced, and the fence is **written and passing**:
-`test_isotp_edges/test_fragment_matches_the_transmit_fsm_for_every_length` drives a
-payload of every length from 1 to `AFFA_MAX_PAYLOAD` through both paths and asserts the
-frame sequences are byte-identical, plus `frameCount()` agreement. If the two ever
-disagree, the test says so on the host, long before a panel does.
-
-> One shape wart, inherited from this section rather than introduced by the implementation:
-> `isotp::fragment()` is **declared ungated** in the header but **defined in a `.cpp` whose
-> body is gated**. With both gates off, calling it is a link error rather than a compile
-> error. Nothing in the library calls it and `AffaDisplay.h` does not include the header
-> when the gate is off, so it is latent — but it should eventually either be inlined into
-> the header or have its declaration gated too.
-
-```cpp
-// proto/IsoTp.h
-#pragma once
-#include "../AffaConfig.h"
-#include "../core/AffaTypes.h"
-
-namespace affa { namespace isotp {
-
-// AFFA3 framing, matching §2.9.2 exactly:
-//   frame 0 : 8 raw payload bytes, NO PCI prefix   (the 0x10 of a Carminat screen is
-//             payload byte 0, not a PCI byte — see WIRE-SPEC.md)
-//   frame n : [0x20 + n] then 7 payload bytes
-//   every frame padded to 8 with the protocol filler (Carminat 0x00 / UpdateList 0x81)
-// A 120-byte payload is 8 + 16x7 = 17 frames, so size `out` accordingly.
-uint8_t fragment(uint16_t id, const uint8_t* payload, uint8_t len, uint8_t filler,
-                 Frame* out, uint8_t maxOut);
-
-// Number of frames fragment() would produce. Constexpr so a caller can size a buffer.
-constexpr uint8_t frameCount(uint8_t len) {
-  return (len <= 8) ? 1 : static_cast<uint8_t>(1 + (len - 8 + 6) / 7);
-}
-
-#if AFFA_ENABLE_ISOTP_RX
-// The receive direction. Feed every frame in arrival order; read buffer()/len() after
-// each. A frame whose data[0] is 0x10 starts a fresh message, 0x2N appends, anything
-// else is ignored and leaves the buffer untouched.
-//
-// There is no continuation-sequence check and no gap detection, deliberately: this is
-// a decoder for traffic we are watching, not a transport we depend on. A dropped frame
-// yields a short or scrambled payload, which ScreenDecode rejects on length.
-class Reassembler {
- public:
-  bool onFrame(const Frame& f);
-  const uint8_t* buffer() const { return _buf; }
-  uint8_t len()    const { return _len; }
-  bool    active() const { return _active; }
-  void    reset()        { _len = 0; _active = false; }
-
- private:
-  uint8_t _buf[AFFA_MAX_PAYLOAD] = {0};
-  uint8_t _len = 0;
-  bool    _active = false;
-};
-#endif
-
-}} // namespace affa::isotp
-```
-
-```cpp
-// proto/ScreenModel.h — header-only aggregate, no gate needed
-#pragma once
-#include <cstdint>
-
-namespace affa {
-
-// The decoded state of a panel screen: the semantic oracle. A test asserts
-// "the header says CLOCK and row 1 says 12:30", not "the bytes matched".
-//
-// Offsets refer to the reassembled 0x151 showMenu payload, which begins with its
-// own 0x10 0x5A bytes. They are justified byte by byte in WIRE-SPEC.md.
-struct ScreenModel {
-  enum class Mode : uint8_t { None, Menu, Info };
-
-  Mode    mode      = Mode::None;
-  char    header[27] = {0};   // payload [11..36]
-  char    row0[26]   = {0};   // payload [39..63]
-  char    row1[31]   = {0};   // payload [66..95]
-  uint8_t row0Id     = 0;     // marker at [38], 0x7E
-  uint8_t row1Id     = 0;     // marker at [65], 0x7F
-  int16_t sel        = -1;    // highlighted row id (0x7E/0x7F); -1 = none
-  uint8_t scroll     = 0;     // payload [10], the scroll-arrow byte
-
-  char    info[3][9] = {{0}}; // info popup: 3 slots x 8 chars + NUL
-  uint8_t infoCount  = 0;
-
-  void clear() { *this = ScreenModel(); }
-};
-
-} // namespace affa
-```
-
-```cpp
-// proto/ScreenDecode.h
-#pragma once
-#include "../AffaConfig.h"
-#if AFFA_ENABLE_ISOTP_RX
-
-#include "ScreenModel.h"
-#include "../core/AffaTypes.h"
-
-namespace affa { namespace screen {
-
-// TWO thresholds, and the difference is the ACK model — see the note under this block.
-constexpr uint8_t kMenuMinLen   = 96;  // PAYLOAD bytes our BUILDER emits
-constexpr uint8_t kMenuHwMinLen = 92;  // PAYLOAD bytes a REAL panel ever receives
-constexpr uint8_t kOffScroll   = 10;
-constexpr uint8_t kOffHeader   = 11;   // .. 36  (26 bytes)
-constexpr uint8_t kOffRow0Mark = 38;
-constexpr uint8_t kOffRow0     = 39;   // .. 63  (25 bytes)
-constexpr uint8_t kOffRow1Mark = 65;
-constexpr uint8_t kOffRow1     = 66;   // .. 95  (30 bytes)
-
-// Every Carminat screen — menu, now-playing, notification — is a showMenu over 0x151,
-// so this one function covers all of them. No-op if len < kMenuHwMinLen. Resets `sel`:
-// a fresh screen clears the highlight, exactly as the panel does.
-void menu(const uint8_t* payload, uint8_t len, ScreenModel& out);
-
-// UpdateList 8-segment setText payload on 0x121:
-//   [0]10 [1]19 [2]76 [3]chan [4]loc [5..12]old(8) [13]10 [14..25]new(12)
-// `new` is what the panel will show -> header; `old` -> row0.
-constexpr uint8_t kSegMinLen = 26;
-constexpr uint8_t kSegOld    = 5;    // .. 12  (8 bytes)
-constexpr uint8_t kSegNew    = 14;   // .. 25  (12 bytes)
-void segText(const uint8_t* payload, uint8_t len, ScreenModel& out);
-
-// A single non-reassembled control frame: `07 29 01 <rowId>` -> highlight.
-// Returns true if the frame was recognised and applied.
-bool frame(const Frame& f, ScreenModel& out);
-
-// Trim and copy printable ASCII from payload[a..b] inclusive, stopping at NUL.
-// dstSize includes the NUL. Exposed because the tests pin it directly.
-void asciiz(const uint8_t* payload, uint8_t len, uint8_t a, uint8_t b,
-            char* dst, uint8_t dstSize);
-
-}} // namespace affa::screen
-#endif
-```
-
-> **Why `menu()` guards on 92 and not 96 — the same fact WIRE-SPEC states from the other
-> side.** `kMenuMinLen = 96` is the length our **builder** emits. It is not the length a
-> **panel** ever holds. A real Carminat terminates `showMenu` at the declared FF_DL
-> (`payload[1] = 0x5A` = 90 content bytes, satisfied at 6 + 12×7), so it stops after 13
-> frames and receives `payload[0..91]` — 92 bytes. The last four cells of row1 never reach
-> it. Earlier revisions of this section said "no-op if `len < kMenuMinLen`", which was
-> written against the self-ACK emulator's 14-frame form; under that rule **no
-> hardware-faithful twin could ever decode a menu**. Both names are published because both
-> facts are load-bearing, and every golden vector for `showMenu` is parameterised by ACK
-> model rather than carrying a bare frame count.
-
-### 2.14 Reading the wire back — `onText()` and `affa::screen`
-
-`src/vpanel/` was here: `IVirtualPanel`, `VirtualPanelBase` and three panel twins, about
-825 lines, behind `AFFA_ENABLE_VIRTUAL_PANEL`. They were **deleted**. They bought two
-genuinely useful things, and both are still available in smaller pieces that are not
-library surface:
-
-| What the twins were for | What does it now |
+| File | What it is |
 | --- | --- |
-| a no-hardware development loop — the library running against something that ACKs like a panel | `setSelfAck(true)` (§2.6), plus one injected `61 11` to complete the handshake |
-| a semantic test oracle — `twin.screen().header == "CLOCK"` rather than a byte comparison | `isotp::Reassembler` + `affa::screen::*`, driven from the Layer-0 tap. Thirty lines; `test_bench_surface::decodeTx()` and `examples/90_bench_ota`'s `BenchScreen` are the two worked copies |
+| `AffaDisplay.h` | The only header a consumer includes. Pulls `AffaConfig.h`, `core/`, `util/`, and each selected panel behind its own gate. Declares nothing of its own. |
+| `AffaConfig.h` | Every `#define` gate and sizing knob, plus a written record of the gates that were **deleted** and why. Includes nothing; included first by everything. |
 
-The reason for the deletion is the one that runs through this whole document: a model of a
-panel is an *application* of the protocol, not part of it. Nothing in the library called
-the twins, no consumer could reach them without opting into a gate, and a library that
-ships its own test oracle has put its thumb on the scale — the oracle is worth more when
-the code under test cannot see it.
+### `core/` — the part that knows nothing about a panel
 
-Both replacements are behind **`AFFA_ENABLE_ISOTP_RX`**, off on target and on for the host.
+| File | What it is |
+| --- | --- |
+| `AffaTypes.h` | `Frame`, `Key`, `KeyEdge`, `Result`, `Submitted`, `SyncState`, `Feature`, `NavCommand`, `TxTicket`, `RenderSlot`, `Priority`, `TxOptions`, `Stats`, `CbKind`. |
+| `ICanLink.h`, `IClock.h` | The two ports. `recv(Frame&)` is a **pull**; `millis()` is the only thing a clock does. |
+| `IDisplay.h`, `IPanel.h` | The panel-agnostic surface an application holds, and the four-primitive rendering port. |
+| `PanelGeometry.h` | What a given glass can actually show, queried rather than assumed. §6. |
+| `AffaConstants.h` | Constants shared by every panel: ISO-TP opcodes, `kReplyFlag`, ACK bytes. No panel IDs. |
+| `AffaSyncProfile.h` | `SyncProfile` — the opening expressed as **data**. The per-family instances live in the panel folders. |
+| `AffaRing.h` | `AffaRing<T,N>`, lock-free SPSC. |
+| `AffaDispatch.h` | `AffaMpsc<T,N>` — bounded multi-producer queue, CAS claim plus a publish-last release store. This is what makes a render from any task safe. |
+| `AffaDisplayBase.h` | The whole class in one header; four `.cpp` files because it spans four unrelated jobs. |
+| `AffaDisplayBase.cpp` | Lifecycle, `poll()` orchestration, the RX drain, the key decoder, the capability defaults. |
+| `AffaSync.cpp` | The opening: the `Phase` table, the announce, the hello burst, the peer-channel gate, the heartbeat, the watchdog. |
+| `AffaTx.cpp` | The transmit queue, ISO-TP segmentation, flow control, retries, registration probes — and **`enqueue()`, the one place a cross-task render becomes safe.** §4. |
+| `AffaObserve.cpp` | `txFrame()`, the choke point every frame passes through in both directions, and the frame tap. |
+| `AffaBaseInternal.h` | Shared detail between those four `.cpp` files. Not public. |
 
-#### 2.14.1 `onText()` — inbound text, with an emitter
+### Panels — each gated, each compiling to an empty object file when unselected
 
-Earlier revisions declared `EventKind::RadioText` and never constructed it (§6). It was
-removed with a note in `AffaTypes.h` saying to re-add it *with* its emitter and never
-before. This is that emitter, as a callback rather than an event:
+| Folder | What it is |
+| --- | --- |
+| `carminat/` | `0x3AF` sync, `0x151`/`0x1F1` data, `0x1C1` keys. The largest family: text, time, menus, popups, info screens, lists, the 48×48 nav bitmap. Gated on `AFFA_PANEL_CARMINAT`. |
+| `updatelist/` | AFFA2: `0x3DF` sync, `0x121`/`0x1B1` data, `0x0A9` keys. **One `setText` encoding for every glass in the family** — `UpdateListDisplay.h` records why the second one was a misreading of a command flavour. Gated on `AFFA_PANEL_UPDATELIST`. |
+| `cluster/` | The instrument cluster: `0x3AF` again, but `59`/`5A` where Carminat has `61`/`62`. **Not verified on hardware, and its opening cannot complete** — `docs/PROTOCOL-NOTES.md` §9.2a. Gated on `AFFA_PANEL_CLUSTER`. |
 
-```cpp
-// AffaDisplayBase — behind AFFA_ENABLE_ISOTP_RX
-using TextCb = void (*)(const char* text, void* ctx);
-void onText(TextCb cb, void* ctx);
-```
+### The rest
 
-Text that **another node** drew on the panel's text channel, reassembled from its ISO-TP
-frames and delivered once per complete message. In the radio role nothing else produces it
-— we are the node that normally writes that channel — so this is the sniff/MITM seam, and
-it is why the callback costs a gate rather than shipping on.
+| File | What it is |
+| --- | --- |
+| `link/CanCommonLink.h` | The `ICanLink` over `can_common` / `esp32_can`. Header-only, gated. |
+| `link/LoopbackLink.h` | The test double: records TX, injects RX, optional synthetic ACK. Host. |
+| `util/AffaLog.{h,cpp}` | `ILogSink` and the `AFFA_LOG*` macros. `.cpp` body entirely gated. |
+| `util/AffaText.{h,cpp}` | `toAscii`, `normalizeTitle`. Pure C API, no allocation. |
+| `rtos/AffaTask.{h,cpp}` | `TaskOptions`, `Status`, `AffaTask`. **The only file in the library that includes FreeRTOS**, and the one directory a non-FreeRTOS port omits. §4b. |
 
-Three properties worth stating, because each is a silent failure if it goes the other way:
+**The fences, and the build enforces them rather than good intentions.**
 
-* **`text` points into library storage** and is valid only for the duration of the
-  callback. Copy it if you need it afterwards.
-* **Completion is the DECLARED length**, `2 + payload[1]`, not a frame count. Emitting per
-  appended frame would deliver the same screen once per continuation. The one exception is
-  the `AFFA_MAX_PAYLOAD` ceiling: the reassembler stops appending there, so a message
-  declaring more than it can hold is delivered short rather than dropped in silence.
-* **Our own renders never arrive here.** A self-sent frame coming back off an echoing link
-  carries `fromSelf` and is dropped before the decoder, so `onText` is never a mirror of
-  `setText`.
-
-The split between base and panel follows `packetFiller()` / `keyTxId()`:
-
-```cpp
- protected:
-  // 0 (the default) means this panel decodes no inbound text and the reassembler is
-  // never fed. Carminat 0x151, UpdateList 0x121.
-  virtual uint16_t textRxId() const { return 0; }
-
-  // Panel-specific because the command byte is: Carminat text is 0x74/0x77,
-  // UpdateList's is 0x76/0x7F. Return false for a payload that is not text — a menu
-  // screen, an info row — and nothing is delivered.
-  virtual bool decodeText(const uint8_t* payload, uint8_t len,
-                          char* out, uint8_t outSize) const;
-```
-
-The base owns the reassembly, the completion rule and the callback plumbing; the panel owns
-the command byte and the offsets. `Feature::RadioText` reports this gate, and for the first
-time it reports something the library can actually deliver.
-
-#### 2.14.2 Decoding a screen yourself
-
-`onText()` gives you a string. When you want the whole screen — header, both rows, the
-highlight, the info rows — decode it yourself; that is what the twins did and it is not
-much code:
-
-```cpp
-isotp::Reassembler asmb;
-ScreenModel        model;
-
-// from a Layer-0 tap, or a subscribe(), or a replayed capture
-void onFrame(const Frame& f) {
-  if (f.id != carminat::kIdSetText || f.len == 0) return;
-  if (screen::frame(f, model)) return;     // the standalone 07 29 01 highlight
-  if (!asmb.onFrame(f)) return;
-
-  const uint8_t* p = asmb.buffer();
-  const uint8_t  n = asmb.len();
-  if (n < 4) return;                       // p[2] is the command, p[3] its first operand
-  switch (p[2]) {
-    case screen::kMenuCmd:
-      if (p[3] == screen::kMenuModeWin) screen::menu(p, n, model);
-      break;
-    case screen::kWinTextCmdFull:
-    case screen::kWinTextCmdWindow:
-      screen::windowText(p, n, model);
-      break;
-    case screen::kInfoCmd:
-      screen::infoRow(p, n, model);
-      break;
-    default: break;                        // unmodelled: decoded as nothing, not a guess
-  }
-}
-```
-
-Four traps, all of them paid for once already:
-
-1. **Feed EVERY frame to the reassembler**, including first frames whose command you do not
-   decode. Returning early on an unrecognised first frame leaves the previous message
-   active, and its continuations then append to *that* buffer — which grew the menu past
-   its end on every info popup.
-2. **The highlight is a standalone single frame**, not ISO-TP, and `screen::frame()` carries
-   the full `07 29 01` guard because `0x151` also carries `03 52 …`, `05 56 …` and
-   `02 54 03`. A looser test manufactures a highlight out of one of them.
-3. **Menu mode `0x05` is the fullscreen variant** and has a different layout entirely.
-   Decoding it with the windowed-menu offsets produces a confident wrong screen, which is
-   the one thing a semantic oracle must never do.
-4. **Decode the frames you TRANSMITTED, not a model of a panel that consumed them.** Both
-   worked copies read the Layer-0 tap, which is one layer closer to the glass than the
-   twins were, and it is the same wiring whether a real panel is attached or not.
-
-#### 2.14.3 What this does not prove
-
-The same caveat the twins carried, and it has not moved: agreement between two halves of
-one repository is not evidence about hardware. The decoder reads what our own encoder
-produced. It is an *independent witness* only in the sense that it was transcribed from
-`docs/WIRE-SPEC.md` rather than sharing code with the builders — which is why a decoder
-reporting a field one byte off from what a render call put there is a **finding**, not a
-calibration error. Do not move an offset to make a test pass.
-
+* `<driver/twai.h>` appears nowhere. The driver is reached through `can_common`.
+* `<Arduino.h>` is permitted in panel `.cpp` files only, and only if something genuinely
+  needs it. Prefer `<cstring>` / `<cstdio>`.
+* `src/rtos/` is the single exception to Host, and it is fenced: FreeRTOS headers appear
+  in `rtos/` and nowhere else. The poll-owner guard `core/` needs for the owned-task mode
+  is a **function pointer** (`AffaDisplayBase::TaskIdFn`) precisely so that `core/` never
+  learns what a task is — and it is host-tested through that seam (`test_owned_task`).
+* `core/` and `util/` are compiled by `test/` for `platform = native`. If a change breaks
+  that build, the change is wrong, not the test.
 
 ---
 
+## 2. The surface you call
+
+**The declarations are in the headers.** What follows is the shape, so you know which
+header to open.
+
+```cpp
+#include <AffaDisplay.h>
+
+affa::CanCommonLink   link;
+ArduinoClock          clk;                   // your IClock: one millis()
+affa::CarminatDisplay panel(link, clk);
+affa::rtos::AffaTask  task;
+
+panel.begin();
+task.start(panel);                           // AFFA_ENABLE_TASK=1; otherwise call poll()
+
+panel.setText("HELLO");                      // from ANY task — see §4
+```
+
+**One handle.** An application holds an `IDisplay&`. Everything it can ask of a panel is
+on that interface or on the concrete panel class; there is no second object to keep in
+sync, no controller, no widget and no model. A library that implements a transport does
+not own your UI, which is why 2.0 deleted the ones that had crept in (§7).
+
+**Every render returns `Submitted`.** It carries a `TxTicket` and a `Result`, converts to
+`bool`, and is `[[nodiscard]]` — so "was it accepted" and "which transfer was it" have one
+answer, and that answer cannot be dropped silently.
+
+```cpp
+if (const affa::Submitted s = panel.setText("HELLO")) { /* s.ticket identifies it */ }
+else                                                  { /* s.result says why not   */ }
+```
+
+**Renders are enqueued and never block.** There is no `delay()` anywhere in the library
+and no send waits for an ACK. §3 gives the `Result` vocabulary; §3b gives the ordering and
+preemption guarantees; §4 gives the one rule that makes a render safe from another task.
+
+**Ask the panel what it can show** — `supports(Feature)` for capabilities and
+`panelGeometry()` for dimensions (§6). Code that assumes 26-character rows produces
+nothing an 8-cell segment display can render.
 ## 3. `Result` semantics
 
 Two disjoint populations. The set a call can return **at enqueue** is not the set that
@@ -1875,7 +227,7 @@ if (display.setText("HELLO") == affa::Result::Ok) {
 **`pressKey()` and `nav()` are not enqueue calls** and their `Result` is a third thing
 again: it reports whether the *intent was delivered*, not whether anything was queued and
 not whether anything changed on screen. They return `Ok`, `NotSupported` (no menu, no key
-transmit id, or a hold edge on a wheel code with a source that includes `Wire` — §7b.6),
+transmit id, or a hold edge on a wheel code with a source that includes `Wire` — see the key decoder in `AffaDisplayBase.cpp`),
 `LinkDown` or `SendFailed` (the `Wire` half only). Any rendering they cause is enqueued by
 the menu on their behalf and reports through `onComplete` under its own ticket, which
 `lastEnqueued()` will hold immediately after the call.
@@ -1950,7 +302,7 @@ if (g_clockPending && display.setTime("1000") == affa::Result::Ok) g_clockPendin
 ```
 
 With the panel disconnected, that costs **one failed render per loop iteration**: measured
-in `examples/19_owned_task`'s own soak, 4 800 failures and 170 log lines per second in 90
+in the 17_mediascreen soak, 4 800 failures and 170 log lines per second in 90
 seconds, which then pushed the one line that explained it — `peer lost` — out of the log
 ring. It is failure mode #2 from `docs/CR-0.3.0-OWNED-TASK.md` §2, written a second time by
 someone who had just read it.
@@ -2073,7 +425,7 @@ scan the queue for a job that satisfies **all** of:
 * `slot == opt.slot`;
 * `funcId == funcId`;
 * `coalesce == true`;
-* `kind == Payload` — Registration jobs are never coalesced (§2.9.2).
+* `kind == Payload` — Registration jobs are never coalesced (see `admit()` in `AffaTx.cpp`).
 
 If one is found, **replace its payload in place**: copy the new bytes over it, give it
 the new ticket, and complete the **old** ticket immediately with `Result::Aborted`.
@@ -2153,7 +505,7 @@ callbacks second* (§4.3).
 **`abortAll()`** additionally sets `abandon` on the in-flight job. The FSM honours it in
 `WaitAck` only, so the frame already handed to the link is transmitted whole and the
 next frame of that job is never built; the job completes `Aborted` and the continuation
-counter resets (§2.9.2). The panel is then holding a partial transfer. **Whether it
+counter resets (see `admit()` in `AffaTx.cpp`). The panel is then holding a partial transfer. **Whether it
 recovers cleanly on the next frame 0 has not been verified on hardware and must not be
 assumed** — verify with `examples/90_bench_ota` before using `abortAll()` in an
 application. Routine preemption does not need it.
@@ -2265,7 +617,7 @@ The library's own terms are exact and computable:
 | L1 worst case | one poll period + the driver's `task_CAN` delivery jitter | §3b.3 |
 | L1 as a poll count | **exactly 1**, always | §3b.3 |
 | Queue contribution to L2 | **0** with coalescing or `Urgent` or `abortPending()` | §3b.4, §3b.5 |
-| In-flight contribution to L2 | one ACK round-trip, or `AFFA_ACK_TIMEOUT_MS` if the panel is gone | §2.9.2 |
+| In-flight contribution to L2 | one ACK round-trip, or `AFFA_ACK_TIMEOUT_MS` if the panel is gone | `AffaTx.cpp` |
 
 The one term the library cannot compute is the panel's ACK turnaround, and it dominates
 L2. It is measured, not estimated: `examples/90_bench_ota` timestamps each transmitted
@@ -2300,7 +652,7 @@ host against `LoopbackLink` + `FakeClock`; none needs hardware.
 | | `AFFA_ENABLE_TASK = 0` (default) | `AFFA_ENABLE_TASK = 1` |
 | --- | --- | --- |
 | Who calls `poll()` | **you**, from exactly one task, for ever | the library, on a task it owns |
-| Who may render | that same task only | **any task**, through `affa::rtos::AffaTask` |
+| Who may render | that same task only | **any task, calling the panel directly** — §4.7 |
 | What breaks it | anything blocking that task — see §4b.1 | a callback that blocks, and nothing else |
 | Where the contract lives | §4.1 – §4.6, below | §4b |
 
@@ -2318,7 +670,7 @@ task_LowLevelRX (prio 19)  ->  callbackQueue (depth 16)  ->  task_CAN (prio 15)
                                                                   |
                                                           general callback
                                                                   |
-                                              Esp32CanLink::ingest -> AffaRing (SPSC)
+                                              CanCommonLink::ingest -> AffaRing (SPSC)
                                                                   |
                                                      ... your task calls poll() ...
                                                                   |
@@ -2338,10 +690,7 @@ never call user code. Everything else happens in the caller's task, inside `poll
 | `CompleteCb` (`onComplete`) | the task that called `poll()`, or from inside `KeyCb` when a key handler aborted queued work | Same. Enqueuing the next message from here is the intended pattern. Note it may be delivering `Result::Aborted` for a message *you* just discarded — check the ticket rather than assuming it was the panel. |
 | `SyncCb` (`onSync`) | the task that called `poll()` | Same. |
 | `FrameTap` (`onFrame`) | the task that called `poll()` (RX) or whichever task caused a transmission (TX) — including `pressKey`, a render call is queued so its frames always leave from `poll()` | Yes, but it is on the path of **every** frame on the bus. Keep it to a ring push. Do not render from it. |
-| `FrameCb` (`subscribe`) | as `FrameTap` | Same, and the same warning applies less forcefully because the match already filtered. Rendering from here is permitted and is what §7b.7a does. |
-| `EventCb` (`onEvent`) | the task that called `poll()`, or `pressKey`/`nav` for `EventKind::Key` | Same as `KeyCb`. No arm of `Event` carries a pointer today; if one returns, it dies when the callback returns (§2.1). |
-| `Field::onChange` / `MenuItem::onChange` / `onActivate` / `MenuModel::CloseCb` | the task that called `poll()`/`pressKey`/`nav` | Same. Note `onChange` fires *before* the resulting re-render is enqueued. |
-| `ILogSink::write` | any of the above, plus `Esp32CanLink::begin()` | **No.** Treat it as a leaf. It may be called with the library's internal state mid-transition. |
+| `ILogSink::write` | any of the above, plus `CanCommonLink::begin()` | **No.** Treat it as a leaf. It may be called with the library's internal state mid-transition. |
 
 A callback must not block. It is running inside `poll()`; anything it waits for that
 needs `poll()` to happen will not happen.
@@ -2366,13 +715,9 @@ is not allowed from any callback is `poll()`; everything else,
 including `enqueue`, every render call, `abortPending()`, `abortAll()`, `pressKey()`
 and `nav()`, is permitted. Nesting depth is bounded by `AFFA_TX_QUEUE_DEPTH`.
 
-Two re-entrancy rules specific to the observation seam, stated here so §7b does not have
-to repeat them. **`subscribe()` and `unsubscribe()` are legal from inside a `FrameCb`**;
-the table is walked by index against the generation counter, so a slot freed mid-walk is
-skipped rather than mis-dispatched, and a slot added mid-walk is not delivered the frame
-currently being dispatched. And **`pressKey(..., KeySource::Wire)` from inside a
-`FrameCb` is legal and is the shape §7b.7a uses** — the frame it transmits is observed
-after the current dispatch finishes, so the tap sees frames in wire order, not nested.
+One re-entrancy rule specific to the observation seam: **`pressKey(..., KeySource::Wire)`
+from inside a `FrameTap` is legal** — the frame it transmits is observed after the current
+dispatch finishes, so the tap sees frames in wire order rather than nested.
 
 ### 4.4 `poll()` is frequency-independent
 
@@ -2423,9 +768,9 @@ frame sequence must be identical.
 
 Safe from any task, at any time, as long as **only one task drives the library**:
 `poll()`, `enqueue()`, every render call, `abortPending()`, `abortAll()`,
-`pressKey()`, `nav()`, `subscribe()`, `unsubscribe()`, `onFrame()`, `onEvent()`,
-`getMenu()` and everything on `Menu`, all the observers (`syncState`, `busy`,
-`pending`, `stats`, …).
+`pressKey()`, `nav()`, `onFrame()`, `onKey()`, `onText()`, `onRadioText()`,
+`onComplete()`, and all the observers (`syncState`, `busy`, `pending`, `stats`,
+`panelGeometry`, `supports`, …).
 
 None of these is safe from an **ISR**, including `pressKey()` — it can route into the
 menu, which renders, which enqueues. An ISR-sourced key goes into a FreeRTOS queue and
@@ -2438,7 +783,7 @@ queue and drain it from the task that owns `poll()`. **Better still, since 0.3.0
 queue is proven code, it is the shape this section has recommended since 0.1.0, and
 having every consumer write it again is how it gets written wrong.
 
-The one thing that is genuinely concurrent, `Esp32CanLink::ingest` writing into
+The one thing that is genuinely concurrent, `CanCommonLink::ingest` writing into
 `AffaRing` from `task_CAN` while `poll()` reads, is handled by the ring's SPSC
 discipline and needs no lock.
 
@@ -2498,6 +843,42 @@ delete: the *preemption* half is what must stay in the callback.
 
 ---
 
+### 4.7 Why a render is safe from any task — the boundary is `enqueue()`
+
+**This is the change 2.0 exists for**, and it is one `if`:
+
+```cpp
+// AffaTx.cpp
+if (!onPollOwner()) return post(t, funcId, data, len, opt, nullptr, len);
+return admit(t, funcId, data, len, opt, nullptr, len);
+```
+
+Every render in the library — all 22 of them, across three families — funnels through
+`enqueue()` after it has finished building its bytes. So the cross-task boundary sits
+**below** every builder rather than above them, and the queue carries *finished bytes*
+instead of an *intention*.
+
+That is what makes "callable from any task" true for renders written after this sentence.
+The previous design put the queue one layer up: a render had to be re-transcribed by hand
+into an `Op` enum before it could cross, so the guarantee held for the calls somebody
+remembered to mirror and quietly failed for everything else (§7.5).
+
+What made it possible was an audit result rather than a clever mechanism: **no Carminat
+render touches a member.** The builders are pure functions of their arguments, so their
+bytes are complete at the moment `enqueue()` sees them and there is nothing left to
+synchronise.
+
+`onPollOwner()` answers true when no owner is registered, so a build with
+`AFFA_ENABLE_TASK = 0` takes the direct path and pays nothing — the ring is not merely
+unused, it is untouched. The one-task rule in §4.5 is exactly the rule for that build.
+
+A refusal from `post()` is `QueueFull`: the ring was full. It is the same answer the
+transmit queue gives for the same condition, because from the caller's side they are the
+same event — there was no room for this render.
+
+
+---
+
 ## 4b. The owned-task mode — `AFFA_ENABLE_TASK = 1`
 
 ```cpp
@@ -2514,12 +895,13 @@ void setup() {
 }
 
 void loop() {
-  task.setText("HELLO");               // from here, or an HTTP handler, or a BLE task
+  display.setText("HELLO");            // from here, or an HTTP handler, or a BLE task
   delay(10);
 }
 ```
 
-`examples/19_owned_task` is this, complete, with WiFi and OTA on a real panel.
+`examples/17_mediascreen` is this, complete, with WiFi, OTA and forty concurrent HTTP
+renders against a real panel.
 
 ### 4b.1 What it is for
 
@@ -2607,7 +989,7 @@ moment, lock-free, and it can never block an HTTP handler.
 | --- | --- | --- |
 | `foreignPolls` | **0** | somebody still calls `poll()`. Those calls did nothing (`poll()` refuses a non-owner and counts it), which is why this is a counter and not a crash. |
 | `pollLateMaxUs` | near the period — 472 µs measured at a 2 ms period | a callback is blocking the owned task. Past `AFFA_TASK_LATE_FACTOR × period` it also logs, rate-limited to once a second. |
-| `queueDropped` | **0** | you are posting renders faster than the wire drains them. Gate on `status().busy`, as `examples/19_owned_task` does. |
+| `queueDropped` | **0** | you are posting renders faster than the wire drains them. Gate on `status().busy`, as `examples/17_mediascreen` does. |
 | `stackFreeBytes` | 2036 measured on the C3 with the marquee widget and a rendering `KeyCb` — i.e. about half of `AFFA_TASK_STACK` unused | shrink `AFFA_TASK_STACK` at your own risk; a deep callback chain lives on this stack. |
 
 ### 4b.7 Failure modes, and what each one does
@@ -2625,1214 +1007,252 @@ moment, lock-free, and it can never block an HTTP handler.
 
 ### 4b.8 What it does not change
 
-`core/`, `util/`, `proto/` and `widget/` are untouched and still compile on the host
+`core/` and `util/` are untouched and still compile on the host
 against nothing but C++17. `src/rtos/` is the only FreeRTOS-dependent directory in the
 library and the only one a port omits (`docs/PORTING.md`). `AFFA_ENABLE_TASK=1` on a
 non-FreeRTOS target is still an `#error`.
 
 ---
 
-## 5. `src/AffaConfig.h` in full
-
-This is the single knob header. Everything optional in the library is gated from here.
-
-### 5.1 Why every optional `.cpp` gates its whole body
-
-PlatformIO's `build_src_filter` applies to the **project's** `src/` directory. A
-library pulled in through `lib_deps` is built by the Library Dependency Finder, which
-compiles **every** `.cpp` it finds under the library's `src/`. The consumer's
-`build_src_filter` cannot reach into it, and `library.json`'s `srcFilter` is a static
-declaration in the library that cannot see the consumer's `build_flags` — so it cannot
-react to `-D AFFA_PANEL_CARMINAT=1`.
-
-The preprocessor is therefore the only mechanism that can. Each optional translation
-unit wraps its **entire** body:
-
-```cpp
-// carminat/CarminatDisplay.cpp
-#include "../AffaConfig.h"          // the ONLY thing outside the gate
-#if AFFA_PANEL_CARMINAT
-
-#include "CarminatDisplay.h"
-// ... the entire implementation ...
-
-#endif // AFFA_PANEL_CARMINAT
-```
-
-and the matching header does the same, so a call site that references a
-disabled panel fails to **compile** (loudly, at the call site) rather than failing to
-**link** (obscurely, at the end of the build).
-
-With the panel off, the translation unit compiles to an empty object file. Combined
-with the toolchain's `-ffunction-sections -fdata-sections -Wl,--gc-sections` — already
-on for `platform = espressif32` — nothing from it reaches the image. That, and only
-that, is what makes the flash cost of an unused panel actually zero. The README carries
-the measured table.
-
-### 5.2 The panel gates
-
-```cpp
-// Panel selection. SILENCE IS AN ERROR, NOT A DEFAULT: name at least one panel in
-// build_flags. "Compile all three" is available but has to be asked for.
-#ifndef AFFA_PANEL_DEFAULT_ALL
-#  define AFFA_PANEL_DEFAULT_ALL 0
-#endif
-#if AFFA_PANEL_DEFAULT_ALL
-#  ifndef AFFA_PANEL_CARMINAT
-#    define AFFA_PANEL_CARMINAT 1
-#  endif
-#  ifndef AFFA_PANEL_UPDATELIST
-#    define AFFA_PANEL_UPDATELIST 1
-#  endif
-#  ifndef AFFA_PANEL_UPDATELIST_MENU
-#    define AFFA_PANEL_UPDATELIST_MENU 1
-#  endif
-#endif
-
-#ifndef AFFA_PANEL_CARMINAT
-#  define AFFA_PANEL_CARMINAT 0
-#endif
-#ifndef AFFA_PANEL_UPDATELIST
-#  define AFFA_PANEL_UPDATELIST 0
-#endif
-#ifndef AFFA_PANEL_UPDATELIST_MENU
-#  define AFFA_PANEL_UPDATELIST_MENU 0
-#endif
-
-// UpdateListMenuDisplay derives from UpdateListDisplay: selecting the LCD variant
-// necessarily compiles the 8-segment base too.
-#if AFFA_PANEL_UPDATELIST_MENU && !AFFA_PANEL_UPDATELIST
-#  undef  AFFA_PANEL_UPDATELIST
-#  define AFFA_PANEL_UPDATELIST 1
-#endif
-
-// The guard, and the ONE thing that catches a mis-typed panel flag. With
-// -D AFFA_PANEL_CARMINET=1 every real macro stays undefined, so all three end up 0 and
-// this fires. An earlier revision made "define nothing" mean "compile all three", which
-// turned exactly that typo into a bigger image and no diagnostic whatsoever.
-#if !AFFA_PANEL_CARMINAT && !AFFA_PANEL_UPDATELIST && !AFFA_PANEL_UPDATELIST_MENU
-#  error "AffaDisplay: no panel selected. Add -D AFFA_PANEL_CARMINAT=1 (and/or _UPDATELIST / _UPDATELIST_MENU), or -D AFFA_PANEL_DEFAULT_ALL=1 for all three."
-#endif
-```
-
-The development-loop gates follow the same shape, with one difference: their default
-depends on where you are building.
-
-```cpp
-// Inbound multi-frame decode: the ISO-TP reassembler, the screen decoder, and the
-// onText() callback they feed. For sniffing another head unit or replaying a capture —
-// nothing in the radio role needs it, so it is off on target and on for the host, where
-// the tests live. PlatformIO defines ARDUINO for framework=arduino and not for native.
-//
-// AFFA_ENABLE_VIRTUAL_PANEL (removed) gated vpanel/, a set of panel twins used as a test
-// oracle and as a dev loop with no panel attached. They were application-shaped code
-// shipped as library surface; setSelfAck() covers the no-panel loop, and a decoder built
-// on the two headers this gate buys covers the oracle. See section 2.14.
-#ifndef AFFA_ENABLE_ISOTP_RX
-#  if defined(ARDUINO)
-#    define AFFA_ENABLE_ISOTP_RX 0
-#  else
-#    define AFFA_ENABLE_ISOTP_RX 1
-#  endif
-#endif
-
-// src/widget/Marquee and, with it, UpdateListDisplay's setScrollText / setScrollActive /
-// reassert. A widget rather than protocol, like the menu — but ON by default, because it
-// is small and eight segment cells do not hold a track title.
-#ifndef AFFA_ENABLE_MARQUEE
-#  define AFFA_ENABLE_MARQUEE 1
-#endif
-```
-
-There used to be a feature gate here that defaulted to 0 rather than 1 —
-`AFFA_ENABLE_AUX_TRACKER`, which compiled in `AuxModeTracker`. It was the boundary
-principle in `#define` form: every other `AFFA_ENABLE_*` gate describes something the
-PANEL defines and is on by default, whereas that one described *someone else's product*.
-The gate and the class are both gone — nothing in the library depended on it, no test
-covered it and no example used it, and a default-off feature that nobody switches on is
-not a feature. Its reverse-engineered pattern table survives in `docs/PROTOCOL-NOTES.md`
-§8, where it belongs: as an observation an application may act on, not as a claim the
-library makes. `AFFA_ENABLE_MENU` still carries the same principle — default 0, because
-the menu is a widget and not the protocol (§5.3).
-
-`AFFA_ENABLE_ISOTP_RX` used to carry a dependent gate above it — the twins, which could not
-work without the decoder — and the pair was policed by an `#error` rather than a silent
-`#undef`/`#define` promotion, unlike `AFFA_PANEL_UPDATELIST_MENU`. With `src/vpanel/` gone
-the gate stands alone and there is nothing left to contradict, so the `#error` went with it.
-The principle it stood on is still the live one: selecting the LCD panel without its base is
-obviously a spelling of "I want the LCD panel" and gets promoted, whereas two flags that
-directly contradict each other mean one of them is a mistake, and guessing which would hide
-it.
-
-Every gate is `#define`d to 0 rather than left undefined, and every use is `#if`, never
-`#ifdef`. A `-Wundef` build (which the library's own `platformio.ini` turns on) then
-catches a misspelling *inside the library*: `#if AFFA_ENALBE_MENU` is a diagnostic rather
-than a silently false branch.
-
-**`-Wundef` does not catch a misspelling in a consumer's `build_flags`, and cannot.**
-`-D AFFA_PANEL_CARMINET=1` defines a macro that nothing ever reads, so there is no
-undefined macro anywhere and nothing to diagnose. That is why the panel flags carry a
-second mechanism: naming none of them is an `#error`, and a mis-typed flag lands in exactly
-that state. For the feature gates the same class of typo is not solvable in the
-preprocessor at all; the observable symptom is "the block I tried to switch off is still in
-the image", which the map file and the flash number report.
-
-### 5.3 Every macro
-
-| Macro | Default | What it costs / buys | Failure mode if set wrong |
-| --- | --- | --- | --- |
-| `AFFA_PANEL_CARMINAT` | **0** — naming no panel is an `#error` | Carminat frame builders, key decode, `0x151`/`0x1F1` tables. | 0 while using a Carminat: `CarminatDisplay` is not declared — compile error at your call site. |
-| `AFFA_PANEL_UPDATELIST` | as above | AFFA2 base + 8-segment display + title scroll. | as above |
-| `AFFA_PANEL_UPDATELIST_MENU` | as above | LCD `setText` channel/location encoding. Forces `AFFA_PANEL_UPDATELIST` on. | as above |
-| `AFFA_ENABLE_MENU` | **0** | `widget/` (`MenuModel`, `IMenuRenderer`, `MenuGeometry`), `CarminatMenuRenderer`, `MenuController`, `IPage` routing, `nav()`, `getMenu()`. The single largest optional block, and **off by default**: the menu is a widget, not protocol. `showMenu()` / `highlightItem()` are unconditional and stay available with this at 0. | 0 (the default): `nav()` returns `NotSupported`, `getMenu()` is not declared, `supports(Feature::Menu)` is false. A menu-driven application stops compiling — which is the point; set it to 1 in your `build_flags`. |
-| `AFFA_ENABLE_POPUP` | 1 | `showPopupText` / `hidePopup` (mode `0x74` overlay). | 0: both return `NotSupported`. |
-| `AFFA_ENABLE_FULLSCREEN` | 1 | `showFullscreenText` (`0x21` mode `0x05`). | 0: both return `NotSupported`. |
-| `AFFA_ENABLE_CONFIRMBOX` | 1 | `showConfirmBox` and its offset builder. | 0: returns `NotSupported`. |
-| `AFFA_ENABLE_INFOPOPUP` | 1 | `showInfoPopup` (the 3-row info menu). | 0: returns `NotSupported`. |
-| `AFFA_ENABLE_TRANSLITERATION` | 1 | `AffaText.cpp` and its ~1.2 kB mapping table. | **0 is dangerous.** `toAscii` becomes a bounded copy that passes bytes through unchanged; any UTF-8 that reaches the wire renders as garbage on the panel. Set it to 0 only if you have proved every string is already 7-bit ASCII. Not a compile error — a visual one. |
-| `AFFA_ENABLE_LOG` | 1 | The `AFFA_LOG*` macros and `AffaLog.cpp`. | 0: every macro expands to `do {} while (0)`; **no format strings enter flash**. Side effects written inside a log argument vanish (§2.6). |
-| `AFFA_LOG_LEVEL` | 3 (info) | 0 off … 5 trace. Compile-time: levels above it emit nothing at all. | Too high on a live bus floods the sink; the `0x3AF`/`0x3CF` sync chatter is ~2 frames/s and trace prints all of it. |
-| `AFFA_ENABLE_ESP32CAN_LINK` | 1 | `Esp32CanLink.{h,cpp}` and the `<esp32_can.h>` dependency. | 0 on a project that uses a different CAN driver: nothing pulls `esp32_can` in, and you supply your own `ICanLink`. 1 without the dependency in `lib_deps`: link error. |
-| `AFFA_ENABLE_ISOTP_RX` | 0 on target, 1 on host | `isotp::Reassembler` + `screen::*` + the `onText()` path — decoding inbound multi-frame traffic (sniffing another head unit, replaying a capture) and the callback that reports it (§2.14). | 1 on a shipping target in the radio role: you pay ~900 B flash / ~384 B RAM for a decode path nothing in that role calls. 0 on the host: `test_seam`'s `onText` cases and `test_bench_surface`'s wire oracle stop compiling — which is the point, since a host build without them tests bytes instead of meaning. |
-| `AFFA_ENABLE_MARQUEE` | 1 | `widget::Marquee`, and with it `UpdateListDisplay::setScrollText` / `setScrollActive` / `reassert` / `setReassertOnAux`. A widget, not protocol — but a cheap one. | 0 on a Carminat-only build: it costs nothing there anyway, since nothing names it. 0 on an UpdateList build: the 8-segment panel shows the first eight characters of a title and no more, which is usually not what anyone wants. |
-| `AFFA_ENABLE_TASK` | 0 | **Real since 0.3.0** (§4b): compiles `src/rtos/`, the library creates and owns the task that calls `poll()`, and every render becomes callable from any task through `affa::rtos::AffaTask`. Off by default and deliberately not defaulted on for `ARDUINO_ARCH_ESP32`, because turning it on changes *which task* an existing consumer's callbacks run on — observable behaviour, so it stays something you ask for. `=1` on a non-FreeRTOS target is still an `#error`; that is the one the old unconditional error became. | Leave it 0 and call `poll()` from exactly one task, as §4 has always said. Nothing else changes. |
-| `AFFA_TASK_PERIOD_MS` | 2 | **Key latency is bounded by this and nothing else** (§4b.2). At 500 kbit/s a frame is ~228 µs, so 2 ms keeps `ringOverflow` at zero with margin and is far below anything a human perceives. | Raising it is a direct, linear regression in the one number this mode protects. 10 ms is a fivefold one. |
-| `AFFA_TASK_PRIO` | 2 | Above the Arduino loop task (1), below the WiFi/TCP tasks (18+). A key must not wait behind a busy application, and the network stack must not wait behind us. | Below 2 and a busy `loop()` delays keys; above ~17 and you are preempting the radio. |
-| `AFFA_TASK_STACK` | 4096 | `poll()` plus the deepest callback nesting §4.3 permits. **Measured**: 2036 bytes still free on the C3 with the marquee widget and a rendering `KeyCb` — reported live as `Status::stackFreeBytes`, so this is checkable rather than taken on trust. | Shrinking it is safe only against your own callbacks; check `stackFreeBytes` on your build. |
-| `AFFA_TASK_QUEUE_DEPTH` | 8 | Command slots, `sizeof(Command)` ≈ 156 B each ≈ 1.2 kB. Matched to `AFFA_TX_QUEUE_DEPTH + 2`: a command queue deeper than the transmit queue only defers `QueueFull` to a worse place, where the caller has already been told the render was accepted. | Deeper hides backpressure; shallower turns a burst into `kNoRequest`, which is at least honest. |
-| `AFFA_TASK_ARG_MAX` | 48 | Bytes per string argument, three per command. What a **queued** render truncates at — arguments are copied by value so no pointer crosses a task boundary. Covers every string any panel here can put on glass (the Carminat menu row is 26 usable, `setText` 14). | Below your longest string, silently truncated (always NUL-terminated). |
-| `AFFA_TASK_CORE` | -1 | `tskNO_AFFINITY`. The C3 is single-core and ignores it. | On a dual-core part, pinning away from the WiFi core is worth measuring. |
-| `AFFA_TASK_LATE_FACTOR` | 8 | An iteration slower than this many periods logs once per second and is recorded in `Status::pollLateMaxUs`. It is how a blocking user callback becomes visible instead of mysterious. | Higher hides the thing you most want to see. |
-| `AFFA_TX_COALESCE` | 1 | Latest-value-wins replacement of a queued, not-yet-started render of the same `RenderSlot` (§3b.4). Costs one linear scan of at most `AFFA_TX_QUEUE_DEPTH` entries per enqueue, and 4 bytes per `TxJob`. Buys a bounded queue under any render rate. | 0: a repeated render stacks. At `f` Hz in front of a `T`-second transfer you get `min(⌈f·T⌉, depth−1)` stale messages on screen after the key and `QueueFull` for the rest (§3b.7) — the panel keeps counting after Pause. Set it to 0 only when consecutive same-slot messages are a sequence that must all be seen, and prefer `TxOptions::coalesce = false` on those specific messages instead. |
-| `AFFA_TX_QUEUE_DEPTH` | 6 | `sizeof(TxJob)` ≈ `AFFA_MAX_PAYLOAD + 12` bytes each ≈ 750 B of static RAM at the defaults. 6 and not 4 because `showInfoPopup` is three non-coalescing messages and the first call after a resync also carries two registration probes: 2 + 3 = 5 outstanding, plus one slot of headroom for an `Urgent`. | Below 3 the lazy registration burst (2 probes + 1 payload for either panel) cannot fit and the first send after a resync returns `QueueFull` forever. Below what your app bursts: renders start returning `QueueFull`. |
-| `AFFA_MAX_PAYLOAD` | 113 | Largest single ISO-TP message. **113 is a wire limit, not a budget**: 8 bytes in frame 0 plus 15 continuations of 7 is `8 + 15×7 = 113`, the point at which the continuation counter would wrap. `showConfirmBox` sits at exactly 113. The Carminat menu screen is 96 bytes; the `setText` payload is 22. | Below 96: `showMenu` returns `TooLong` and the menu never draws. Above 113: `#error`, unless you define `AFFA_UNSAFE_LONG_PAYLOAD` after bench-validating a longer transmit. |
-| `AFFA_PANEL_DEFAULT_ALL` | 0 | Opt in to "compile all three panels" instead of naming them. For a first look and for the footprint reference builds; `size_all` is the one environment here that uses it. | 1 in a shipping build: you compile panels you do not use. `--gc-sections` removes the unused ones from the image, so the cost is build time, not flash (README, Footprint). |
-| `AFFA_UNSAFE_LONG_PAYLOAD` | undefined | Escape hatch for `AFFA_MAX_PAYLOAD > 113`. | Defining it disables the ceiling `#error`. The ISO-TP counter wrap past 15 continuations has never been validated against a panel. |
-| `AFFA_RX_RING_DEPTH` | 32 | `32 × sizeof(Frame)` = 448 B static RAM. Must be a power of two. | Too small: `Stats::ringOverflow` climbs, ACKs are lost, sends time out, sync flaps. Non-power-of-two: `static_assert` fires. |
-| `AFFA_ACK_TIMEOUT_MS` | 2000 | Per-frame ACK deadline. 2000 matches the legacy blocking wait exactly, so timing-sensitive panel behaviour is unchanged. | Too low: a slow panel yields `Timeout` mid-transfer and the screen is left half-drawn. Too high: a dead panel wedges the queue for that long per frame (it no longer wedges the *loop* — that was defect #2). |
-| `AFFA_PEER_TIMEOUT_MS` | 5000 | How long the link may go without a `69` ping before sync is torn down. The panel pings ~1 Hz. | Below ~3000 you tear down on a single missed ping. This is the value the old `SYNC_TIMEOUT = 5` counter was *meant* to express. |
-| `AFFA_SYNC_INTERVAL_MS` | 1000 | Heartbeat cadence, enforced inside `poll()`. | Changing it changes what the panel sees; 1000 is what the capture shows and what the panel expects. Treat as fixed. |
-| `AFFA_MAX_SUBSCRIPTIONS` | 8 | Size of the Layer 1 `FrameMatch` table (§7b.4). `sizeof(Sub)` ≈ 32 B, so 8 slots ≈ 256 B of static RAM, and one linear scan of it per frame in either direction. | `subscribe()` returns `kNoSub` once full, and an application that ignores the return value silently loses a subscription — check `valid()`. **0 removes the table entirely**: `subscribe()` always returns `kNoSub`, `unsubscribe()` always returns false, and the scan is compiled out. Layers 0 and 2 are unaffected. |
-| `AFFA_MENU_MAX_ITEMS` | 12 | `12 × sizeof(MenuItem)` static RAM (≈ 1.1 kB at 3 fields). | `addItem` returns -1 past the limit; the item is silently absent from the menu. |
-| `AFFA_MENU_MAX_FIELDS` | 3 | Fields per item. | An item with more fields than this: the extras are dropped at `addItem`. |
-| `AFFA_MENU_ROW_MAX` | 32 | Rendered row buffer. The Carminat window row is 26 usable bytes. | Below 27 truncates rows that would have fitted on screen. |
-| `AFFA_TEXT_MAX` | 64 | Transliteration scratch buffer on the stack of each render call. | Below the longest string you pass: silently truncated (never mid-sequence, always NUL-terminated). |
-
-Recommended `build_flags` for this project's board:
-
-```ini
-build_flags =
-  -D AFFA_PANEL_CARMINAT=1
-  -D AFFA_ENABLE_MENU=1
-  -D AFFA_ENABLE_TRANSLITERATION=1
-  -D AFFA_ENABLE_LOG=1
-  -D AFFA_LOG_LEVEL=3
-```
 
 ---
 
-## 6. Capability model
+## 5. Configuration
 
-Not every panel does popups, fullscreen or menus. The 8-segment UpdateList has eight
-characters and no window at all.
+**`src/AffaConfig.h` is the list.** It is 548 commented lines and every knob carries its
+own reasoning, including the ones that were deleted and why. This section is a map of it,
+not a copy — the copy is what went stale last time.
+
+Two rules the file enforces that are worth knowing before you set anything:
+
+* **Every gate is `#define`d to 0 rather than left undefined**, so the library uses
+  `#if AFFA_X` and `-Wundef` catches a misspelling *inside* the library. It cannot catch
+  one in a **consumer's** `build_flags` — `-D AFFA_ENALBE_NAV=0` defines a macro nothing
+  reads — so panel selection is covered by a second mechanism: **silence is an `#error`.**
+  Name at least one panel or the build stops.
+* **Each optional `.cpp` gates its entire body.** PlatformIO's Library Dependency Finder
+  compiles every `.cpp` under a `lib_deps` library; the consumer's `build_src_filter`
+  cannot reach into it. The preprocessor is the only thing that can remove a translation
+  unit, so an unselected panel compiles to an empty object file. That, plus
+  `-ffunction-sections -fdata-sections -Wl,--gc-sections`, is what makes an unused panel
+  cost **zero** flash rather than "not much".
+
+| Group | Knobs | Notes |
+| --- | --- | --- |
+| Panel selection | `AFFA_PANEL_CARMINAT`, `AFFA_PANEL_UPDATELIST`, `AFFA_PANEL_CLUSTER`, `AFFA_PANEL_DEFAULT_ALL` | `DEFAULT_ALL` covers the first two only. **The cluster is never on by default** — everything it claims is inference from one capture. |
+| Feature gates | `AFFA_ENABLE_POPUP`, `_FULLSCREEN`, `_CONFIRMBOX`, `_INFOPOPUP`, `_BIGMENU`, `_NAV` | Off means the call returns `NotSupported`, not that it silently does nothing. |
+| Text and logging | `AFFA_ENABLE_TRANSLITERATION`, `AFFA_ENABLE_LOG`, `AFFA_LOG_LEVEL`, `AFFA_TEXT_MAX` | **Transliteration off is dangerous**: UTF-8 reaching the wire is garbage on the glass, and that is a visual failure rather than a compile error. |
+| Link | `AFFA_ENABLE_CANCOMMON_LINK`, `AFFA_RX_RING_DEPTH`, `AFFA_RX_STALL_MS`, `AFFA_LINK_RECOVER_MS`, `AFFA_LINK_RECOVER_MAX_MS` | |
+| Transmit | `AFFA_TX_QUEUE_DEPTH`, `AFFA_MAX_PAYLOAD`, `AFFA_MAX_EXTERNAL_PAYLOAD`, `AFFA_ACK_TIMEOUT_MS`, `AFFA_TX_MAX_RETRIES`, `AFFA_TX_RETRY_MS`, `AFFA_TX_RETRY_MAX_MS`, `AFFA_TX_HOLD_MS`, `AFFA_TX_COALESCE`, `AFFA_TX_DIRTY_QUIET_MS` | |
+| The opening | `AFFA_SYNC_INTERVAL_MS`, `AFFA_HELLO_MIN_MS`, `AFFA_PING_REPLY_MIN_MS`, `AFFA_PEER_TIMEOUT_MS` | The rest of the opening is **data**, not knobs: see `SyncProfile`. |
+| Owned task | `AFFA_ENABLE_TASK`, `AFFA_TASK_PERIOD_MS`, `_PRIO`, `_CORE`, `_STACK`, `_LATE_FACTOR`, `AFFA_DISPATCH_DEPTH`, `AFFA_TASK_ARG_MAX`, `AFFA_CALLBACK_BUDGET_MS` | §4b. `AFFA_ENABLE_TASK` is an `#error` off ESP-IDF / Arduino-ESP32. |
+
+**`AFFA_DISPATCH_DEPTH` is the one to understand before tuning.** It sizes the cross-task
+ring described in §4 — the slots a render uses when it is called from a task that does not
+own `poll()`. Costs `sizeof(DispatchItem)` ≈ `AFFA_MAX_PAYLOAD + 20` per slot and **nothing
+in CPU when unused**, because a call already on the owning task never touches it. Must be a
+power of two. `0` removes the ring entirely, which is correct only for a build with no
+owned task at all.
+
+Sizing it **deeper than `AFFA_TX_QUEUE_DEPTH` is a mistake that looks like a fix**: it only
+defers `QueueFull` to a worse place, where the caller has already been told the render was
+accepted.
+## 6. What a panel can do, and how big it is
+
+Two questions, two answers, and they are different questions. `supports()` asks whether a
+call will do anything; `panelGeometry()` asks how much will fit.
+
+### 6.1 `supports(Feature)`
 
 ```cpp
 bool supports(Feature f) const;   // pure virtual on AffaDisplayBase; each panel answers
 ```
 
-| Feature | Carminat | UpdateList (8-seg) | UpdateList (LCD) |
+| Feature | Carminat | UpdateList | Cluster |
 | --- | :---: | :---: | :---: |
-| `Text` | yes | yes | yes |
+| `Text` | yes | yes | **no** — the one capture contains no text frame, so the encoding is unknown |
 | `Time` | yes | no | no |
 | `Power` | yes | yes | yes |
-| `Menu` | yes (if `AFFA_ENABLE_MENU`) | no | no |
+| `Menu` | yes | no | no |
 | `Popup` | yes (if `AFFA_ENABLE_POPUP`) | no | no |
 | `Fullscreen` | yes (if `AFFA_ENABLE_FULLSCREEN`) | no | no |
 | `ConfirmBox` | yes (if `AFFA_ENABLE_CONFIRMBOX`) | no | no |
 | `InfoPopup` | yes (if `AFFA_ENABLE_INFOPOPUP`) | no | no |
-| `KeyTx` | yes (`0x1C1`) | yes (`0x0A9`) | yes (`0x0A9`) |
-| `RadioText` | yes (if `AFFA_ENABLE_ISOTP_RX`) | yes (if `AFFA_ENABLE_ISOTP_RX`) | yes (if `AFFA_ENABLE_ISOTP_RX`) |
+| `KeyTx` | yes (`0x1C1`) | yes (`0x0A9`) | no |
 
-`supports()` reflects both the panel **and** the compile-time gates: a Carminat built
-with `AFFA_ENABLE_POPUP=0` reports `supports(Feature::Popup) == false`, and
-`showPopupText` returns `Result::NotSupported`.
+`supports()` reflects both the panel **and** the compile-time gates: a Carminat built with
+`AFFA_ENABLE_POPUP=0` reports `supports(Feature::Popup) == false`, and `showPopupText`
+returns `Result::NotSupported`.
 
-> **`Feature::RadioText` reports a compile gate — and, since `onText()`, a gate that buys
-> something.** Both panels answer it with `AFFA_ENABLE_ISOTP_RX != 0`, and with that gate on
-> the base reassembles inbound ISO-TP on the panel's text id and delivers a decoded string
-> to `onText()` (§2.14.1). For most of this library's life the answer was true about the
-> reassembler being *compiled* and false about anything reaching the application; that gap
-> is closed.
+> **`Feature::RadioText` was removed and is not coming back in that form.** It reported a
+> *compile gate*, not a panel capability — and a capability query that answers a question
+> about your own build tells the caller nothing about the glass, which is the only thing
+> `supports()` is for. §7.7.
 >
-> Earlier revisions carried an `EventKind::RadioText` and an `EventKind::ScreenChanged`
-> against that future wiring, plus a canary test asserting that neither ever fired. **Both
-> enumerators were removed**, and the canary with them, with a note in `AffaTypes.h` saying
-> to re-add them *with* an emitter and never before. `onText()` is that emitter — as a
-> callback rather than an event, because it carries a pointer into library storage and the
-> event union's arms were the delicate part. The rule stands for anything that comes next:
-> the emitter and the thing it emits land in the same change.
->
-> **What did NOT go, and must not be confused with it:** `UpdateListBase` decodes the
-> radio's inbound `0x121` text and reports it through the protected virtual
-> `onRadioText(bool isAux)`. That hook is real, it is exercised, and it stays. It is a
-> single-frame AUX heuristic on a subclass seam — not `onText()`, which delivers the whole
-> reassembled string, and not a published event.
->
-> An application that wants inbound text as a **string** uses `onText()`. One that needs
-> the raw bytes — because the discriminator it wants is a header byte a decoded string does
-> not carry — uses `subscribe()` (Layer 1) on the panel's text id instead.
-> `examples/08_radio_mitm` is the second case: its AUX classifier needs the `setText` format
-> byte. `docs/PROTOCOL-NOTES.md` §8 has the pattern table that used to live in
-> `AuxModeTracker`.
+> Inbound text is still delivered: `UpdateListBase` decodes the radio's `0x121` and reports
+> it through the protected virtual `onRadioText(bool isAux)`. That hook is real, exercised,
+> and stays. `docs/PROTOCOL-NOTES.md` §8 has the AUX pattern table.
 
-> **The one deliberate behaviour change versus the code being extracted.** The legacy
-> `IDisplay` gave `showInfoPopup`, `showConfirmBox`, `showFullscreenText`,
-> `showPopupText` and friends **silently no-op default bodies returning
-> `AffaError::NoError`**. Calling one on a panel that could not do it looked exactly
-> like success. Here every unsupported call returns `Result::NotSupported`, and
-> `supports()` lets you ask before you call. Applications that relied on the silent
-> no-op will now see a non-`Ok` return where they previously saw `NoError` — guard with
-> `supports()` (see `examples/02_carminat_text`) rather than ignoring the result. This
-> is called out again in the README.
+> **The one deliberate behaviour change versus the code that was extracted.** The legacy
+> `IDisplay` gave `showInfoPopup`, `showConfirmBox`, `showFullscreenText`, `showPopupText`
+> and friends **silently no-op default bodies returning `AffaError::NoError`** — calling
+> one on a panel that could not do it looked exactly like success. Here every unsupported
+> call returns `Result::NotSupported`, and `supports()` lets you ask first.
+
+### 6.2 `panelGeometry()`
+
+```cpp
+PanelGeometry g = panel.panelGeometry();
+```
+
+Every field is **zero unless the panel actually has that surface**, and zero means "do not
+render this here", not "unknown". A fitter written against Carminat's 26-character rows
+produces nothing an 8-cell segment display can show, and this is how it finds out without
+knowing which panel it is talking to.
+
+| | `mainChars` | `menuRows` × `menuRowChars` | `infoRows` × `infoRowChars` | `listMaxItems` | image |
+| --- | :---: | :---: | :---: | :---: | :---: |
+| Carminat | 8 | 2 × 26 | 3 × 8 | 10 | 48 × 48 |
+| UpdateList | 8 | 0 | 0 | 0 | — |
+| Cluster | 0 | 0 | 0 | 0 | — |
+
+**UpdateList's 8 is a promise, not a measurement**, and the distinction matters. The frame
+always carries a 12-cell `new text` field, so a wider glass in that family shows more for
+free — but the radio cannot tell which glass answered, and eight cells are what every
+panel in the family is known to render. A fitter that trusts 12 writes text the segment
+display silently truncates. §7.6.
 
 ---
 
-## 7. Migration from the extracted classes
+---
 
-| Old (MegaOpen) | New (AffaDisplay) | Note |
-| --- | --- | --- |
-| `#include "display/Carminat/CarminatDisplay.h"` | `#include <AffaDisplay.h>` | one umbrella header |
-| `AffaCommon::AffaKey` | `affa::Key` | same wire values; `SrcRight`→`SrcNext`, `SrcLeft`→`SrcPrev`, `VolumeUp`→`VolUp`, `VolumeDown`→`VolDown` |
-| `bool isHold` | `affa::KeyEdge` | `false`→`Click`, `true`→`Hold` |
-| `AffaCommon::AffaError` | `affa::Result` | `NoError`→`Ok`, `StrTooLong`→`TooLong`; values 0..5 unchanged numerically |
-| `AffaCommon::SyncStatus` | `affa::SyncState` | same bits; `FUNCSREG`→`FuncsReg` etc. |
-| `Frame` (global) | `affa::Frame` | field `extended` → `ext` |
-| `ICanBus` + `onReceive` push callback | `affa::ICanLink` + `recv()` pull | **the** structural change; see §0.2 |
-| `IClock::delayMs()` | *(removed)* | nothing in the library sleeps |
-| `CanUtils::sendCan/sendFrame/sendMsgBuf` | *(removed)* | all TX goes through `ICanLink::send` |
-| `HwCanBus` | `affa::Esp32CanLink` | now the only file that knows the driver exists |
-| `display.tick()` + `display.recv(f)` + `display.processEvents()` | `display.poll()` | one pump; RX is drained by the library, you no longer feed it frames |
-| `setKeyHandler(bool(*)(AffaKey,bool))` | `onKey(KeyCb, void* ctx)` | now returns `void` and takes a context pointer; routing/consumption is decided inside the library |
-| `setSkipFuncReg(bool)` | `setPassive(bool)` | same semantics, honest name |
-| `setEmuSelfAck(bool)` | `setSelfAck(bool)` | unchanged behaviour |
-| `setClock(IClock&)` / `setBus(ICanBus&)` | constructor arguments | neither may change after `begin()` |
-| `syncStatus()` / `synced()` / `funcsRegistered()` | `syncState()` / `synced()` / `registered()` | |
-| `setText(const char*, uint8_t)` | same signature, returns `Result` | now **asynchronous**: `Ok` means queued. It also carries `RenderSlot::Text`, so a repeated call supersedes a queued one instead of stacking (§3b.4) — an application that rendered in a tight loop and relied on every call reaching the panel must pass `TxOptions::coalesce = false` |
-| *(no equivalent — the send blocked)* | `abortPending()` / `abortAll()` / `Priority::Urgent` | a blocking send needed no preemption because there was never a queue. There is one now, so preemption is part of the contract (§3b.5) |
-| *(no equivalent)* | `onComplete(cb, ctx)` | the delivery verdict the old blocking return value carried. `AffaError` from `affa3_send` ≈ the `Result` now delivered here, not the one returned by the render call |
-| `showMenu(h, i1, i2, scroll)` | same signature, returns `Result` | now asynchronous |
-| `highlightItem(uint8_t)` | same | now asynchronous |
-| `showConfirmBoxWithOffsets(...)` | `showConfirmBox(...)` | the offset-taking builder is internal |
-| `showInfoMenu(i1,i2,i3,o1,o2,o3,prefix)` | `showInfoPopup(l1,l2,l3)` | the offsets are internal constants; the `delay(5)` between its frames is gone — the TX FSM paces them |
-| `getMenu()` returning the `String`/`vector` `Menu` | `getMenu()` returning the fixed-capacity `affa::widget::MenuModel` (still spelled `affa::Menu` — the alias in `CarminatDisplay.h`) | see §8.7 for the new item-building API and §2.12 for what the change of type means |
-| `MenuItem(String, {Field...})` | `affa::MenuItem{ .label = "...", .fields = {...} }` + `integerField/listField/readOnlyField` | no `String`, no `std::function`; callbacks are function pointers with a `ctx` |
-| `Menu::handleMessage(const CAN_FRAME&)` | *(removed)* | it was already a no-op, and it was the only reason the original `Menu.h` included `<esp32_can.h>` |
-| `Menu::handleKey(Key, KeyEdge)` | *(removed)* → `MenuController::routeKey()` + `MenuModel::next/prev/increase/decrease/select/back()` | the model has no key vocabulary, so the `(Key, KeyEdge)` map moved up one layer into navigation policy. The fall-through for SrcNext / SrcPrev / VolUp / VolDown / Pause is unchanged and now lives in that map's `default:` |
-| `Menu::render()` returning `Result` | `MenuModel::render()` returning `void` | the verdict is `CarminatDisplay::menuRenderer().lastResult()`: only the layer holding the `IPanel` can answer it |
-| `IDisplay::isCarminat()` | `supports(Feature)` | ask about the capability, not the model |
-| `emulateKey(AffaKey, bool hold)` (file-static in `CarminatDisplay.cpp`) | `pressKey(Key, KeyEdge, KeySource::Wire)` | it built the `0x1C1` frame by hand and pushed it through `CanUtils`. The wire bytes are unchanged. `KeySource::Wire` is the source that reproduces it exactly, and it must be passed explicitly — the default is `Local`, which drives our own menu and transmits nothing (§7b.6) |
-| *(no equivalent — `ProcessKey` was the only entry)* | `pressKey(..., KeySource::Local)` / `nav(NavCommand)` | the input seam: a web console, a BLE remote or a test now drives the same path as the wheel (§8.3) |
-| `sendPasswordSequence()` in `CarminatDisplay.cpp` | *(not in the library)* → `examples/08_radio_mitm` | one car, one radio, `delay(1000)`+`delay(200)`. Reimplemented against `subscribe()` + `pressKey(..., Wire)` and fully non-blocking — §7b.7a. **The library never emulates a key on its own initiative** |
-| `AuxModeTracker::onCanMessage(const CAN_FRAME&)` | your own `FrameCb` on a `subscribe()` of `0x151` | **deleted**, gate and all. It was extracted out of the RX path, then shipped default-off, then removed once it was clear nothing used it. The seven patterns are tabulated in `docs/PROTOCOL-NOTES.md` §8 and implemented in `examples/08_radio_mitm` — §7b.7b |
-| `_aux.onCanMessage(*packet)` inside `CarminatDisplay::recv` | *(removed)* | the display no longer feeds the tracker. Subscribe and feed it yourself, or write your own heuristic |
-| hold-Load hard-wired in `Menu::handleKey` | `setMenuHotkey(Key, KeyEdge)` / `clearMenuHotkey()` | same default (Load + Hold), now replaceable — §7b.7c |
-| `IVirtualDisplay::pressKey(uint16_t, bool)` | *(gone with the twins)* | it was renamed to `transmitKey` first, so it could not be confused with `AffaDisplayBase::pressKey`, which by default also has a local effect. To impersonate a panel now, call `pressKey(k, e, KeySource::Wire)` on a display — that is the same wire half, and it is public API (§7b.6) |
-| `attachMediaRouter` / `setMediaInfo` / `tickMedia` / `onElmUpdate` / `onBtDisconnected` | *(not in the library)* | media, ANCS and ELM stay in the application; drive the library with `setText`/`showMenu` |
-| `ISettings` (NVS for menu items) | *(not in the library)* | the application owns persistence; put your NVS write in `MenuItem::onChange` |
-| `IsoTp::Reassembler` / `IsoTp::fragment` (global `IsoTp` namespace) | `affa::isotp::*` in `proto/` | unchanged semantics; `int` lengths become `uint8_t` and `MAX_PAYLOAD` becomes `AFFA_MAX_PAYLOAD` (§2.13) |
-| `ScreenDecode::*`, `ScreenModel` | `affa::screen::*`, `affa::ScreenModel` in `proto/` | `item0`/`item1` → `row0`/`row1`; `Mode` becomes an `enum class` |
-| `vdisplay/IVirtualDisplay`, `VirtualDisplayBase`, `*VirtualDisplay` | *(not in the library)* | briefly `vpanel/IVirtualPanel` etc., then **deleted**: a model of a panel is an application of the protocol, not part of it. `setSelfAck(true)` replaces the ACK half; `isotp::Reassembler` + `affa::screen` replace the decode half, in about thirty lines you own (§2.14) |
-| `extern bool _autoTime` | *(gone)* | it was a host global reaching into the display |
+## 7. What 2.0 deleted, and why you will not find it
 
-Minimal shape of the migrated bring-up:
+This section exists because old code, old branches and old documents still name these
+things. Each one is here so that "where did it go" has an answer that is not "git log".
 
-```cpp
-affa::Esp32CanLink   link;
-ArduinoClock         clock;                       // your 3-line IClock
-affa::CarminatDisplay display(link, clock);
+`src/` went from ~14,000 lines to 8,500. Nothing on the wire changed.
 
-void setup() {
-  link.begin(affa::CanPins{.rx = GPIO_NUM_3, .tx = GPIO_NUM_4}, 500000);
-  display.onKey(onKey, nullptr);
-  display.onComplete(onDone, nullptr);
-  display.begin();
-}
+### 7.1 The widgets — `widget/MenuModel`, `MenuController`, `IPage`, `CarminatMenuRenderer`, `Marquee`, `RowScreen`
 
-void loop() {
-  display.poll();          // that is the whole integration
-}
-```
+**The rule, owner's, 2026-08-08: the library is a plain implementation of the transport
+protocol. It is not UI.** Which item is selected, what a hold-`Load` gesture means, how
+fast a title scrolls and when to repaint are decisions about a *product*, and a CAN driver
+that makes them is a CAN driver you cannot use for a different product.
+
+Nothing replaced them, because nothing was needed. The panel's contract is the render
+calls, and they are unconditional: `showMenu`, `showMenuN`, `highlightItem`,
+`selectMenuItem`, `setText`, `showInfoMenu`. An application that wants a scrolling title
+calls `setText` with a different window every 400 ms — which is exactly what `Marquee`
+did, except on the library's task, where it did not belong.
+
+`AFFA_ENABLE_MENU` and `AFFA_ENABLE_MARQUEE` went with them. `docs/MENU-WIDGET.md`
+described the deleted design and is gone too.
+
+### 7.2 `proto/` — `IsoTp::Reassembler`, `ScreenModel`, `ScreenDecode`
+
+The receive-direction decoder. It existed to be a **test oracle** — to prove that what the
+builders emit is what a reader would read back — and that is a test's job, not a shipped
+library's. It now lives in `test/affa_decode.h`, where it is used by exactly the code that
+needed it and costs a consumer nothing.
+
+The transmit-side layout it shared with the TX FSM was never separable in practice and
+lives in `AffaTx.cpp`, where the frames are actually built.
+
+`AFFA_ENABLE_ISOTP_RX` went with it.
+
+### 7.3 `link/Esp32CanLink`
+
+The raw-TWAI seam. **Nothing built against it**: every shipped example constructs
+`CanCommonLink`, which is the stack proven end to end on the bench and the one most
+existing Renault/ESP32 code already uses. Two implementations of one interface, one of them
+untested by anything, is a place for the two to disagree — and the disagreement surfaces on
+a bus, at a customer, not in CI.
+
+A build that wants raw TWAI writes an `ICanLink` of its own. The interface is four methods
+and `LoopbackLink` is a worked example in ninety lines.
+
+### 7.4 The observation seam, layers 1 and 2 — `subscribe()`, `FrameCb`, `FrameMatch`, `SubHandle`, `onEvent()`, `EventKind`, `Event`, `LinkErrorKind`
+
+Three layers of observation were specified: a raw frame tap, a filtered subscription table,
+and a semantic event sink. **Layer 0, the tap, is the one that was ever used.**
+
+Layers 1 and 2 cost a `FrameMatch` table (~256 B of static RAM plus a linear scan per frame
+*per direction*), an event enum that had to be extended every time anything new happened,
+and `AFFA_MAX_SUBSCRIPTIONS` to size it — in exchange for what `onFrame()` already does in
+four lines at the call site. An abstraction whose only user is its own test is a liability
+with documentation.
+
+`onFrame()`, `onKey()`, `onText()`, `onRadioText()` and `onComplete()` remain. §3b.7 and
+§4 give their threading rules; `CbKind` and `cbName()` are how a slow one is *named* in
+`Status` rather than merely counted.
+
+### 7.5 `rtos/AffaCommand.h` — `TxRequest`, `Op`, `Command`, `applyCommand`, `RequestTable`
+
+**This is the deletion that fixed the original complaint**, so it is worth stating plainly.
+
+The command queue sat one layer too high. Every render had to be re-transcribed by hand
+into an `Op` enum and a `Command` struct before it could cross a task boundary, which meant
+"callable from any task" was true for the handful of calls somebody remembered to mirror
+and false for every render written afterwards. That is why applications ended up setting
+`affa-task = 0` and driving the panel from `loop()`.
+
+2.0 moved the boundary **down into `enqueue()`**, where every render already funnels, and
+which the audit found no Carminat render touches a member to reach. The queue now carries
+finished bytes rather than an intention, so there is nothing to transcribe and all 22+
+renders are safe from any task — including ones written after this sentence. §4.
+
+`AFFA_TASK_QUEUE_DEPTH` sized that queue and is gone; `AFFA_DISPATCH_DEPTH` sizes what
+replaced it.
+
+### 7.6 `UpdateListMenuDisplay` and `AFFA_PANEL_UPDATELIST_MENU`
+
+A subclass and a build gate that existed to override exactly one method, with a name that
+lied twice: nothing about it was a menu, and what it selected was a different **command
+flavour**, not a different panel.
+
+Byte `[2]` of the `0x121` text command has been seen as `0x76`, `0x7E` and `0x7F`, and both
+the `0x76` and `0x7F` forms have been driven into UpdateList displays by independent
+projects. One radio, one frame, every glass. `docs/WIRE-SPEC.md` §9.2 keeps the evidence,
+including the two bytes where our reconstructed copy of the `0x7F` form contradicted the
+only real capture of it.
+
+### 7.7 `Feature::RadioText`
+
+It reported a **compile gate**, not a panel capability — and after `onText()` landed, a
+gate that bought nothing. A capability query that answers a question about your own build
+tells the caller nothing about the glass, which is the only thing `supports()` is for.
+
+`onRadioText(bool isAux)` is real, is exercised, and stays.
 
 ---
 
-## 7b. The boundary principle and the three-layer observation seam
+## 8. The input seam — settled
 
-### 7b.1 The boundary principle
+This section used to be 373 lines weighing up whether menu navigation belonged in the
+library or the application. It was a real question and it has an answer, so what follows is
+the answer rather than the argument.
 
-One rule settles almost every "library or application?" argument in this codebase.
+**Keys come out. Decisions stay out.**
 
-> **The library owns what the PANEL defines. The application owns what the CAR, the
-> RADIO or the USER defines.** Where a policy also happens to be the OEM convention, it
-> ships as a DEFAULT THAT CAN BE TURNED OFF — never as something the application cannot
-> reach or replace.
-
-| Panel-defined — **library** | Car/radio/user-defined — **application** |
-| --- | --- |
-| the wire format and ISO-TP framing | which radio is on the bus |
-| the sync handshake and function registration | which text strings mean which audio source |
-| key **encoding** and decoding (the `0xC0` hold mask, the wheel-code exemption, the per-family key id) | which key opens which screen |
-| the menu's wire primitives — `showMenu`'s two rows, the highlight frame, what the scroll-arrow bytes draw — but **not** the state machine above them (§8.2) | what to do about a password prompt |
-| the screen decoder | what the menu items are and what they change |
-| transliteration for the panel's charset | persistence of anything the user edits |
-
-Three pieces of the extracted code sit on the application side of that line and are
-**not** in the library. They are also the proof that this seam is cut in the right
-place: each must be reimplementable by an application using only public API, and §7b.7
-does exactly that for all three. If one of them could not be expressed cleanly, the
-seam would be wrong and would have to move — not be papered over.
-
-1. `sendPasswordSequence()` — a man-in-the-middle trick for one car and one radio.
-   → `examples/08_radio_mitm`, §7b.7a.
-2. `AuxModeTracker` — heuristic inference of a radio's source from decoded text.
-   The library supplies the **mechanism** (a raw subscription); the **policy** moves out
-   entirely. The class first became an optional default-off helper and has now been
-   deleted; the reverse-engineering it held is a table in `docs/PROTOCOL-NOTES.md` §8,
-   which preserves the work without passing it off as universal. → §7b.7b.
-3. "hold Load opens the menu" — UI policy that happens to be the OEM convention, so it
-   stays as a **configurable default**. → `setMenuHotkey()`, §7b.7c.
-
-### 7b.2 The physical topology, and why keys only ever come in
-
-Everything about keys follows from this. It is confirmed by the project owner and it is
-reproduced in the README for the same reason it is here: the protocol's shape is
-unintelligible without it.
-
-```
-[joystick] --wired--> [PANEL] --CAN 1C1 03 89 hi lo--> [RADIO]
-                         ^                                |
-                         +------- CAN 0x151 screens ------+
-```
-
-The joystick is physically part of the **panel**. Pressing it makes the panel encode and
-transmit a key frame. The radio receives that frame and decides what to draw next; it
-then sends the next screen. A button pressed on the radio's own front panel produces no
-CAN key frame at all — the radio just draws the next screen directly.
-
-**This library's normal role is the RADIO.** Therefore keys only ever come IN. The
-library never transmits a key frame in normal operation, and the panel is not a listener
-for its own key id — so a key frame we transmit on a two-node bench bus is addressed to
-nobody.
-
-### 7b.3 Layer 0 — the tap
+The library decodes `0x1C1` / `0x0A9` into `(Key, KeyEdge)`, acknowledges the frame on the
+bus because the protocol requires an acknowledgement, and hands the pair to `onKey()`. It
+does not know what `Key::Load` means, does not track which row is selected, and has no
+opinion about what a long press should do.
 
 ```cpp
-void onFrame(FrameTap cb, void* ctx);   // FrameTap = void(*)(const Frame&, Direction, void*)
+panel.onKey([](affa::Key k, affa::KeyEdge e, void* ctx) {
+  if (e == affa::KeyEdge::Click && k == affa::Key::Down) app->next();
+}, app);
 ```
 
-Every frame, in and out, unfiltered, in wire order. For sniffers, loggers, and the web
-console's frame ring. It never filters and it must never block. One tap; a second call
-replaces the first; `nullptr` removes it.
-
-Both directions pass through the same choke point, `observe(f, d)`, so a tap sees the
-whole bus in the order it happened rather than two interleaved half-views. RX frames are
-observed inside `pumpRx()`; TX frames are observed from `txFrame()`, immediately after
-`ICanLink::send()` accepted them — a frame the link **refused** is not observed, because
-it never existed on the bus. `Stats::txDropped` and `EventKind::LinkError` are where a
-refused frame shows up.
-
-### 7b.4 Layer 1 — filtered raw subscription
-
-Raw-frame subscriptions are not a fallback for a poor event set. They exist because an
-application doing something the library never anticipated — the password trick is the
-canonical case — needs the bytes, and re-deriving the protocol from a tap to get them
-would throw away the library's whole value.
-
-```cpp
-SubHandle subscribe(const FrameMatch& m, FrameCb cb, void* ctx);
-bool      unsubscribe(SubHandle h);
-uint8_t   subscriptions() const;
-```
-
-`FrameMatch`, `SubHandle`, `FrameCb` and `Direction` are declared in §2.1. The table is
-`AFFA_MAX_SUBSCRIPTIONS` entries (default 8), statically allocated, never grown.
-`subscribe()` returns `kNoSub` when the table is full or the match is unsatisfiable
-(`dir` with no bits set, or `len > 8`); **check `valid()`** — an ignored return value is
-a subscription that silently never fires.
-
-**The matching rule, exactly.** For a frame `f` observed in direction `d`:
-
-```
-matches(m, f, d) :=
-      (bit(d) & bit(m.dir)) != 0                              // direction
-   && ((f.id ^ m.id) & m.idMask) == 0                         // id under mask
-   && (m.len == 0 || f.len >= m.len)                          // long enough
-   && for i in [0, m.len):
-        ((f.data[i] ^ m.data[i]) & m.dataMask[i]) == 0         // bytes under mask
-```
-
-Consequences, each of which has bitten someone in a previous life:
-
-* `m.len == 0` means **id only** — the payload is not examined at all. That is the
-  correct shape for "feed me everything on `0x151`" (§7b.7b).
-* A frame **shorter** than `m.len` never matches, even if every byte it does carry
-  agrees. AFFA frames are always 8 bytes, so this only fires on malformed traffic —
-  where silence is the right answer.
-* A `dataMask[i]` of `0x00` makes `data[i]` irrelevant; the pair `{data, dataMask}` is
-  a value/care mask, not a range.
-* A **default-constructed** `FrameMatch` matches id `0x000` inbound and nothing else.
-  AFFA uses no such id, so a half-filled match is inert rather than a firehose.
-  Matching every id is the explicit opt-in `idMask = 0`.
-
-**Dispatch is observational and can never consume.** Subscriptions fire *before* the
-library's own handling of the frame, and nothing a callback does prevents that handling:
-a subscription on `0x3CF` cannot suppress the sync FSM, and one on `0x151|0x400` cannot
-swallow an ACK. The per-frame order inside `pumpRx()` is fixed:
-
-```
-tap (Layer 0)  ->  subscriptions (Layer 1)  ->  library consumption  ->  events (Layer 2)
-```
-
-Layer 2 fires last because a decoded event is a *conclusion* about the frame, and the
-library has to have drawn it first.
-
-Slots are scanned in index order. Registration order is preserved only until a slot is
-freed and reused, so **do not depend on the order two subscriptions fire in**; if two of
-your callbacks must be ordered relative to each other, that is one callback.
-
-Cost: one linear scan of the table per frame per direction. At 8 slots and the ~4
-frames/s of an idle AFFA bus this is unmeasurable; it is still bounded and static, which
-is the property that matters. `AFFA_MAX_SUBSCRIPTIONS = 0` compiles the table and the
-scan away entirely (§5.3).
-
-### 7b.5 Layer 2 — decoded protocol events
-
-The library already knows what the bytes mean. Hiding that and making every application
-re-derive it would be perverse — so the conclusions are published.
-
-```cpp
-void onEvent(EventCb cb, void* ctx);    // EventCb = void(*)(const Event&, void*)
-```
-
-`EventKind`, `Event`, `LinkErrorKind` and `EventCb` are declared in §2.1. One sink; a
-second call replaces the first.
-
-`Event` is a **tagged union**, and the choice is worth defending on a RAM-tight target.
-`std::variant` costs an index, alignment padding and a valueless-by-exception state that
-a `-fno-exceptions` build cannot even reach; a class hierarchy costs a vtable pointer per
-event and forces the event object to outlive the callback. The tagged union is 12 bytes
-of POD, built on the `poll()` stack, copied nowhere and allocated never.
-
-| `EventKind` | Union member | Fires when |
-| --- | --- | --- |
-| `SyncChanged` | `sync{prev, now}` | `setSync()` stored a state word different from the previous one. Never fires on a no-op write. |
-| `Registered` | `sync{prev, now}` | the last registration job completed `Ok` and `FuncsReg` latched. Fires in addition to the `SyncChanged` that carries the same bit. |
-| `PeerLost` | `sync{prev, now}` | the peer-alive deadline expired in `pumpSync()`. `now` already has `Failed` set and `FuncsReg` cleared. |
-| `Key` | `key{key, edge}` | a key was decoded from the wire, **or** `pressKey`/`nav` was called with a source that includes `Local`. Fires after the menu has had the key, so `ev.key` is what arrived, not what was left over. |
-| `TxComplete` | `tx{ticket, result}` | exactly the information `CompleteCb` carries, for applications that want one sink instead of five. |
-| `LinkError` | `error{kind, count}` | ring overflow, a `send()` the link refused, or the controller's own error counters advancing. `count` is the running total, not a delta. |
-
-Layer 2 fires **in addition to** `KeyCb`, `CompleteCb` and `SyncCb`, never instead of
-them. Installing both is legal and delivers both.
-
-No arm of `Event` carries a pointer today — the two that did, `text` and `screen`, went
-with `EventKind::RadioText` and `EventKind::ScreenChanged` (§6). Should one return, so
-does its rule: a pointer inside an `Event` points at library-internal storage and is valid
-**only for the duration of the callback**. Copy what you need. Keeping the pointer
-compiles, and works, right up until the next frame arrives.
-
-**Firing context and re-entrancy, stated once for all three layers:** every callback in
-every layer fires from the task that called `poll()` — never from the CAN task, never
-from an ISR — with the single exception that `pressKey`/`nav` deliver their `Local` half
-(and `Wire`'s tap/subscription dispatch) synchronously on the caller's stack. All three
-may call back into the library, including render calls, `abortPending()` and
-`pressKey()`; none may call `poll()`. The full rules, including
-"state first, callbacks second" and the legality of `subscribe()` from inside a
-`FrameCb`, are in §4.2 and §4.3 and are not repeated here.
-
-### 7b.6 `KeySource`, `pressKey`, `nav`, and the echo rule
-
-```cpp
-enum class KeySource : uint8_t {
-  Local = 1,   // as if a key arrived: drive our menu + fire the Key event.
-               // Nothing goes on the bus. THE DEFAULT, because in the radio role
-               // that is what a key press IS from our side.
-  Wire  = 2,   // impersonate the panel: encode and transmit the key frame. Only
-               // meaningful when a REAL radio is on the bus and you are driving it.
-  Both  = 3,   // both at once. Rarely what you want — see below.
-};
-Result pressKey(Key k, KeyEdge e, KeySource src = KeySource::Local);
-Result nav(NavCommand c,          KeySource src = KeySource::Local);
-```
-
-**One function with a source, not two lookalike functions.** An "inject locally" and a
-"send on the wire" sitting side by side with near-identical names is a trap: they would
-be confused at a call site sooner or later, and the failure is silent in one direction
-(a key that did nothing) and loud on a vehicle bus in the other.
-
-**`Local` is the default for both, deliberately.** An earlier draft of this design
-defaulted `pressKey` to `Both` on the reasoning that "emulating a real press should look
-real from every angle". That was wrong, and the topology in §7b.2 is why: in the radio
-role we are the RECEIVER of key frames, so transmitting one does not make the emulation
-more faithful — it puts a frame on the bus that nothing is listening for, pollutes the
-trace, and could confuse a third node. The reasoning is more useful than the rule; a
-future reader will re-propose `Both` otherwise.
-
-**So why does `Wire` exist in the library at all, rather than the application just
-building a frame and calling `link.send()`?** Because the key ENCODING is panel-defined
-and therefore ours by the boundary principle: the hold mask (`0xC0`), the exemption of
-the two encoder codes `0x0101` / `0x0141` from that mask, and the per-family key id
-(`0x1C1` on Carminat, `0x0A9` on UpdateList). Making an application hand-assemble
-`03 89 <hi> <lo>` with the right mask is exactly the duplication the library exists to
-prevent. `Wire` is a key frame ENCODER; only its default was ever in question.
-
-**The caveat that belongs in the README next to "begin() transmits":**
-`KeySource::Wire` puts phantom button presses on the bus. On a bench with one panel that
-is harmless and is exactly what §7b.7a needs. On a **vehicle** bus it is injecting input
-that other modules may act on. Said plainly: do not ship `Wire` in a car unless you know
-precisely which module is listening and what it will do.
-
-**The echo rule, and why it is not optional.** A real CAN controller never receives its
-own transmissions, but `LoopbackLink` does — so without a rule, `pressKey(..., Both)`
-would fire once on hardware and twice on the host, and every host test would be lying
-about the target. Therefore:
-
-> **The library tags every frame it transmits with `Frame::fromSelf`, and the RX key
-> decoder ALWAYS ignores such frames.** The local effect of a self-sent key is decided
-> solely by `KeySource`, never by whether the transport happens to echo.
-
-That makes behaviour identical on `Esp32CanLink` and on `LoopbackLink`, which is the
-property that makes the host tests worth anything. `test/test_keysource` runs the same
-`pressKey(..., Both)` against both links and asserts the key fires **exactly once** on
-each. A frame that arrives through `recv()` with `fromSelf` set is additionally
-presented to Layers 0 and 1 as `Direction::Tx`, never as `Rx`, so a `dir = Rx`
-subscription means "what the other node actually sent" on every link, echoing or not.
-
-`Result` from `pressKey`/`nav` reports **whether the intent was delivered**, not whether
-anything was queued and not whether anything changed on screen (§3):
-
-| Result | Cause |
-| --- | --- |
-| `Ok` | the requested halves were delivered |
-| `NotSupported` | `Local` with no menu compiled in and no `KeyCb` installed; or `Wire` on a panel with no key transmit id (`supports(Feature::KeyTx)` is false); or `Wire` with a `Hold` edge on `RollUp`/`RollDown` |
-| `LinkDown` | `Wire`, and `ICanLink::isLive()` was false |
-| `SendFailed` | `Wire`, and the link refused the frame |
-
-The `Wire` + `Hold` + wheel-code case is a refusal, not a downgrade: a hold edge on a
-wheel code has **no wire representation at all** (§8.3), and silently transmitting the
-click form would produce a fine step where the caller asked for a coarse one — a wrong
-screen the caller cannot detect. `NavCommand::Increase` and `Decrease` are therefore
-reachable only with a source of `Local`.
-
-With `Both`, the `Wire` half is attempted first and a failure there is returned even
-though the `Local` half already happened. That is the honest answer: the caller asked
-for both.
-
-### 7b.7 The three examples, worked
-
-#### 7b.7a The radio password sequence — `examples/08_radio_mitm`
-
-The extracted `sendPasswordSequence()` watched for one specific decoded payload on
-`0x151` and then emulated the remote's `5-3-2-1 + hold` keypresses to defeat a radio's
-code prompt, with `delay(1000)` and `delay(200)` in it. Everything about it is
-car-and-radio specific; none of it is panel-defined. It leaves the library and comes
-back as an example, non-blocking.
-
-The trigger is the second ISO-TP frame of the radio's PIN screen, observed on the bench
-as exactly `21 20 20 B0 30 30 30 20` on `0x151` — two spaces, the masked-digit glyph,
-then `000 ` (MeganeCAN `src/display/Carminat/CarminatDisplay.cpp`, the branch that
-called `sendPasswordSequence()`).
-
-```cpp
-// The PIN, and its pacing. Both are radio policy: the library has no opinion about
-// either, which is precisely why this file is an example and not a feature.
-constexpr uint8_t  kCode[]    = {5, 3, 2, 1};
-constexpr uint32_t kArmMs     = 1000;   // the radio is still drawing when we match
-constexpr uint32_t kSpacingMs = 200;    // the radio's key debounce, measured
-
-class PinEntry {
- public:
-  PinEntry(affa::AffaDisplayBase& d, affa::IClock& c) : _d(d), _c(c) {}
-
-  // Layer 1 callback. Fires inside poll(). It ARMS and returns — it does not press.
-  // A callback that waited here would be the old delay(1000) with extra steps, and it
-  // would stall the very poll() that has to deliver the ACKs for what it sends.
-  static void onPrompt(const affa::Frame&, void* ctx) {
-    auto* self = static_cast<PinEntry*>(ctx);
-    if (!self->_done) return;                        // already running
-    self->_done = false;
-    self->_digit = self->_detent = 0;
-    self->_nextMs = self->_c.millis() + kArmMs;
-  }
-
-  // Called from the application loop, beside poll(). One press per due deadline.
-  void tick() {
-    if (_done) return;
-    if (static_cast<int32_t>(_c.millis() - _nextMs) < 0) return;
-    _nextMs = _c.millis() + kSpacingMs;
-
-    if (_detent < kCode[_digit]) {                   // one wheel detent
-      _d.pressKey(affa::Key::RollUp, affa::KeyEdge::Click, affa::KeySource::Wire);
-      ++_detent;
-      return;
-    }
-    const bool last = (_digit + 1u == sizeof kCode);  // the final Load is a HOLD
-    _d.pressKey(affa::Key::Load,
-                last ? affa::KeyEdge::Hold : affa::KeyEdge::Click,
-                affa::KeySource::Wire);
-    _detent = 0;
-    if (last) { _done = true; return; }
-    ++_digit;
-  }
-
- private:
-  affa::AffaDisplayBase& _d;
-  affa::IClock&          _c;
-  uint32_t _nextMs = 0;
-  uint8_t  _digit  = 0, _detent = 0;
-  bool     _done   = true;
-};
-```
-
-Wiring, once, in `setup()`:
-
-```cpp
-static const uint8_t kPrompt[8] = {0x21, 0x20, 0x20, 0xB0, 0x30, 0x30, 0x30, 0x20};
-
-affa::FrameMatch m{};
-m.id     = 0x151;
-m.idMask = 0x7FF;
-m.dir    = affa::Direction::Rx;          // what the RADIO sent, never our own echo
-memcpy(m.data,     kPrompt, 8);
-memset(m.dataMask, 0xFF,    8);          // all eight bytes must match exactly
-m.len    = 8;
-
-if (!display.subscribe(m, &PinEntry::onPrompt, &pin).valid())
-  AFFA_LOGE("MITM", "subscription table full");   // never ignore this
-```
-
-```cpp
-void loop() {
-  display.poll();
-  pin.tick();          // the only "timer" involved, and it belongs to the application
-}
-```
-
-Four things this demonstrates, and one it deliberately does not.
-
-* **`KeySource::Wire`, not `Local`.** We are impersonating the panel at a real radio.
-  A `Local` press would drive our own menu and tell the radio nothing.
-* **The echo rule earns its keep here.** On `LoopbackLink` the four transmitted key
-  frames come straight back; because they carry `fromSelf`, our own key decoder ignores
-  them and our menu does not lurch through four items. The host test of this example
-  therefore observes exactly what a bench run observes.
-* **The `dataMask` is doing real work.** No decoded event the library publishes would
-  have identified this screen; the application needed the bytes, and it got them without
-  re-deriving the protocol.
-* **The blocking is gone, not moved.** `delay(1000)` and four `delay(200)`s became two
-  deadlines on the application's own clock. Meanwhile `poll()` keeps running, the sync
-  heartbeat stays paced, and a key arriving mid-sequence is still delivered
-  within one poll.
-* **What the library did not supply: the timer.** Pacing keypresses at 200 ms is radio
-  policy, so the pacing lives in the application, driven by the same `IClock` the
-  library uses. That is the seam behaving correctly, not a gap in it.
-
-#### 7b.7b AUX-source detection
-
-The extracted `AuxModeTracker` pattern-matched the text the radio drew — `"AUX"`,
-`"RENAULT"`, `"TR 1 CD"`, `"M 1056"`, `"L 1056"`, `"   1056"`, and a leading `"> "` — to
-infer which source it was playing. Those patterns describe **a radio**, not a panel.
-Policy, therefore application.
-
-**The class is gone**, and so is the `AFFA_ENABLE_AUX_TRACKER` gate. It travelled a full
-arc: hard-wired into `CarminatDisplay::recv()`, then extracted to a free-standing
-default-off helper, then deleted. The last step is the honest end of the second one — a
-default-off class with no test, no example, no caller and nothing in the library depending
-on it is not a preserved capability, it is a maintained liability with a `#ifdef` in front
-of it.
-
-**The knowledge is preserved, the code is not.** `docs/PROTOCOL-NOTES.md` §8 tabulates all
-seven patterns, the 200 ms header/continuation pairing, the `text[0]`-is-not-text index
-rule and the `0x59` format-byte threshold, with the reason for each. That is the right
-shelf for it: an observation about one Renault radio family, offered to an application
-that may act on it, rather than a verdict the library asserts.
-
-**What an application writes instead** is a Layer 1 subscription, roughly twenty lines.
-Note it works on **raw frames**, not on decoded text, and that is not a downgrade: the
-discriminator includes header byte 6 of the `0x10` frame — the `setText` format byte,
-where `>= 0x59` marks plain ASCII and `< 0x59` the radio-digit style — which no
-reassembled string carries. The library publishes no decoded-text event (see §6), so
-nothing was lost in the move.
-
-```cpp
-// Feed it every frame the RADIO sent on the text channel; classify the 0x21 that
-// follows a 0x10 within 200 ms. docs/PROTOCOL-NOTES.md §8 has the full table.
-static void onRadioFrame(const affa::Frame& f, void* ctx) {
-  auto* app = static_cast<App*>(ctx);
-  if (f.len < 8) return;                       // short DLCs are real on this bus
-  if (f.data[0] == 0x10) { app->keepHeader(f); return; }
-  if (f.data[0] != 0x21 || !app->headerFresh()) return;
-  app->classify(app->header(), f.data);        // -> AUX / radio / CD / retain
-}
-
-affa::FrameMatch m{};
-m.id  = 0x151;                    // 0x121 for UpdateList
-m.dir = affa::Direction::Rx;      // len stays 0: id only, and never our own echo
-if (!display.subscribe(m, &onRadioFrame, &app).valid()) { /* table full */ }
-```
-
-`examples/08_radio_mitm` is this, working, with two of the seven patterns implemented.
-
-In the extracted code `CarminatDisplay::recv()` called `_aux.onCanMessage(*packet)`
-unconditionally: every consumer paid for the heuristic, nobody could replace it, and the
-tracker's verdict was indistinguishable from a protocol fact. Now there is no verdict in
-the library at all, and the frames are yours.
-
-#### 7b.7c A custom menu-open hotkey
-
-"Hold Load opens the menu" was hard-wired inside the extracted `Menu::handleKey`. It *is* the OEM
-convention for this panel, so it stays — as a default that can be replaced or removed.
-
-```cpp
-void setMenuHotkey(Key k, KeyEdge e);        // default: Key::Load, KeyEdge::Hold
-void clearMenuHotkey();                      // nothing opens the menu but nav(Open)
-bool menuHotkey(Key& k, KeyEdge& e) const;   // false when cleared
-```
-
-This governs **opening only**. Once the menu is open, routing keys into it — which key
-scrolls, which enters edit mode, which redraws versus which re-highlights — is the
-widget's behaviour, and it is fixed rather than configurable (§8.5). It is fixed because
-it reproduces the panel's own convention, not because the panel enforces it: the way to
-get different routing is to replace `MenuController` or the widget entirely, against the
-two unconditional calls (§8.2), not to look for a knob.
-
-Three shapes, all public API:
-
-```cpp
-// 1. A different gesture, because this installation's stalk has no comfortable hold.
-display.setMenuHotkey(affa::Key::SrcNext, affa::KeyEdge::Hold);
-
-// 2. No gesture at all: the menu opens only when the application says so — from a web
-//    console, a BLE remote, a long-press decoded elsewhere, or a test.
-display.clearMenuHotkey();
-display.nav(affa::NavCommand::Open);         // from the task that owns poll() (§4.5)
-
-// 3. Double-click Load opens it. Pure application policy, expressed in the KeyCb.
-//    Note this needs (2) first: with the default hotkey live, hold-Load would still
-//    open the menu behind your back.
-static void onKey(affa::Key k, affa::KeyEdge e, void* ctx) {
-  auto* app = static_cast<App*>(ctx);           // app->display is a CarminatDisplay* — §8.7
-  if (k == affa::Key::Load && e == affa::KeyEdge::Click && !app->display->getMenu().isOpen()) {
-    const uint32_t now = app->clock.millis();
-    if (now - app->lastLoadMs < 400) app->display->nav(affa::NavCommand::Open);
-    app->lastLoadMs = now;
-    return;
-  }
-  /* ... the application's other keys ... */
-}
-```
-
-Shape 3 works because **a closed menu consumes nothing**: with the hotkey cleared, every
-key reaches `KeyCb` while the menu is shut (§8.5). Once it is open the menu consumes
-`Load` and the wheel, and it should — that is the panel's behaviour and an application
-that fought it would produce a screen no Renault driver recognises.
-
-A web console reaching `nav()` from its own HTTP task must go through a queue drained by
-the task that owns `poll()`; the library is not internally locked (§4.5).
-
-### 7b.8 Verdict on the seam
-
-All three moved out cleanly, using only `subscribe()`, `onEvent()`, `pressKey()`,
-`nav()` and `setMenuHotkey()`. No example needed a library internal, a friend
-declaration, or a "just this once" accessor, and none of them blocks.
-
-Two library-side facts were load-bearing, and both are consequences of the boundary
-principle rather than conveniences:
-
-* **`KeySource::Wire` had to be in the library.** Without it, §7b.7a would hand-assemble
-  `03 89 <hi> <lo>` with the `0xC0` mask and the wheel-code exemption — panel-defined
-  knowledge, duplicated in an application, wrong the first time the second panel family
-  is used.
-* **Layer 1 had to carry a payload mask.** With id-only filtering, §7b.7a would have to
-  re-implement enough of the screen format to recognise its trigger.
-
-And one extracted behaviour had to change: the display stopped feeding `AuxModeTracker`,
-and the tracker has since been deleted outright (§7b.7b). That is not a regression, it is
-the seam — a heuristic about someone else's radio has no business on the protocol layer's
-critical path, and once it was off that path nothing in the library needed it at all.
-
----
-
-## 8. The input seam: does menu navigation belong in the library or the application?
-
-### 8.1 The question, and the answer this section used to give
-
-An OEM panel has a wheel and a button, and the menu it draws is unmistakably wire-shaped:
-a fixed 96-byte payload, fixed row offsets, a separate one-frame highlight, a scroll byte
-derived from the selection. An earlier revision of this section read that as proof that
-**the library owns the menu mechanism**, and said so in those words. `AFFA_ENABLE_MENU`
-was on by default to match.
-
-> **That position was overturned on purpose; it was not softened, and this is not a
-> clarification of it.** If you have read the old text — here, or the same argument as it
-> used to stand in `src/AffaConfig.h` — the sentence "the library owns the menu
-> mechanism" is no longer the project's position and no longer describes the code.
-> `AFFA_ENABLE_MENU` defaults to **`0`**, the state machine lives in `src/widget/` with no
-> panel dependency at all, and `showMenu` + `highlightItem` are what remains
-> unconditional. The reversal is recorded at the gate itself (`src/AffaConfig.h`, "OFF BY
-> DEFAULT, AND THE REASON IS A CORRECTION"), in `docs/MENU-WIDGET.md` and in the README's
-> "The menu is a widget, not the protocol". They agree with this section; nothing else in
-> the tree still argues the old line.
-
-The old argument failed on one conflation: **being derived from the wire is not the same
-as being the wire.** Every fact in the bullet list below is genuinely panel-defined, and
-every one of them is discharged by two calls. What the argument then smuggled in — which
-items exist, which is selected, how a window slides over N of them, what a field is, when
-Select advances to the next field and when it exits — is nowhere in that list, because the
-panel has no opinion about any of it. It was one opinion about how a menu should behave,
-shipped as though it were the protocol, and it was also the one part of the library that
-behaved unexpectedly on the bench. That is not a coincidence: it was the only place the
-library decided something on the application's behalf.
-
-### 8.2 The boundary, as it stands
-
-**The library owns exactly two calls.** They are declared on `IPanel` (§2.4), implemented
-in `CarminatDisplay` outside every menu gate, and available on every build regardless of
-`AFFA_ENABLE_MENU`:
-
-```cpp
-[[nodiscard]] Result showMenu(const char* header, const char* row0,
-                              const char* row1, uint8_t scrollIndicator);
-[[nodiscard]] Result highlightItem(uint8_t row);   // 0x7E = row 0, 0x7F = row 1
-```
-
-Header, two rows, which one is lit, which arrows. That is the whole wire contract, and
-these are the facts that make it that and not something larger:
-
-* A Carminat menu screen is a single **96-byte ISO-TP payload on `0x151`** beginning
-  `10 5A 21 01 7E 80 00 00 82 FF <scroll>`, with the header at byte 10, row 0 at fixed
-  offset 37 preceded by `00 7E`, and row 1 at fixed offset 64 preceded by `01 7F`. The
-  panel renders exactly **two rows**. Not a list — a two-row sliding window. Hence
-  `showMenu`'s three strings, and hence a `MenuGeometry` whose `rows` is a parameter
-  rather than a constant.
-* The selection highlight is **a different frame entirely**: `0x151 : 07 29 01 7E|7F
-  80 00 00 00`, where `7E` means row 0 and `7F` means row 1. Moving the selection
-  inside the visible window costs one frame; moving it outside costs a full 96-byte
-  redraw. Hence two calls rather than one — and hence `RenderSlot::Menu` and
-  `RenderSlot::Highlight` are separate slots (§3b.4), so a highlight can never coalesce
-  away a redraw.
-* The scroll-arrow byte is computed from the selection's position in the list:
-  `0x0B` bottom arrow only, `0x07` top arrow only, `0x0C` both (§8.6). The panel defines
-  what those bytes mean; it does not define who counts the items.
-* The row tags, the offsets and the `0x21`/`0x29` command bytes are the panel's, and no
-  application should ever have to know them. That is what these two calls buy.
-
-**Everything above those two calls is the application's**, and the library is not in the
-way of any of it: which items exist, what they are called, what a field means, what
-happens when it changes, whether the change is written to NVS, which gesture opens the
-menu, and where the key came from.
-
-**The library ships one opinion about the layer in between, off by default.**
-`widget::MenuModel` (§2.12) is the sliding-window state machine — items, fields,
-selection, window arithmetic, editing, clamping, the coarse step — with `rows`,
-`rowChars` and `wrap` injected as `MenuGeometry` and **no panel header, no CAN and no
-`Result` anywhere in it**. It draws through `widget::IMenuRenderer`;
-`CarminatMenuRenderer` is the adapter that turns its output into the two calls
-above, and `examples/09_menu_widget` drives one identical model onto three different
-displays, the third of which touches no AFFA protocol at all. `src/widget/` is therefore
-gated on `AFFA_ENABLE_MENU` **alone**, with no panel gate — it compiles on the host with
-nothing but the C++17 standard library. Turn it on if it fits; write your own against
-`showMenu()` + `highlightItem()` + the decoded `Key` events if it does not; or keep the
-state machine and write your own `IMenuRenderer`. See `docs/MENU-WIDGET.md`.
-
-| Panel-defined — **library, unconditional** | Widget — **`AFFA_ENABLE_MENU`, default 0** | Application — **always** |
-| --- | --- | --- |
-| the 96-byte screen layout, row offsets, row tags | which item is on row 0, which row is lit | what the items are and what they mean |
-| the highlight frame and its `7E`/`7F` | when a move is a highlight and when it is a redraw | what a change is worth doing about |
-| what `0x07`/`0x0B`/`0x0C` draw | which of them the current window implies | how many items there are |
-| ISO-TP framing, `RenderSlot`, coalescing | edit mode, fields, step and coarse step | persistence, validation, units |
-| key **encoding** and decoding | the `(Key, KeyEdge)` → intent map (`MenuController`) | which gesture should open a menu at all |
-
-The one row that is genuinely a panel *convention* rather than a panel *definition* — hold
-Load opens and closes, click Load activates or steps a field, the wheel scrolls or edits
-depending on mode — follows §7b.1's rule for exactly that case: it ships as a **default
-that can be turned off**, `setMenuHotkey()` / `clearMenuHotkey()` (§7b.7c), never as
-something the application cannot reach.
-
-### 8.3 Why the input must be a seam and not a source
-
-The panel's wheel and buttons are only **one producer** of navigation intent. A web
-console, a BLE remote, a steering-wheel key matrix and a unit test are equally valid
-producers. So the library exposes the *entry* to key handling, not just the *exit*:
-
-```cpp
-Result pressKey(Key k, KeyEdge e, KeySource src = KeySource::Local);
-Result nav(NavCommand c,          KeySource src = KeySource::Local);
-```
-
-`pressKey`'s `Local` half calls the same `routeKey()` the wire decoder calls. There is
-exactly one path, so anything a test or a web page can drive is provably what the panel
-drives. That is the whole justification for the seam: without it, "works from the
-browser" and "works from the wheel" are two different claims requiring two different
-tests.
-
-There is deliberately **no second function** for the wire direction — the source is an
-argument, not a name (§7b.6). Both default to `Local`, because in the radio role a key
-press is something we RECEIVE; `KeySource::Wire` is for impersonating the panel at a
-real radio and is never what menu navigation wants.
-
-There is a concrete, load-bearing reason this is not academic. Look at the wire
-decoder: the hold mask `0x80|0x40` is applied to the low byte of the key code **except
-for the wheel codes `0x0101` and `0x0141`**, because those already use those bits.
-Consequently:
-
-> **A hold edge on `RollUp`/`RollDown` can never arrive from the panel.**
-> `NavCommand::Increase` and `NavCommand::Decrease` — the coarse `stepMultiplier` step —
-> are reachable *only* through `pressKey`/`nav` with a source that includes `Local`.
-
-The coarse-step feature exists in the menu code and the panel physically cannot reach
-it. Either the feature is dead code, or input is a seam. It is a seam. (It is also why
-`pressKey(RollUp, Hold, KeySource::Wire)` returns `NotSupported` rather than quietly
-transmitting the click form — §7b.6.)
-
-The seam also inherits §3b in full, which is the second reason it is a seam and not a
-convenience. `pressKey()` and `nav()` run the *same* `routeKey()` that the wire
-decoder runs, so a menu move driven from a web console produces the same coalescing
-decisions, the same `RenderSlot` traffic and the same "highlight only vs full redraw"
-choice as a wheel detent. One difference, worth knowing and worth not designing around:
-a key from the wire is delivered inside `poll()` and so carries L1 (one poll period);
-`pressKey()` is called by the application and delivers synchronously on the caller's
-stack, so its L1 is zero. Both then feed the same transmit queue, so **L2 is identical**
-— the reaction is not faster just because the input was local. Any test that asserts a
-frame sequence is therefore valid for both origins, which is the property that makes
-the whole library host-testable without a panel.
-
-### 8.4 `NavCommand` → `(Key, KeyEdge)`
-
-`nav()` is a pure mapping followed by `pressKey(k, e, src)`. It performs no state
-inspection of its own; the menu's state decides the outcome. The "raw wire code" column
-is what the panel would have transmitted, and is therefore also exactly what
-`nav(c, KeySource::Wire)` puts on the bus.
-
-| `NavCommand` | `Key` | `KeyEdge` | Raw wire code the panel would have sent |
-| --- | --- | --- | --- |
-| `Open` | `Key::Load` | `Hold` | `0x1C1 : 03 89 00 C0 …` (`0x00 \| 0xC0`) |
-| `Back` | `Key::Load` | `Hold` | identical to `Open` |
-| `Select` | `Key::Load` | `Click` | `0x1C1 : 03 89 00 00 …` |
-| `Next` | `Key::RollDown` | `Click` | `0x1C1 : 03 89 01 41 …` |
-| `Prev` | `Key::RollUp` | `Click` | `0x1C1 : 03 89 01 01 …` |
-| `Increase` | `Key::RollDown` | `Hold` | **unreachable from the panel** (§8.3) |
-| `Decrease` | `Key::RollUp` | `Hold` | **unreachable from the panel** |
-
-`Open` and `Back` map to the same key and the same edge **on purpose**: the panel has
-one hold-Load and it toggles. `nav()` cannot be safer than the hardware. The two names
-exist so calling code reads as intent; if you need a guaranteed open, check
-`getMenu().isOpen()` first.
-
-`Open` is the one row that also depends on configuration: what actually opens the menu on
-a key arriving from the wire is the **menu hotkey**, `Key::Load` + `Hold` by default and
-replaceable or removable through `setMenuHotkey()` / `clearMenuHotkey()` (§7b.7c).
-`nav(Open)` opens the menu regardless of the hotkey setting — it is an intent, not a
-gesture, and clearing the hotkey exists precisely so that `nav(Open)` becomes the only
-way in.
-
-`nav()` returns:
-
-* `Result::NotSupported` if `AFFA_ENABLE_MENU` is 0 or the panel has no menu; or if the
-  source includes `Wire` and the command is `Increase`/`Decrease`, which have no wire
-  representation (§8.3, §7b.6); or if the source includes `Wire` on a panel with no key
-  transmit id;
-* `Result::LinkDown` / `Result::SendFailed` for the `Wire` half only;
-* `Result::Ok` otherwise — meaning *the intent was delivered*, not that anything
-  changed on screen. A `Next` at the last item is `Ok` and emits nothing.
-
-### 8.5 `NavCommand` × menu state → behaviour and frames
-
-`W` = the visible two-row window. "full redraw" = one 96-byte `showMenu` payload followed
-by one `highlightItem` frame. "highlight only" = the single
-`0x151 : 07 29 01 7E|7F 80 00 00 00` frame.
-
-**The frame count of a full redraw depends on the ACK model, and quoting a bare number
-here is the trap this document must not set.** Frame 0 carries 8 payload bytes and each
-continuation carries 7:
-
-| Peer | Terminates at | Frames | Last PCI |
-| --- | --- | --- | --- |
-| Real panel (and `AckMode::Declared`) | the declared FF_DL, `payload[1] = 0x5A` = 90 content bytes, reached at 6 + 12×7 | **13** | `0x2C` |
-| Self-ACK emulator (`LoopbackLink::setAutoAck`, `AckMode::Done`) | the builder's 96 bytes, 8 + 13×7 = 99 ≥ 96 | **14** | `0x2D` |
-
-Either way a full redraw is ~13× the bus time and ~13× the ACK round-trips of a
-highlight, which is why they occupy different `RenderSlot`s and why the menu decides
-between them (§8.2). Any golden vector for `showMenu` must be parameterised by ACK model
-(`_HW` / `_EMU`) rather than carrying a bare 14 — see `test_carminat_wire`, which asserts
-both against the same vector array sliced differently.
-
-| Command | Menu **closed** | Menu **open**, not editing | Menu **open**, editing |
-| --- | --- | --- | --- |
-| `Open` | Opens. `selectedIndex` and `selectedRow` keep their previous values. **full redraw**. | Same key as `Back` → **closes** (see `Back`). | Same key as `Back` → **closes**. |
-| `Back` | Not consumed by the menu; falls through to the application `KeyCb`. **No frames.** | Closes. Fires `Menu::CloseCb` — on Carminat the default is `setText("RENAULT", 0)`, so **one setText transfer**. | Closes, and **clears `editing` and `editingField`** (see the note below). Same frames as above. |
-| `Select` | Not consumed; falls through to `KeyCb`. **No frames.** | If `onActivate` is set: calls it, **no frames from the menu itself**. Else if `editable`: enters edit mode → **full redraw** (the row now renders as `*Label: <value>`). Else nothing. | Advances to the next field → **full redraw**. On the last field, leaves edit mode → **full redraw**. |
-| `Next` | Not consumed; falls through to `KeyCb`. | At the last item: nothing. Else `selectedIndex++`; if the selection moves from row 0 to row 1 **inside** `W`: **highlight only**. If the window must scroll: **full redraw**. | `value += step` on the current field, clamped to `[min,max]`. Unchanged (already at max, or `readOnly`): **no frames**. Changed: fires `MenuItem::onChange(item, fieldIndex, ctx)` — the one hook, both roles; there is no `Field::onChange` — then **full redraw**. |
-| `Prev` | as `Next` | Mirror of `Next` (`selectedIndex--`, row 1 → row 0). At the first item: nothing. | `value -= step`, otherwise identical to `Next`. |
-| `Increase` | as `Next` | **Identical to `Next`** — outside edit mode the hold edge is ignored, exactly as the extracted code did. | `value += step * stepMultiplier`, clamped. Otherwise identical to `Next`. |
-| `Decrease` | as `Prev` | **Identical to `Prev`**. | `value -= step * stepMultiplier`. |
-
-For a `List` field, "value" is `listIndex`, clamped to `[0, listCount-1]`, no wrap —
-matching the extracted behaviour.
-
-> **A defect fixed while porting.** The legacy `Menu::handleKey` closed the menu on
-> hold-Load without clearing `editing`. Reopening the menu therefore resumed in edit
-> mode on whatever field was live when you left, with no visual difference from a
-> fresh open. `MenuModel::close()` now clears `editing` and `editingField`. This is a
-> behaviour change and it is intentional.
-
-Keys the menu does not consume (`SrcNext`, `SrcPrev`, `VolUp`, `VolDown`, `Pause`, and
-everything while the menu is closed except hold-Load) fall through to the application's
-`KeyCb`. `MenuController` routes an active `IPage` first, then the menu, then the
-fall-through — unchanged from the extracted code. Since the menu became display-agnostic
-the `(Key, KeyEdge)` → intent map is `MenuController::routeKey`'s rather than the menu's,
-and that fall-through is its `default:` branch; `MenuModel` has no `Key` vocabulary at all.
-
-> **`nav(NavCommand::Open)` is an intent, not a keystroke, and it does not travel the key
-> path.** `AffaDisplayBase::nav()` calls `openMenu()` directly rather than `routeKey()`.
-> With an `IPage` pushed, `CarminatDisplay::openMenu()` refuses (page-first routing is
-> preserved from the extracted code), so `nav(Open)` returns `Result::NotSupported` and
-> **no key is delivered to the page**. The hold-Load **gesture**, by contrast, goes through
-> `routeKey()` and therefore does reach the page. Both behaviours are deliberate; the row
-> above describes the gesture. The same refusal applies to an empty menu, which never
-> opens — an open empty menu would render nothing and swallow the wheel and `Load`.
-
-> **The closing key is CONSUMED.** `MenuController::routeKey` returns true for every key the
-> menu acts on while open — `MenuModel::back()` returns true — *including* the hold-`Load`
-> that closes it, as the `Open`/`Back` rows above specify. The extracted
-> `MenuController::routeKey` returned `_menu.isActive()`
-> **after** handling, so in the old code the closing keystroke also fell through to the
-> application's `KeyCb`. If an application relied on seeing that key, this is the
-> behaviour change to look at.
-
-### 8.6 Scroll indicator, specified
-
-`widget::MenuModel::scrollMask()` derives it from the WINDOW, not from the selection —
-`top` is `selectedIndex - selectedRow`, and `rows` is `geometry().rows`:
-
-```
-count <= rows            -> 0x00  (no arrows — the whole list fits)
-top == 0                 -> 0x0B  (bottom arrow only)
-top + rows >= count      -> 0x07  (top arrow only)
-otherwise                -> 0x0C  (both)
-```
-
-At `rows = 2` — the Carminat menu screen, and the only geometry the extracted code had —
-that is the same function as the selection-worded rule it replaced (`selectedIndex == 0 ||
-(selectedIndex == 1 && selectedRow == 1)` *is* `top == 0`), so no Carminat behaviour moved.
-The window wording is the one to reason with, because it is the only one that stays true at
-`rows = 3` or `6`. Note the consequence: the mask depends on where the window is, so item 1
-of 3 shows `0x0B` walking down and `0x07` walking back up.
-
-The `count <= rows` case is new: the extracted code indexed `items[topIndex+1]` without a
-bounds check and read past the end of a one-item menu.
-
-### 8.7 `widget::MenuModel& getMenu()` and the minimal item-building API
-
-The exact declaration, in `carminat/CarminatDisplay.h`, is:
-
-```cpp
-widget::MenuModel& getMenu();                            // non-const only
-CarminatMenuRenderer&       menuRenderer();              // the adapter —
-const CarminatMenuRenderer& menuRenderer() const;        //   ask it for lastResult()
-```
-
-**`getMenu()` returns `affa::widget::MenuModel&`.** It used to return a `Menu&` that was
-`carminat/Menu/Menu.h`; that file has been deleted and there is now exactly one menu state
-machine in the library. `affa::Menu` still names the returned type — it is a **type alias**
-for `affa::widget::MenuModel` declared in `CarminatDisplay.h`, alongside `affa::MenuItem`,
-`affa::Field`, `affa::FieldType`, `affa::integerField`, `affa::readOnlyField` and
-`affa::listField` — so `affa::Menu& m = display.getMenu();` still compiles and still means
-what it meant. Aliases, not a compatibility shim: there is nothing behind them but the one
-implementation. Two differences a caller can observe, both spelled out in §2.12:
-
-* `render()` returns **`void`**, not `Result`. Ask `menuRenderer().lastResult()` for the
-  panel's verdict — only the layer holding the `IPanel` can answer it.
-* a row truncates at the injected `rowChars` (26 on this panel) rather than at
-  `AFFA_MENU_ROW_MAX - 1`.
-
-And the boundary that governs all of it: **`showMenu()` and `highlightItem()` are the
-protocol-level primitives, and they are unconditional.** They are declared on
-`CarminatDisplay` outside every menu gate and work with `AFFA_ENABLE_MENU=0`, which is the
-default. `getMenu()`, `MenuModel`, `MenuController`, `IPage` and `nav()` are the **optional**
-widget built on top of them — one opinion about menu behaviour, which an application with a
-different remote is expected to replace. See `docs/MENU-WIDGET.md`.
-
-> **`getMenu()` is declared on `CarminatDisplay`, NOT on `AffaDisplayBase` or `IDisplay`.**
-> The menu is a Carminat capability — `UpdateList` has no menu at all and answers
-> `supports(Feature::Menu)` with false — so the accessor lives on the panel that has one
-> and the base declares no `MenuModel*` seam. Take a `CarminatDisplay&` (or keep a typed
-> pointer beside your base-typed one) wherever you build or inspect the menu; a
-> base-typed handle gives you `nav()`, which is the panel-agnostic half of the same
-> capability. This section and §7b.7c are written against a `CarminatDisplay&` for that
-> reason.
-
-The library hands out an **empty** menu with a header. The application fills it. This
-is the complete example of a three-field item — nothing else is needed and no library
-internal is touched:
-
-```cpp
-static const char* const kBtModes[] = { "OFF", "AUTO", "ON" };
-
-static void onTimeChanged(const affa::MenuItem& it, uint8_t field, void* ctx) {
-  auto* app = static_cast<App*>(ctx);
-  app->setClock(it.fields[0].value, it.fields[1].value);   // hours, minutes
-  app->persist();                                          // NVS lives HERE, not in the library
-}
-
-void App::buildMenu(affa::CarminatDisplay& display) {   // NOT AffaDisplayBase& — see above
-  if (!display.supports(affa::Feature::Menu)) return;
-  affa::Menu& m = display.getMenu();
-
-  affa::MenuItem clock{};
-  clock.label      = "Clock";
-  clock.fields[0]  = affa::integerField(hh, 0, 23, /*step*/1, /*stepMultiplier*/6);
-  clock.fields[1]  = affa::integerField(mm, 0, 59, /*step*/1, /*stepMultiplier*/10);
-  clock.fields[2]  = affa::listField(kBtModes, 3, /*index*/1);
-  clock.fieldCount = 3;
-  clock.separator  = ':';
-  clock.onChange   = &onTimeChanged;
-  clock.ctx        = this;
-  m.addItem(clock);
-
-  affa::MenuItem volts{};
-  volts.label      = "Battery";
-  volts.fields[0]  = affa::readOnlyField(0, "V");
-  volts.fieldCount = 1;
-  volts.editable   = false;
-  m.addItem(volts);
-}
-
-// Later, from anywhere that owns the poll() task:
-m.setFieldValue(/*item*/1, /*field*/0, millivolts / 100);   // redraws only if visible
-```
-
-Rendered rows follow the extracted format exactly: `Label` when there are no fields,
-`Label: v1<sep>v2…` when there are, an `*` prefix on the item being edited, and
-`<value>` angle brackets around the field under edit. Row text is transliterated by
-`affa::toAscii` on its way to the wire, always, with no way to opt a string out.
-
-### 8.8 Text handling, restated because it bites
-
-```cpp
-namespace affa {
-// Returns bytes written, not counting the NUL. Always NUL-terminates when
-// outSize > 0. Truncation never splits a multi-byte UTF-8 sequence. Unknown
-// non-ASCII codepoints become '?'. Idempotent on 7-bit ASCII input.
-size_t toAscii(const char* in, char* out, size_t outSize);
-
-// toAscii plus the title cleanup (strips the Apple Music video annotations).
-size_t normalizeTitle(const char* in, char* out, size_t outSize);
-}
-```
-
-The panel charset cannot render UTF-8. Every string that reaches the wire passes
-through `toAscii`, inside the library, at the single choke point in each frame builder.
-Losing it looks like garbage on the screen, not a compile error — which is why it is
-mandatory rather than a courtesy, and why `AFFA_ENABLE_TRANSLITERATION=0` carries the
-warning it does. The mapping table (Polish + Cyrillic + Ukrainian) is host-testable and
-`test/test_core` tests it, including the truncation-mid-sequence case.
+Everything the deleted `MenuController` did — the page stack, the `(Key, KeyEdge)` →
+intent map, the re-render after a selection change — is ten lines in an application that
+knows what its own screens are, and was several hundred in a library that had to guess.
+`examples/17_mediascreen` and `examples/18_aiscreen` each do it differently, which is the
+point.
+
+**The one thing the library will not give up** is the acknowledgement. A key frame must be
+answered on the wire within the panel's window or the panel stops sending them, and that is
+transport, not UI. The `0x03 89` guard in front of the key decoder is part of the same
+job: it is what stops a frame that merely *looks* like a key from being reported as one.

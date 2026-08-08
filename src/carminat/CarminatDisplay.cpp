@@ -45,7 +45,12 @@ bool CarminatDisplay::supports(Feature f) const {
     case Feature::Text:        return true;
     case Feature::Time:        return true;
     case Feature::Power:       return true;
-    case Feature::Menu:        return AFFA_ENABLE_MENU != 0;
+    // UNCONDITIONALLY TRUE since 2.0. showMenu / showMenuN / highlightItem /
+    // selectMenuItem are protocol, not widget, and no gate removes them. This line used to
+    // read `AFFA_ENABLE_MENU != 0` — a macro deleted with src/widget/, which made the whole
+    // file compile only because every env in this repo still passed -D AFFA_ENABLE_MENU.
+    // A consumer that did not would have hit a hard error here.
+    case Feature::Menu:        return true;
     case Feature::Popup:       return AFFA_ENABLE_POPUP != 0;
     case Feature::Fullscreen:  return AFFA_ENABLE_FULLSCREEN != 0;
     case Feature::ConfirmBox:  return AFFA_ENABLE_CONFIRMBOX != 0;
@@ -304,8 +309,6 @@ Submitted CarminatDisplay::hidePopup() { return Submitted::refused(Result::NotSu
 // ---------------------------------------------------------------------------
 // showFullscreenText / hideFullscreenText — 0x151, §8.6 / §8.8
 // ---------------------------------------------------------------------------
-#if AFFA_ENABLE_FULLSCREEN
-
 // The same 0x21 screen command as showMenu with mode 0x05: three equal lines on the whole
 // glass, no row tags.
 //
@@ -320,6 +323,18 @@ Submitted CarminatDisplay::hidePopup() { return Submitted::refused(Result::NotSu
 // way round until that bench session; if you are holding a comment that says a fullscreen
 // owns the glass until closed, it is the old one.
 //
+// THE FULLSCREEN GUARD CLOSES HERE and reopens after the nav block. It used to stay open
+// across both, so -D AFFA_ENABLE_FULLSCREEN=0 silently removed the DEFINITIONS of
+// selectMenuItem, showMenuN, showNavBitmap, showNavBitmapWithHeader and navTick while the
+// header went on declaring them: five undefined references, and a gate that removed four
+// features nobody asked it to touch. Found by the footprint harness, 2026-08-08.
+//
+// So the guard now wraps ONLY showFullscreenText, further down — this comment is the
+// section header for it and is deliberately outside every gate.
+
+// ---------------------------------------------------------------------------
+// showMenuN / selectMenuItem — the N-item list screen
+// ---------------------------------------------------------------------------
 #if AFFA_ENABLE_BIGMENU
 // Move the selection inside an N-item list WITHOUT resending the list.
 //
@@ -452,6 +467,8 @@ Submitted CarminatDisplay::navTick(bool phase) {
   return submit(kIdSetText, p, sizeof(p), RenderSlot::None, /*coalesce=*/false);
 }
 #endif  // AFFA_ENABLE_NAV
+
+#if AFFA_ENABLE_FULLSCREEN
 
 // The most heavily EXERCISED builder in the library — 09_golden has put 24 912 of these on
 // the glass with `failed 0` — and it is a zero-button message box in everything but name:

@@ -6,6 +6,12 @@
 // Instantiates every panel the build selected and calls every optional render, so that
 // --gc-sections cannot remove a feature the gate was supposed to remove. Flipping one
 // AFFA_* gate and re-measuring therefore reports the real flash cost of that gate.
+//
+// IT ONLY MEASURES GATES THAT EXIST. Half of what this file used to touch — the menu
+// widget, the marquee, the subscription table, the ISO-TP reassembler, Esp32CanLink,
+// UpdateListMenuDisplay — was deleted in 2.0, and a probe that names them does not compile,
+// which means the table they filled in was never going to be re-measured. docs/API.md §7
+// says where each one went.
 #include <Arduino.h>
 #include <AffaDisplay.h>
 
@@ -20,9 +26,12 @@ ArduinoClock           g_clock;
 
 volatile uint32_t g_sink = 0;
 
-void bite(affa::Result r) { g_sink += static_cast<uint32_t>(r); }
-void bite(bool b)         { g_sink += b ? 1u : 0u; }
+void bite(affa::Result r)          { g_sink += static_cast<uint32_t>(r); }
+void bite(bool b)                  { g_sink += b ? 1u : 0u; }
+void bite(affa::Submitted s)       { g_sink += static_cast<uint32_t>(s.result) + s.ticket; }
 
+// Everything on the panel-agnostic surface. Called once per selected panel, so a gate that
+// is supposed to remove a builder has nothing left holding a reference to it.
 void exercise(affa::AffaDisplayBase& d) {
   d.begin();
   d.poll();
@@ -35,22 +44,25 @@ void exercise(affa::AffaDisplayBase& d) {
   bite(d.hidePopup());
   bite(d.showFullscreenText("a", "b", "c"));
   bite(d.showConfirmBox("CAP", "r0", "r1"));
-  bite(d.selectBoxButton(1));
   bite(d.showInfoPopup("AUX", "AUTO", "SPEED"));
   bite(d.pressKey(affa::Key::Load, affa::KeyEdge::Click));
   bite(d.pressKey(affa::Key::Load, affa::KeyEdge::Click, affa::KeySource::Wire));
-  bite(d.nav(affa::NavCommand::Next));
-  bite(d.supports(affa::Feature::Menu));
+  bite(d.supports(affa::Feature::Text));
   bite(d.synced());
   g_sink += d.abortPending();
   bite(d.abortAll());
   bite(d.pending(affa::RenderSlot::Text));
-  affa::FrameMatch m{};
-  m.id = 0x151;
-  bite(d.subscribe(m, nullptr, nullptr).valid());
-  g_sink += d.subscriptions();
   g_sink += d.stats().rxFrames;
   g_sink += d.queued();
+  // The observation seam, all of what is left of it — Layer 0. Touching each callback is
+  // what keeps the dispatch out of --gc-sections' reach.
+  d.onFrame([](const affa::Frame& f, affa::Direction, void*) { g_sink += f.id; }, nullptr);
+  d.onKey([](affa::Key k, affa::KeyEdge, void*) { g_sink += static_cast<uint32_t>(k); }, nullptr);
+  d.onComplete([](affa::TxTicket t, affa::Result, void*) { g_sink += t; }, nullptr);
+  d.onSync([](affa::SyncState s, void*) { g_sink += static_cast<uint32_t>(s); }, nullptr);
+  // Geometry is a virtual per panel; asking for it is what keeps each override linked.
+  const affa::PanelGeometry g = d.panelGeometry();
+  g_sink += g.mainChars + g.menuRows + g.infoRows + g.listMaxItems;
   d.setPassive(true);
   d.setSelfAck(true);
   bite(d.passive());
@@ -58,13 +70,21 @@ void exercise(affa::AffaDisplayBase& d) {
 
 #if AFFA_PANEL_CARMINAT
 affa::CarminatDisplay g_carminat(g_link, g_clock);
-const char* const     kList[] = {"OFF", "ON"};
+#  if AFFA_ENABLE_BIGMENU
+uint8_t               g_menuBuf[affa::CarminatDisplay::menuScreenBytes(6)];
+const char* const     kItems[] = {"ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX"};
+#  endif
 #endif
 #if AFFA_PANEL_UPDATELIST
 affa::UpdateListDisplay g_seg(g_link, g_clock);
 #endif
-#if AFFA_PANEL_UPDATELIST_MENU
-affa::UpdateListMenuDisplay g_lcd(g_link, g_clock);
+#if AFFA_PANEL_CLUSTER
+affa::ClusterDisplay g_cluster(g_link, g_clock);
+#endif
+#if AFFA_ENABLE_TASK
+// Instantiated so --gc-sections cannot remove src/rtos/. Never started: the probe is
+// linked and measured, never flashed.
+affa::rtos::AffaTask g_task;
 #endif
 
 }  // namespace
@@ -74,65 +94,32 @@ void setup() {
 #if AFFA_PANEL_CARMINAT
   exercise(g_carminat);
   bite(g_carminat.showInfoMenu("a", "b", "c"));
-#  if AFFA_ENABLE_MENU
-  affa::Menu& mn = g_carminat.getMenu();
-  affa::MenuItem it{};
-  it.label      = "Item";
-  it.fields[0]  = affa::integerField(3, 0, 10);
-  it.fields[1]  = affa::listField(kList, 2, 0);
-  it.fields[2]  = affa::readOnlyField(7, "V");
-  it.fieldCount = 3;
-  g_sink += static_cast<uint32_t>(mn.addItem(it));
-  mn.setHeader("H");
-  mn.open();
-  // The model has no key vocabulary any more; the six intents are what the key map calls.
-  bite(mn.next());
-  bite(mn.prev());
-  bite(mn.increase());
-  bite(mn.decrease());
-  bite(mn.select());
-  bite(mn.setFieldValue(0, 0, 5));
-  mn.render();
-  bite(g_carminat.menuRenderer().lastResult());
-  bite(mn.back());
-  mn.close();
-  mn.clear();
-  g_sink += mn.count();
-  g_carminat.pushPage(nullptr);
-  g_carminat.popPage();
-  bite(g_carminat.currentPage() != nullptr);
-  g_carminat.setMenuHotkey(affa::Key::Pause, affa::KeyEdge::Hold);
-  g_carminat.clearMenuHotkey();
+  bite(g_carminat.selectBoxButton(1));
+#  if AFFA_ENABLE_BIGMENU
+  bite(g_carminat.showMenuN(g_menuBuf, sizeof(g_menuBuf), "HDR", kItems, 6));
+  bite(g_carminat.selectMenuItem(1));   // declared inside the BIGMENU guard, so gated here too
+#  endif
+#  if AFFA_ENABLE_NAV
+  static const uint8_t kBmp[affa::carminat::kNavBitmapBytes] = {0};
+  bite(g_carminat.showNavBitmap(kBmp));
+  bite(g_carminat.showNavBitmapWithHeader(affa::carminat::kNavHeader, kBmp));
+  bite(g_carminat.navTick(true));
 #  endif
 #endif
 #if AFFA_PANEL_UPDATELIST
   exercise(g_seg);
-  g_seg.setScrollText("A LONG TITLE TO SCROLL");
-  g_seg.setScrollActive(true);
-  g_seg.reassert();
-  bite(g_seg.scrollActive());
 #endif
-#if AFFA_PANEL_UPDATELIST_MENU
-  exercise(g_lcd);
+#if AFFA_PANEL_CLUSTER
+  exercise(g_cluster);
 #endif
-#if AFFA_ENABLE_ESP32CAN_LINK
-  static affa::Esp32CanLink real;
-  bite(real.begin(affa::CanPins{.rx = GPIO_NUM_3, .tx = GPIO_NUM_4}, 500000));
+#if AFFA_ENABLE_CANCOMMON_LINK
+  static affa::CanCommonLink real;
+  bite(real.begin(GPIO_NUM_5, GPIO_NUM_4, 500000));
   bite(real.isLive());
 #endif
-  // The vpanel twin probe was here. src/vpanel/ is gone; what AFFA_ENABLE_ISOTP_RX buys
-  // now is the reassembler, the screen decoder and the onText() path, and touching
-  // onText() is what keeps that whole chain out of --gc-sections' reach.
-#if AFFA_ENABLE_ISOTP_RX && AFFA_PANEL_CARMINAT
-  g_carminat.onText([](const char* t, void*) { g_sink += static_cast<uint32_t>(t[0]); },
-                    nullptr);
-  affa::Frame tf{};
-  tf.id  = 0x151;
-  tf.len = 8;
-  tf.data[0] = 0x10;
-  tf.data[1] = 0x0E;
-  tf.data[2] = 0x77;
-  g_sink += static_cast<uint32_t>(affa::isotp::frameCount(tf.data[1]));
+#if AFFA_ENABLE_TASK
+  bite(g_task.running());
+  g_sink += g_task.status().iterations;
 #endif
   char buf[16];
   g_sink += static_cast<uint32_t>(affa::toAscii("\xC3\x84\xC3\x96", buf, sizeof(buf)));
@@ -146,7 +133,7 @@ void loop() {
 #if AFFA_PANEL_UPDATELIST
   g_seg.poll();
 #endif
-#if AFFA_PANEL_UPDATELIST_MENU
-  g_lcd.poll();
+#if AFFA_PANEL_CLUSTER
+  g_cluster.poll();
 #endif
 }

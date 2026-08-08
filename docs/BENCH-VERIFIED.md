@@ -82,7 +82,7 @@ panel that assumption would have cost the whole session.
 |---|---|
 | That the burst answers the **first** request (`helloRequiresAnnounce = false`) | ⬜ Our announce went out at 2796 ms, *before* the request at 2899 ms, because the panel's `69` armed it. "Answers the first request" and "answers a request that follows our announce" both fit this log. It did not matter here; it is not settled either |
 | The `61 11`-while-registered teardown | ⬜ never triggered — the panel did not deauthorize us in 63 s |
-| The LCD `7F` text-plus-icons encoding | ⬜ `UpdateListMenuDisplay` untried; only the `76` form was rendered |
+| The `7F` text-plus-icons flavour | ⬜ **never transmitted from here, and no longer built.** Only the `76` form was ever rendered. It was removed in 2.0 once a real capture contradicted our reconstructed bytes in two places — docs/WIRE-SPEC.md §9.2 |
 | `setTime` | ⬜ this family has no clock command at all — see below |
 
 ### ❌ 23 candidate clock frames, 162 probes, NOTHING moved the clock
