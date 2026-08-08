@@ -10,7 +10,7 @@ comment above the vector, where it dies with the assertion it describes.
 
 > **What is NOT here is not attested.** ~8 000 lines of prose about this protocol
 > were deleted on 2026-08-08: inference, third-party source reconstruction and
-> transcription of captures we still have. Raw evidence lives in `captures/`;
+> transcription of captures we still have. Raw evidence lives in `docs/captures/`;
 > what has been seen on real glass lives in `docs/BENCH-VERIFIED.md`.
 
 ## `test_carminat_wire`

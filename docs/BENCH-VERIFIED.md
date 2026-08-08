@@ -208,7 +208,7 @@ not text, so it is taken and discarded.
 
 ## Session of 2026-08-04 — the captured opening, on a real Carminat
 
-The first run against the **OEM-capture-derived** handshake (`captures/`),
+The first run against the **OEM-capture-derived** handshake,
 06_authclock 0.6.0, ESP32-C3 with CTX=GPIO4 / CRX=GPIO3.
 
 | Capability | | Evidence |

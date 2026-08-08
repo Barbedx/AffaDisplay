@@ -100,7 +100,7 @@ enum class CarminatHelloProfile : uint8_t {
 // B9 is a free-running 500.08 ms timer (sigma <= 0.5 ms) that never flinches as the display's
 // 504/512 ms `69` drifts past it through a full phase cycle — including one 0.023 ms
 // near-collision. It is categorically not a reply. With replyToPing on we emitted the paced
-// B9 AND a pong ~4 ms later, twice the OEM rate. captures/
+// B9 AND a pong ~4 ms later, twice the OEM rate.
 //
 // SIX FIELDS SHORTER THAN IT WAS, and not one wire byte different. `authRequestByte2`,
 // `helloAfterBootstrapRequest`, `helloOnNonAuthRequest`, `oneShotResyncOnStart`,

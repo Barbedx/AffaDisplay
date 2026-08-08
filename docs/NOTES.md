@@ -7,7 +7,7 @@ cannot answer.
 
 Everything else — ~8 000 lines across nine documents — was deleted on 2026-08-08. It was
 inference, third-party source reconstruction, and prose transcription of captures we still
-have. Raw evidence lives in `captures/` and `docs/captures/`; what has been seen on real
+have. Raw evidence lives in `docs/captures/`; what has been seen on real
 glass lives in `docs/BENCH-VERIFIED.md`.
 
 ---

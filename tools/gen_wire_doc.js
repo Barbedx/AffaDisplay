@@ -95,7 +95,7 @@ function render(suites) {
   L.push('');
   L.push('> **What is NOT here is not attested.** ~8 000 lines of prose about this protocol');
   L.push('> were deleted on 2026-08-08: inference, third-party source reconstruction and');
-  L.push('> transcription of captures we still have. Raw evidence lives in `captures/`;');
+  L.push('> transcription of captures we still have. Raw evidence lives in `docs/captures/`;');
   L.push('> what has been seen on real glass lives in `docs/BENCH-VERIFIED.md`.');
   L.push('');
 

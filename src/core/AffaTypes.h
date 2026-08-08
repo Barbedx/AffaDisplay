@@ -149,7 +149,7 @@ constexpr bool hasFlag(SyncState v, SyncState f) noexcept {
 // AwaitPeerChannel is the one nobody expects and it is measured 4/4: the DISPLAY registers
 // its own channel (`1C1 70`, answered `5C1 74`) before the radio registers its functions.
 // A bench that stalls here — "waiting for the display's 1C1" — is a panel that never got
-// our announce. See docs/WIRE.md and captures/.
+// our announce. See docs/WIRE.md.
 enum class Phase : uint8_t {
   Silent,            // nothing heard from the panel yet; announcing on a slow timer
   Announced,         // our `BA` is on the wire; awaiting the panel's NEXT request

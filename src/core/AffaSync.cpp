@@ -5,7 +5,7 @@
 // it: the announce, the hello burst, the panel's channel reflex, the heartbeat, and the
 // watchdog that ends a session.
 //
-// EVERY RULE IN THIS FILE IS MEASURED. docs/WIRE.md and captures/ derives them
+// EVERY RULE IN THIS FILE IS MEASURED. docs/WIRE.md derives them
 // from docs/captures/*.csv, and the whole sequence has run 1 h 36 m on glass. Four separate
 // protocol bugs lived here, all the same shape — a special case standing in for a general
 // rule — so when something looks like it needs a new branch, check the captures first.
@@ -156,7 +156,7 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
     //
     // So Start also drops the registrations, exactly as a peer-alive timeout does. The next
     // render re-runs the 0x70 probe over every funcId from index 0, which is the thing the
-    // panel is actually asking for and is a frame we can send. See captures/
+    // panel is actually asking for and is a frame we can send.
     //
     // len >= 3 before touching data[2]: short DLCs are real on this channel — the OEM corpus
     // holds 0x3CF at DLC 1 and DLC 2 — and the legacy shim read uninitialised stack there,
