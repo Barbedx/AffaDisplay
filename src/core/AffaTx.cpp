@@ -170,6 +170,17 @@ uint32_t AffaDisplayBase::dispatchDropped() const { return 0; }
 uint8_t  AffaDisplayBase::dispatchQueued()  const { return 0; }
 #endif
 
+// See the header for why this is a function and not four hand-written loops.
+void AffaDisplayBase::reholdQueuedPayloads(uint32_t now) {
+  for (uint8_t i = 0; i < _qCount; ++i) {
+    // STARTED JOBS ARE LEFT ALONE. One already has bytes on the wire, so its fate belongs to
+    // the ACK deadline and the retry path, not to a hold window it is past.
+    if ((_queue[i].kind == JobKind::Payload || _queue[i].kind == JobKind::Reassert) &&
+        !_queue[i].started)
+      _queue[i].holdUntilMs = now + AFFA_TX_HOLD_MS;
+  }
+}
+
 bool AffaDisplayBase::registrationQueued() const {
   for (uint8_t i = 0; i < _qCount; ++i)
     if (_queue[i].kind == JobKind::Registration) return true;

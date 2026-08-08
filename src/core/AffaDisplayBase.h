@@ -524,6 +524,22 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   void armRetry(TxJob& job, uint32_t now, bool torn, bool extendHold = true);
   // Is the link in a state where the head job may be started at all?
   bool linkReady() const;
+  // GIVE EVERY HELD RENDER A FRESH HOLD WINDOW, because the session it was waiting for has
+  // just been voided and the re-registration that replaces it takes time the render was
+  // never budgeted for.
+  //
+  // Without it, a payload that aged politely while REGISTERED is given up as NoSync by
+  // pumpTx()'s hold check before the re-registration it now depends on has even been
+  // spliced.
+  //
+  // THE FOUR PLACES A REGISTRATION IS VOIDED MUST AGE THE QUEUE IDENTICALLY — the panel
+  // voiding us, the peer timeout, the generic-profile Start path, and a link recovery — and
+  // this was four hand-written copies of the same loop until 2.0. It had already failed once
+  // by omission: the copy lived only in a branch that was later deleted, which is to say it
+  // was missing from the one path the bench actually exercises. A rule that must hold in
+  // four places is one function.
+  void reholdQueuedPayloads(uint32_t now);
+
   // Drops every job in the queue, started or not, reporting `r` for each payload ticket.
   // begin() and a failed registration are its only callers.
   void failAllQueued(Result r);

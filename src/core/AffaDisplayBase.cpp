@@ -373,11 +373,7 @@ void AffaDisplayBase::pumpLink() {
   _nextHelloMs    = now;
   _nextPayloadMs  = now;
   _nextPongMs     = now;
-  for (uint8_t i = 0; i < _qCount; ++i) {
-    if ((_queue[i].kind == JobKind::Payload || _queue[i].kind == JobKind::Reassert) &&
-        !_queue[i].started)
-      _queue[i].holdUntilMs = now + AFFA_TX_HOLD_MS;
-  }
+  reholdQueuedPayloads(now);
 #endif  // AFFA_LINK_RECOVER_MS
 }
 

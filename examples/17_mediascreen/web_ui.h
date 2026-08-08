@@ -269,17 +269,21 @@ th{color:var(--dim);font-weight:normal}
     </div>
 
     <div class="r">
-      <b>send:</b>
-      <button class="p" onclick="sendMenu()">2-row menu</button>
-      <button class="p" onclick="sendMenuN()">N-item list</button>
-      <button class="p" onclick="sendOem()">OEM replay</button>
-      <span id="mspv" class="k"></span>
+      <small>scroll arrows &mdash; payload [8]</small>
+      <select id="msk" onchange="stySync()"><option value="0">none 00</option><option value="7">up 07</option><option value="11">down 0B</option><option value="3" selected>both 03</option></select>
+      <small>&mdash; shows on an N-item list; a two-row menu has nothing to scroll to</small>
     </div>
-    <p><small>
-      <b>Nothing here sends by itself.</b> Set the two fields, then press a send button &mdash;
-      all three take whatever is in them. <span class="k">&minus;</span>/<span class="k">+</span>
-      only move a field, so walking the glyph table is step, send, look.
-      <br><br><b>These are two unrelated fields, and they were mistaken for one.</b> The first
+
+    <div class="r">
+      <b>preview:</b> <span id="mspv" class="k"></span>
+    </div>
+    <p><small><b>Nothing here sends by itself.</b> These three bytes belong to the
+      <span class="k">21 01</span> screen, so every send below takes whatever is in them.
+      <span class="k">&minus;</span>/<span class="k">+</span> only move a field &mdash; walking
+      the glyph table is step, send, look.</small></p>
+
+    <details><summary>what the sweep found, and what is still unnamed</summary><p><small>
+      <b>These are two unrelated fields, and they were mistaken for one.</b> The first
       reading called <span class="k">[3] [4]</span> "the icon pair" because the only evidence
       was three OEM captures in which both bytes happened to move together. Walking them
       independently took that apart: <span class="k">[3]</span> is a <b>glyph index</b>,
@@ -298,60 +302,42 @@ th{color:var(--dim);font-weight:normal}
       <br><br><b>The thumb is a position, not a proportion</b>, and it is independent of the
       scroll-arrow mask <span class="k">[8]</span> and of <span class="k">firstVisible</span>
       <span class="k">[35]</span>. Three separate ways this screen talks about scrolling, and
-      the panel derives none of them from the others &mdash; an application that scrolls a long
-      list moves this itself.
+      the panel derives none of them from the others.
       <br><br>The glyph is a <b>field</b>, not a property of the captured bytes: showMenuN
       draws it with its own title and its own items. There is no per-item icon byte and
-      nowhere to put one &mdash; the item cell is 27 bytes, 1 tag + 26 text &mdash; so the
-      whole list gets one glyph.
-    </small></p>
+      nowhere to put one &mdash; the item cell is 27 bytes, 1 tag + 26 text.
+      <br><br>The library said <b>both</b> arrows was <span class="k">0x0C</span> until
+      2026-08-06. That came from the origin's hand-written constant and appears in <b>no
+      capture</b>; the OEM sends <span class="k">0x03</span>. The high bits read as
+      suppressors, which would make <span class="k">0x0C</span> "suppress both" &mdash; the
+      exact opposite of its name.
+    </small></p></details>
   </section>
 
   <section>
     <h2>Two-row menu</h2>
     <div class="r">
       <input id="mh" size="9" value="MENU"><input id="ma" size="9" value="ROW ONE"><input id="mb" size="9" value="ROW TWO">
-    </div>
-    <div class="r">
-      <small>scroll mask</small>
-      <select id="msk"><option value="0">none 00</option><option value="7">up 07</option><option value="11">down 0B</option><option value="3">both 03</option></select>
       <button class="p" onclick="sendMenu()">showMenu</button>
     </div>
-    <p><small>
-      <b>Every value here draws nothing on a two-row menu, and that is the panel being
-      right.</b> This screen sends <span class="k">[6] = 0x82</span> &mdash; two items in a
-      two-row viewport &mdash; so there is nothing to scroll to and no arrow to draw. Use the
-      <b>N-item list</b> below to see this byte work; every OEM capture with an arrow is a
-      4- or 6-item list.
-      <br><br>The library said <b>both</b> was <span class="k">0x0C</span> until 2026-08-06.
-      That came from the origin's hand-written constant and appears in <b>no capture</b>; the
-      OEM sends <span class="k">0x03</span>. The high bits read as suppressors &mdash;
-      <span class="k">0x03|0x08 = 0x0B</span> at the top of a list, <span class="k">0x03|0x04
-      = 0x07</span> at the bottom &mdash; which would make <span class="k">0x0C</span>
-      "suppress both", the exact opposite of its name.
-    </small></p>
     <div class="r">
       <button onclick="cmd('hilite',{n:0})">highlight row 0</button>
       <button onclick="cmd('hilite',{n:1})">highlight row 1</button>
     </div>
 
     <h2 style="margin-top:15px">N-item list</h2>
-    <div class="r"><input id="nh" size="10" value="NAVIGATION"></div>
-    <div class="r"><input id="ni" style="flex:1;min-width:220px" value="DESTINATION|ROUTE|MAP|TRAFFIC|SETTINGS|BACK"></div>
     <div class="r">
+      <input id="nh" size="10" value="NAVIGATION">
+      <input id="ni" style="flex:1;min-width:220px" value="DESTINATION|ROUTE|MAP|TRAFFIC|SETTINGS|BACK">
       <button class="p" onclick="sendMenuN()">showMenuN</button>
+    </div>
+    <div class="r">
       <small>index</small><input id="nsel" type="number" value="0" style="width:52px">
       <button onclick="selectItem()">selectMenuItem</button>
-    </div>
-    <div class="r">
-      <small>scroll mask</small>
-      <select id="nsk"><option value="0">none 00</option><option value="7">up 07</option><option value="11">down 0B</option><option value="3" selected>both 03</option></select>
-      <small>&larr; this is the screen where it shows</small>
-    </div>
-    <div class="r">
       <button onclick="listPlusPane()">list + pane</button>
-      <small>&larr; turn the 48&times;48 pane on, then draw this list on top of it</small>
+      <small>&larr; pane on, then this list on top of it</small>
     </div>
+    <details><summary>why a list is cheaper than it looks, and the one thing untried</summary>
     <p><small>
       The panel <b>tracks six items and draws two</b> &mdash; the glass is a two-row viewport.
       Send the list once, then move the selection with <b>selectMenuItem</b> (eight bytes
@@ -362,7 +348,7 @@ th{color:var(--dim);font-weight:normal}
       replaced under an open popup. <b>Whether it also survives a <span class="k">21 01</span>
       list has never been tried</b> &mdash; two ids, two layers, and one press to find out.
       Pick the picture on the Bitmap tab first.
-    </small></p>
+    </small></p></details>
 
     <h2 style="margin-top:15px">OEM replay &mdash; the capture, byte for byte</h2>
     <div class="r">
@@ -770,7 +756,12 @@ function stySync() {
   var a = styGet(0), b = styGet(1);
   el('mshide').checked = (a & 0x80) !== 0;
   el('msr').value = b;
-  el('mspv').textContent = 'sends 21 01 xx ' + hx(a).slice(2) + ' ' + hx(b).slice(2)
+  // THE WIRE, BEFORE IT GOES OUT. Every send on this tab carries these bytes, so showing
+  // them once here is what makes a sweep safe to run against glass: you see what you are
+  // about to change before it changes.
+  var m = parseInt(el('msk').value, 10) & 255;
+  el('mspv').textContent = '21 01 xx ' + hx(a).slice(2) + ' ' + hx(b).slice(2)
+                         + ' … [8]=' + hx(m).slice(2)
                          + ((a & 0x80) ? '  (glyph hidden)' : '')
                          + (b === 0 ? '  (no scrollbar)' : '');
 }
@@ -782,16 +773,24 @@ function styPreset() {
   el('ms0').value = hx(+v);
   stySync();
 }
+// ONE PLACE where the shared `21 01` screen bytes are attached to a send. The two builders
+// below differed only in their content fields, and each carried its own copy of the glyph,
+// the thumb and a scroll mask — which is how the tab ended up with two identical scroll-mask
+// dropdowns feeding two identical send buttons.
+function screenBytes(o) {
+  o.scroll = el('msk').value;
+  o.i0 = sty().i0;
+  o.i1 = sty().i1;
+  return o;
+}
 function sendMenu() {
-  var o = { h: el('mh').value, a: el('ma').value, b: el('mb').value, scroll: el('msk').value };
-  o.i0 = sty().i0; o.i1 = sty().i1;
-  cmd('menu', o);
+  cmd('menu', screenBytes({ h: el('mh').value, a: el('ma').value, b: el('mb').value }));
 }
 function sendMenuN() {
-  var o = { h: el('nh').value, i: el('ni').value, n: el('nsel').value, scroll: el('nsk').value };
-  o.i0 = sty().i0; o.i1 = sty().i1;
-  cmd('menun', o);
+  cmd('menun', screenBytes({ h: el('nh').value, i: el('ni').value, n: el('nsel').value }));
 }
+// No scroll mask: this one is the capture replayed byte for byte, and the arrows are already
+// in the captured bytes. Only the two swept fields are overridable.
 function sendOem() {
   cmd('oem', { sel: el('osel').value, i0: sty().i0, i1: sty().i1 });
 }

@@ -74,18 +74,9 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
         _helloPending        = false;
         _helloIndex          = 0;
         _nextHelloMs         = now;
-        // THE THREE PLACES A REGISTRATION IS VOIDED MUST AGE THE QUEUE IDENTICALLY. The
-        // re-registration this provokes takes time the held renders were never budgeted
-        // for; without a fresh window a payload that aged politely while REGISTERED is
-        // given up as NoSync by pumpTx()'s hold check before the re-registration it now
-        // depends on has even been spliced. Same re-arm as the peer-timeout and the
-        // generic-profile Start path. It used to live only in the deleted second branch,
-        // which is to say it was missing from the one path the bench actually exercises.
-        for (uint8_t i = 0; i < _qCount; ++i) {
-          if ((_queue[i].kind == JobKind::Payload || _queue[i].kind == JobKind::Reassert) &&
-              !_queue[i].started)
-            _queue[i].holdUntilMs = now + AFFA_TX_HOLD_MS;
-        }
+        // The panel voided us, so the held renders owe a fresh window — see
+        // reholdQueuedPayloads(), which is the one copy of this rule.
+        reholdQueuedPayloads(now);
       }
       // The request may arrive while the previous hello burst is still inside its rate
       // floor. Keep application TX closed until the hello that answers THIS phase has
@@ -187,17 +178,7 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
         _lossReasonNext = LossReason::PanelVoided;
         dropRegistrations();
         s &= ~SyncState::FuncsReg;
-        // The re-registration this provokes takes time the held renders were never
-        // budgeted for. Without a fresh window, a payload that aged politely while
-        // REGISTERED would be given up as NoSync by pumpTx()'s hold check before the
-        // re-registration it now depends on has even been spliced. Same re-arm as the
-        // peer-timeout and post-recovery paths — the three places a registration is
-        // voided must age the queue identically.
-        for (uint8_t i = 0; i < _qCount; ++i) {
-          if ((_queue[i].kind == JobKind::Payload || _queue[i].kind == JobKind::Reassert) &&
-              !_queue[i].started)
-            _queue[i].holdUntilMs = now + AFFA_TX_HOLD_MS;
-        }
+        reholdQueuedPayloads(now);
       }
       s |= SyncState::Start;
     }
@@ -648,11 +629,7 @@ void AffaDisplayBase::pumpSync() {
     // renders are held, re-registered by pumpTx() when the panel comes back, and given up
     // by their own hold windows if it does not.
     dropRegistrations();
-    for (uint8_t i = 0; i < _qCount; ++i) {
-      if ((_queue[i].kind == JobKind::Payload || _queue[i].kind == JobKind::Reassert) &&
-          !_queue[i].started)
-        _queue[i].holdUntilMs = now + AFFA_TX_HOLD_MS;
-    }
+    reholdQueuedPayloads(now);
   }
 
   // `= now + interval`, never `+= interval`: a caller that stalled for ten seconds must
