@@ -645,10 +645,22 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // offer belongs to the normal transport recovery/session reset path instead.
   // The display has registered its OWN channel (its 1C1). We do not put our 0x70 probes on
   // the wire until it has: measured 4/4, its 1C1 precedes our 151 by ~61 ms.
-  // Consecutive unanswered registration bursts. Three is not a tuning constant so much as
-  // "more than one is already a pattern": each costs AFFA_ACK_TIMEOUT_MS, so the fallback
-  // lands about six seconds after the peer stops answering.
-  static constexpr uint8_t kRegMaxFails = 3;
+  // Consecutive registration bursts that failed TERMINALLY — after the transmit layer has
+  // already exhausted AFFA_TX_MAX_RETRIES on them.
+  //
+  // ONE, AND THE ARITHMETIC IS WHY. A single burst costs
+  //
+  //     4 x AFFA_ACK_TIMEOUT_MS + 250 + 500 + 1000  =  9 750 ms
+  //
+  // because armRetry() doubles the backoff under a 2 s ACK deadline. So the peer has already
+  // ignored four `70` probes over ten seconds by the time we get here; a second burst buys
+  // another ten seconds and no information.
+  //
+  // It was 3 first, and measured on the bench: 33 s to fall back. The cost of falling back
+  // ONE burst too early is ~300 ms of redone handshake, which is the thing the panel is
+  // asking for anyway. The cost of falling back too late is the eight minutes that started
+  // this. Asymmetric, so it goes to the cheap side.
+  static constexpr uint8_t kRegMaxFails = 1;
   uint8_t   _regFails = 0;
   bool      _peerChannelSeen = false;
   bool      _genericAckPending = false;
