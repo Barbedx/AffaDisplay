@@ -180,7 +180,7 @@ content feed from anything that can compose a document.
 | --- | --- |
 | [`docs/WIRE.md`](docs/WIRE.md) | **Generated** from the golden vectors CI asserts. 103 frames, every one checked byte for byte. Prose about a bus drifts from the bus; an assertion cannot. |
 | [`docs/API.md`](docs/API.md) | The contracts: threading, `Result`, latency, capabilities. It does **not** copy declarations — the headers are the declarations. |
-| [`docs/NOTES.md`](docs/NOTES.md) | What we do **not** know, how this project has got things wrong seven times running, and the incidents behind the threading model. |
+| [`docs/NOTES.md`](docs/NOTES.md) | What we do **not** know, how this project has got things wrong eight times running, and the incidents behind the threading model. |
 | [`docs/BENCH-VERIFIED.md`](docs/BENCH-VERIFIED.md) | What a human looked at on real glass. |
 
 ```

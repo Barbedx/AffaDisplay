@@ -112,6 +112,41 @@ which is why `docs/WIRE.md` is now generated from the assertions instead of writ
 
 ---
 
+**An eighth, 2026-08-09, and it is a different shape — a guard whose two terms did not cover
+the middle.** `needsHelloBeforeAuth` was `!atLeast(_phase, AwaitPeerChannel) || Failed`,
+meaning "the opening has not released traffic yet". Neither is true at `Phase::Registering`,
+which sorts *after* `AwaitPeerChannel`, and the void branch above it needs `FuncsReg`, which
+a half-open session does not hold. A session that died between those two points was heard by
+nothing:
+
+```
+RX 3CF 61 11 00    five times a second, for eight minutes
+TX 151 70          every ~2.5 s, never acknowledged
+```
+
+Three separate lessons came out of it, and the second is the one worth the most:
+
+* **The obvious fix was wrong and made it worse.** Answering every request while
+  unregistered produced a continuous `TX 3AF B0` storm with no `BA` between — exactly the
+  stream that guard exists to prevent. The captured order is our `BA`, then the panel's NEXT
+  `61 11`, then our `B0`; skipping the announce means the panel never opens its channel. The
+  fix belonged at the other end: stop re-probing, and go back to the announce.
+* **A comment stated arithmetic nobody had done.** `kRegMaxFails = 3` came with "each costs
+  AFFA_ACK_TIMEOUT_MS, so the fallback lands about six seconds after the peer stops
+  answering". The bench said 33 s. A registration burst fails terminally only after the
+  transmit layer exhausts its retries, and `armRetry()` doubles the backoff:
+  `4 × 2000 + 250 + 500 + 1000 = 9 750 ms`. The code was right; the sentence about it was
+  invented. **Numbers in comments are claims, and this file exists because claims nothing
+  checks go bad.**
+* **A diagnostic did not cause it, it exposed it.** `op=txgate` is how the state was reached
+  repeatably, but any session that dies while the probes are in flight lands there — an OTA
+  flash write stalls RX for exactly that reason, and the TWAI ISR is not in IRAM.
+
+`test_unanswered_registration_falls_back_to_the_announce` pins it, and was checked in both
+directions: it fails when the fallback is disabled.
+
+---
+
 ## 3. Why the library owns the poll task
 
 `AFFA_ENABLE_TASK` defaults to `1` on ESP32. The reason is three incidents from one
