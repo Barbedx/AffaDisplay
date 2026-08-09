@@ -104,6 +104,14 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
       // third term, `hasFlag(_sync, Failed)`, is kept because it is free and because the
       // two are only provably equivalent as long as pumpHello() is the sole place that
       // clears Failed — a coupling worth a belt as well as braces.
+      // A THIRD TERM `|| !hasFlag(_sync, FuncsReg)` WAS TRIED HERE ON 2026-08-09 AND IT IS
+      // WRONG. It answers every request while unregistered, and this panel repeats at
+      // ~104 ms: measured on the bench, a continuous `TX 3AF B0` storm with no `BA` anywhere
+      // between them, which is exactly the stream this guard exists to prevent.
+      //
+      // The wedge it was aimed at is real — a session that dies during Registering leaves
+      // `RX 3CF 61 11 00` five times a second against `TX 151 70` every 2.5 s, for ever —
+      // but the answer is to stop re-probing, not to re-burst. See finishJob().
       const bool needsHelloBeforeAuth =
           !atLeast(_phase, Phase::AwaitPeerChannel) || hasFlag(_sync, SyncState::Failed);
       if (needsHelloBeforeAuth) {

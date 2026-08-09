@@ -346,6 +346,13 @@ constexpr uint8_t  kChkTries  = 3;
 constexpr uint32_t kChkAckMs  = 2500;   // one ACK timeout plus slack
 constexpr uint32_t kChkWarmMs = 1200;   // the panel is lit but not ready; see below
 
+// EIGHT CHARACTERS, because that is what panelGeometry().mainChars promises and the panel
+// truncates without saying so — the first run drew "SELFCHEC" and looked like a bug in the
+// builder. The time is the golden vector's own 12:34, so a glass showing anything else is
+// a finding rather than a coincidence.
+constexpr const char* kChkText = "SELFTEST";
+constexpr const char* kChkTime = "1234";
+
 struct SelfCheck {
   Chk      step = Chk::Idle;
   uint8_t  tries = 0;
@@ -426,7 +433,7 @@ void chkPoll() {
       return;
 
     case Chk::Text:
-      if (!g_chk.req) { if (due) chkIssue(g_panel->setText("SELFCHECK"), 2, "text"); return; }
+      if (!g_chk.req) { if (due) chkIssue(g_panel->setText(kChkText), 2, "text"); return; }
       if (g_chk.acked) {
         g_chk.req = affa::kNoTicket;
         if (g_chk.last != affa::Result::Ok) { chkFail(2, affa::resultName(g_chk.last)); return; }
@@ -437,7 +444,7 @@ void chkPoll() {
       return;
 
     case Chk::Time:
-      if (!g_chk.req) { if (due) chkIssue(g_panel->setTime("1000"), 3, "time"); return; }
+      if (!g_chk.req) { if (due) chkIssue(g_panel->setTime(kChkTime), 3, "time"); return; }
       if (g_chk.acked) {
         g_chk.req = affa::kNoTicket;
         if (g_chk.last != affa::Result::Ok) { chkFail(3, affa::resultName(g_chk.last)); return; }

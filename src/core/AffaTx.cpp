@@ -845,6 +845,42 @@ void AffaDisplayBase::finishJob(Result r, bool allowRetry) {
       AFFA_LOGW(kTag, "registration of 0x%03X failed (%u) — payloads held for retry",
                 static_cast<unsigned>(funcId), static_cast<unsigned>(r));
       dropRegistrations();
+
+      // AND IT DOES NOT DRILL FOR EVER. "pumpTx() splices a fresh burst in front of them the
+      // next time the link is ready" was true and unbounded: pumpSync re-queues whenever
+      // !FuncsReg && !registrationQueued(), so an unanswered probe times out after
+      // AFFA_ACK_TIMEOUT_MS and is immediately reissued. Measured on the bench 2026-08-09 —
+      // `TX 151 70` every ~2.5 s for EIGHT MINUTES, never acknowledged, while the panel sent
+      // `61 11 00` five times a second asking to start over.
+      //
+      // A PROBE UNANSWERED THREE TIMES IS NOT GOING TO BE ANSWERED ON THE FOURTH. The peer
+      // is not registering us, and the only thing above registration is the handshake — so
+      // fall back to it and let the opening run again. The panel's own channel has to be
+      // seen afresh, which is what makes this a fallback rather than a retry.
+      if (++_regFails >= kRegMaxFails) {
+        AFFA_LOGW(kTag, "%u registration attempts unanswered — falling back to the opening",
+                  static_cast<unsigned>(_regFails));
+        _regFails        = 0;
+        _peerChannelSeen = false;
+        _lossReasonNext  = LossReason::PeerTimeout;
+        setSync(SyncState::Failed);
+        // ALL THE WAY BACK TO Silent, AND THAT IS THE POINT. The immediate-void path in
+        // handleSyncFrame() returns to Announced because our `BA` is demonstrably still
+        // working — the panel is answering it. Here it demonstrably is not: we sent the
+        // burst, the panel asked again, and it never opened its own channel. The captured
+        // order is our `BA`, then the panel's NEXT `61 11`, then our `B0` — so the thing to
+        // redo is the ANNOUNCE, not the burst.
+        //
+        // Re-arming the one-shot is what makes that possible: `_unauthControlSpent` is
+        // consumed on arm and never cleared anywhere else, so without this the fallback
+        // would loop through Silent and out again with no `BA` ever leaving.
+        enterPhase(Phase::Silent);
+        _unauthControlSpent   = false;
+        _unauthControlPending = false;
+        _helloPending = false;
+        _helloIndex   = 0;
+        _nextHelloMs  = _clock.millis();
+      }
     }
     return;                        // registration jobs carry kNoTicket and are invisible
   }

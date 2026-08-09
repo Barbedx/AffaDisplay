@@ -645,6 +645,11 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // offer belongs to the normal transport recovery/session reset path instead.
   // The display has registered its OWN channel (its 1C1). We do not put our 0x70 probes on
   // the wire until it has: measured 4/4, its 1C1 precedes our 151 by ~61 ms.
+  // Consecutive unanswered registration bursts. Three is not a tuning constant so much as
+  // "more than one is already a pattern": each costs AFFA_ACK_TIMEOUT_MS, so the fallback
+  // lands about six seconds after the peer stops answering.
+  static constexpr uint8_t kRegMaxFails = 3;
+  uint8_t   _regFails = 0;
   bool      _peerChannelSeen = false;
   bool      _genericAckPending = false;
   uint16_t  _genericAckId = 0;
