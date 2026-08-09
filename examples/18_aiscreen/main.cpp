@@ -28,11 +28,13 @@
 //   pio run -e ex18_aiscreen -t upload
 #include <Arduino.h>
 #include <AffaDisplay.h>
-#include <ElegantOTA.h>
+#include <ESPmDNS.h>       // LDF only scans THIS file for #include, so the framework
+#include <ElegantOTA.h>     // libraries shared/net.h uses have to be named here too
 #include <Preferences.h>
 #include <PsychicHttp.h>
 #include <WiFi.h>
 
+#include "../shared/net.h"
 #include "DisplayDocument.h"
 #include "../shared/media_render.h"
 #include "../shared/nav_images.h"
@@ -47,10 +49,8 @@ constexpr gpio_num_t kRxPin   = GPIO_NUM_5;
 constexpr gpio_num_t kTxPin   = GPIO_NUM_4;
 constexpr uint32_t   kBitrate = 500000;
 
-constexpr const char* kWifiNamespace = "megaopen";
 constexpr const char* kApSsid   = "AffaScreen";
 constexpr const char* kApPass   = "affa1234";
-constexpr uint32_t    kStaJoinMs = 15000;
 
 struct ArduinoClock final : affa::IClock {
   uint32_t millis() const override { return ::millis(); }
@@ -358,67 +358,7 @@ esp_err_t state(PsychicRequest* r) {
   return replyJson(r);
 }
 
-void startWifi() {
-  Preferences p;
-  String ssid, pass;
-  if (p.begin(kWifiNamespace, true)) {
-    ssid = p.getString("ssid", ""); pass = p.getString("pass", ""); p.end();
-  }
-  if (ssid.length()) {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid.c_str(), pass.c_str());
-    const uint32_t until = ::millis() + kStaJoinMs;
-    while (WiFi.status() != WL_CONNECTED && static_cast<int32_t>(::millis() - until) < 0)
-      delay(200);
-  }
-  // THE SOFTAP FALLBACK IS NOT A FAULT PATH, it is how the board stays reachable when the
-  // credentials are wrong or the network moved. Losing OTA means needing a cable.
-  if (WiFi.status() != WL_CONNECTED) {
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(kApSsid, kApPass);
-    Serial.printf("[net] SoftAP %s at %s\n", kApSsid, WiFi.softAPIP().toString().c_str());
-  } else {
-    Serial.printf("[net] %s\n", WiFi.localIP().toString().c_str());
-  }
-}
-
-}  // namespace
-
-void setup() {
-  Serial.begin(115200);
-  delay(300);
-  Serial.println("\nAffaDisplay 18_aiscreen");
-
-  if (!g_link.begin(kRxPin, kTxPin, kBitrate)) Serial.println("[can] begin FAILED");
-
-  g_display.onKey(&onKey, nullptr);
-  g_display.onComplete(&onDone, nullptr);
-  if (!g_display.begin()) Serial.println("[affa] begin FAILED");
-  if (!g_task.start(g_display)) Serial.println("[affa] task start FAILED");
-
-  startWifi();
-
-  // EVERY ONE OF THESE IS A SCAR, copied from 17_mediascreen rather than left at the
-  // library's defaults — the first draft of this file left them default and the board went
-  // unreachable on the first OTA.
-  //
-  //   lru_purge_enable   PsychicHttp only sets it under ENABLE_ASYNC, which these builds do
-  //                      not define. Without it, seven lingering sockets stop httpd calling
-  //                      accept() and it NEVER resumes: ping answers, mDNS answers, OTA is
-  //                      gone. A one-way door.
-  //   stack_size         the httpd default is 4096 and every handler here builds JSON on it.
-  //   max_uri_handlers   ElegantOTA registers several of its own; a full table silently
-  //                      unregisters the LAST route added, and if that is /ota/upload the
-  //                      board needs a cable.
-  g_server.config.lru_purge_enable  = true;
-  g_server.config.max_open_sockets  = 7;
-  g_server.config.recv_wait_timeout = 3;
-  g_server.config.send_wait_timeout = 3;
-  g_server.config.max_uri_handlers  = 64;
-  g_server.config.stack_size        = 10240;
-  g_server.listen(80);
-  // OTA FIRST — the only way back into a board with no cable.
-  ElegantOTA.begin(&g_server);
+void routes() {
   g_server.on("/api/caps",    HTTP_GET, caps);
   g_server.on("/api/push",    HTTP_GET, push);
   g_server.on("/api/context", HTTP_GET, context);
@@ -436,6 +376,28 @@ void setup() {
                     "  /api/next      advance\n"
                     "  /update        OTA\n");
   });
+}
+
+void startNet() {
+  affanet::startWifi(kApSsid, kApPass, "affascreen", "ai");
+  affanet::startHttp(g_server, nullptr, nullptr, &routes);
+}
+
+}  // namespace
+
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+  Serial.println("\nAffaDisplay 18_aiscreen");
+
+  if (!g_link.begin(kRxPin, kTxPin, kBitrate)) Serial.println("[can] begin FAILED");
+
+  g_display.onKey(&onKey, nullptr);
+  g_display.onComplete(&onDone, nullptr);
+  if (!g_display.begin()) Serial.println("[affa] begin FAILED");
+  if (!g_task.start(g_display)) Serial.println("[affa] task start FAILED");
+
+  startNet();
 }
 
 void loop() {

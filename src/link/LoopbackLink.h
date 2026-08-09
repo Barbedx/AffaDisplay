@@ -9,10 +9,10 @@ namespace affa {
 // what the panel would have said, and can synthesise the per-frame ACK so a test does not
 // have to hand-write one per ISO-TP frame.
 //
-// It does NOT echo transmitted frames back into the RX ring by default. A real controller
-// does not receive its own transmissions, and a test double that silently did would make
-// every host test disagree with hardware. setEcho(true) turns the echo on deliberately,
-// for the tests that exist to prove the Frame::fromSelf rule holds on an echoing link.
+// It does NOT echo transmitted frames back into the RX ring. A real controller does not
+// receive its own transmissions, and a test double that silently did would make every host
+// test disagree with hardware. The setEcho(true) switch that existed for the fromSelf tests
+// went with test_keysource.
 template <uint16_t N = 128>
 class LoopbackLink final : public ICanLink {
  public:
@@ -20,25 +20,16 @@ class LoopbackLink final : public ICanLink {
     if (!_live) { ++_stats.txDropped; return false; }
     if (!_sent.push(f)) { ++_stats.txDropped; return false; }
     ++_stats.txFrames;
-    if (_echo) { _rx.push(f); ++_stats.rxFrames; }
     if (_autoAck) synthesiseAck(f);
     return true;
   }
   bool  recv(Frame& out) override { return _rx.pop(out); }
   bool  isLive() const override   { return _live; }
 
-  // The recovery seam, as a test double. Counts every attempt so a test can assert the
-  // BACKOFF rather than merely that something happened, and only actually revives the link
-  // when the test says so — a link that always recovered could not exercise the path this
-  // exists for, which is a controller that stays broken. `force` (the RUNNING-but-deaf
-  // caller evidence) is recorded so the stall-watchdog tests can assert it was passed.
-  bool recover(bool force) override {
-    ++_recoverCalls;
-    if (force) ++_forcedRecoverCalls;
-    if (!_recoverable) return false;
-    _live = true;
-    return true;
-  }
+  // A LINK THAT NEVER RECOVERS. The counting version — recoverCalls(), forcedRecoverCalls(),
+  // setRecoverable() — went with test_recovery, which was the only caller and which built its
+  // own GatedLink anyway because this one cannot express "healthy but not live".
+  bool recover(bool) override { return false; }
   Stats stats()  const override   {
     Stats s = _stats;
     s.ringOverflow = _rx.overflow();
@@ -50,10 +41,6 @@ class LoopbackLink final : public ICanLink {
   bool     takeSent(Frame& out)   { return _sent.pop(out); }           // library -> test
   uint32_t sentCount() const      { return _sent.size(); }
   void     setLive(bool v)        { _live = v; }
-  void     setEcho(bool v)        { _echo = v; }
-  void     setRecoverable(bool v) { _recoverable = v; }
-  uint32_t recoverCalls() const   { return _recoverCalls; }
-  uint32_t forcedRecoverCalls() const { return _forcedRecoverCalls; }
 
   // Answers each transmitted frame on id|replyFlag. `partialFor` is the number of leading
   // frames of a transfer that are answered PARTIAL (30 01 00) before the DONE (0x74);
@@ -61,8 +48,6 @@ class LoopbackLink final : public ICanLink {
   // wants. Set it to (frameCount - 1) to drive a multi-frame transfer to completion.
   void setAutoAck(bool v)              { _autoAck = v; }
   void setAutoAckPartials(uint16_t n)  { _partialsLeft = n; }
-  void setAckReplyFlag(uint16_t f)     { _replyFlag = f; }
-  void setAckFiller(uint8_t f)         { _ackFiller = f; }
 
   void clear() {
     _rx.reset();
@@ -98,12 +83,7 @@ class LoopbackLink final : public ICanLink {
   uint8_t  _ackFiller    = 0xA3;   // what the bench panel actually pads with, so a test
                                    // that wrongly matched on the filler fails loudly
   bool     _live    = true;
-  bool     _echo    = false;
   bool     _autoAck = false;
-  bool     _recoverable = false;   // OFF by default: a recovery that always works would let
-                                   // a broken backoff pass every test
-  uint32_t _recoverCalls = 0;
-  uint32_t _forcedRecoverCalls = 0;
 };
 
 } // namespace affa

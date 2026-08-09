@@ -37,11 +37,14 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+
+#include "../shared/net.h"
 #include <WiFiClient.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <PsychicHttp.h>
-#include <ElegantOTA.h>
+#include <ESPmDNS.h>       // LDF only scans THIS file for #include, so the framework
+#include <ElegantOTA.h>     // libraries shared/net.h uses have to be named here too
 
 #include <cstdarg>
 #include <cstdio>
@@ -74,12 +77,10 @@ struct { gpio_num_t rx, tx; } constexpr kPins{ GPIO_NUM_3, GPIO_NUM_4 };
 #endif
 constexpr uint32_t kBitrate = 500000;
 
-constexpr const char* kWifiNamespace = "megaopen";  // read-only: ssid / pass
 constexpr const char* kOwnNamespace  = "affa1";     // ours: the boot mode, and only that
 constexpr const char* kApSsid        = "AffaBringup";
 constexpr const char* kApPass        = "affabringup";
 constexpr const char* kMdnsName      = "affabringup";
-constexpr uint32_t    kStaJoinMs     = 15000;
 
 struct ArduinoClock final : affa::IClock {
   uint32_t millis() const override { return ::millis(); }
@@ -823,87 +824,28 @@ void routes() {
 }
 
 // ---------------------------------------------------------------------------
-void startNetwork() {
-  // Read-only open of the namespace the bench board already has credentials in. Read-only
-  // matters: an NVS WRITE stalls CAN reception outright for the duration of the flash write
-  // (the TWAI ISR is not in IRAM), and this example must never be why they change.
-  Preferences p;
-  String ssid, pass;
-  if (p.begin(kWifiNamespace, /*readOnly=*/true)) {
-    ssid = p.getString("ssid", "");
-    pass = p.getString("pass", "");
-    p.end();
-  }
+void startNetwork() { affanet::startWifi(kApSsid, kApPass, kMdnsName, "wifi"); }
 
-  WiFi.persistent(false);
-  WiFi.setSleep(true);          // the C3's single radio interleaves WiFi with CAN timing
-
-  bool sta = false;
-  if (ssid.length()) {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid.c_str(), pass.c_str());
-    const uint32_t t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < kStaJoinMs) delay(100);
-    sta = (WiFi.status() == WL_CONNECTED);
-  }
-  if (!sta) {
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(kApSsid, kApPass);
-  }
-  if (MDNS.begin(kMdnsName)) MDNS.addService("http", "tcp", 80);
-
-  const String ip = sta ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
-  Serial.printf("\n[wifi] %s ip=%s  console http://%s/  OTA http://%s/update  mdns %s.local\n",
-                sta ? "STA" : "AP (fallback)", ip.c_str(), ip.c_str(), ip.c_str(), kMdnsName);
-}
-
+// OTA gates our transmitter for the duration: the TWAI ISR is not in IRAM, so a flash write
+// stalls CAN reception outright and looks exactly like a dead panel. Expect PeerLost and a
+// resync after the reboot.
+//
+// DELIBERATELY NOT g_task.stop() HERE: stop() joins, and joining waits for a message already
+// on the wire — up to two ACK timeouts inside the upload handler, on the only route back
+// into this board.
 void startHttp() {
-  // ------------------------------------------------------------------------
-  // THE THREE LINES THAT KEEP THIS BOARD REACHABLE. See THE LOCKOUT at the top.
-  // ------------------------------------------------------------------------
-  // With lru_purge_enable false — esp_http_server's default, and what PsychicHttp leaves it
-  // at unless ENABLE_ASYNC is defined — a full socket table is PERMANENT: httpd stops
-  // accepting and never resumes. With it true, a new connection always evicts the
-  // least-recently-used one, so the worst a misbehaving client can do is get dropped.
-  g_server.config.lru_purge_enable = true;
-  g_server.config.max_open_sockets = 7;
-  // And do not let a half-open connection hold its slot for the default 5 s each way.
-  g_server.config.recv_wait_timeout = 3;
-  g_server.config.send_wait_timeout = 3;
-  // A FIXED ARRAY, and registering past its end fails silently — PsychicHttp does not check
-  // the return, so the route is simply absent and requests to it hit the not-found handler.
-  // canspy hit this with its cap at 20: /ota/upload was the last registration, it fell off,
-  // and the board needed a cable. Headroom here, and OTA registered FIRST below.
-  g_server.config.max_uri_handlers  = 32;
-  // The default 4 kB leaves very little room once a handler builds a body. Headroom here is
-  // cheap; a handler that overflows it dies silently, returning an empty response.
-  g_server.config.stack_size        = 8192;
-
-  g_server.listen(80);
-
-  // OTA FIRST, ALWAYS — it is the only way back into a board with no cable, so it claims its
-  // slots before any console route can crowd it out.
-  //
-  // An OTA write stalls CAN reception outright: the TWAI ISR is not in IRAM, so a flash
-  // write looks exactly like a dead panel. Gate our transmitter for the duration — we are
-  // not shouting at a bus we cannot hear — and expect PeerLost plus a resync after reboot.
-  //
-  // DELIBERATELY NOT g_task.stop() HERE: stop() joins, and joining waits for a message
-  // already on the wire, i.e. up to two ACK timeouts of a stalled upload handler on the
-  // only route back into this board.
-  ElegantOTA.onStart([]() {
-    g_otaRunning = true;
-    g_otaSince   = millis();
-    g_autoRun    = false;
-    if (g_canUp) g_link.setTxGate(false);
-    logmsg("ota started - CAN TX gated, RX stalls on flash writes");
-  });
-  ElegantOTA.onEnd([](bool ok) { logmsg("ota %s", ok ? "ok, rebooting" : "FAILED"); });
-  ElegantOTA.begin(&g_server);
-
-  routes();
+  affanet::startHttp(
+      g_server,
+      []() {
+        g_otaRunning = true;
+        g_otaSince   = millis();
+        g_autoRun    = false;
+        if (g_canUp) g_link.setTxGate(false);
+        logmsg("ota started - CAN TX gated, RX stalls on flash writes");
+      },
+      [](bool ok) { logmsg("ota %s", ok ? "ok, rebooting" : "FAILED"); },
+      &routes);
 }
-
 }  // namespace
 
 // ---------------------------------------------------------------------------

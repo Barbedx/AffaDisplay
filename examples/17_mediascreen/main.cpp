@@ -23,12 +23,13 @@
 
 #include <Arduino.h>
 #include <AffaDisplay.h>
-#include <ESPmDNS.h>
-#include <ElegantOTA.h>
-#include <Preferences.h>
+#include <ESPmDNS.h>       // LDF only scans THIS file for #include, so the framework
+#include <ElegantOTA.h>     // libraries shared/net.h uses have to be named here too, or
+#include <Preferences.h>    // their include paths are never added to the build
 #include <PsychicHttp.h>
 #include <WiFi.h>
 
+#include "../shared/net.h"          // WiFi, mDNS, OTA and the PsychicHttp knobs, once
 #include "../shared/media_render.h"
 #include "../shared/nav_images.h"   // one generator, one header, two consumers
 
@@ -42,12 +43,10 @@ constexpr gpio_num_t kRxPin   = GPIO_NUM_5;   // the standard collin80 stack, as
 constexpr gpio_num_t kTxPin   = GPIO_NUM_4;
 constexpr uint32_t   kBitrate = 500000;
 
-constexpr const char* kWifiNamespace  = "megaopen";
 constexpr const char* kPrefsNamespace = "affamedia";
 constexpr const char* kApSsid   = "AffaMedia";
 constexpr const char* kApPass   = "affa1234";
 constexpr const char* kMdnsName = "affamedia";
-constexpr uint32_t    kStaJoinMs = 15000;
 
 struct ArduinoClock final : affa::IClock {
   uint32_t millis() const override { return ::millis(); }
@@ -790,19 +789,14 @@ Cmd dispatch(PsychicRequest* r) {
   // With no `ssid` param it REPORTS instead of writing, and reports the SSID only — a stored
   // password has no business coming back out over an open AP.
   if (op == "wifi") {
-    Preferences p;
     if (!r->hasParam("ssid")) {
-      if (!p.begin(kWifiNamespace, true)) return fail("nvs");
-      const String s = p.getString("ssid", "");
-      p.end();
+      String s;
+      if (!affanet::storedSsid(s)) return fail("nvs");
       static char msg[80];
       snprintf(msg, sizeof(msg), "stored ssid: %s", s.length() ? s.c_str() : "(none)");
       return Cmd{true, msg};
     }
-    if (!p.begin(kWifiNamespace, false)) return fail("nvs");
-    p.putString("ssid", S("ssid", ""));
-    p.putString("pass", S("pass", ""));
-    p.end();
+    if (!affanet::storeWifi(S("ssid", "").c_str(), S("pass", "").c_str())) return fail("nvs");
     g_wantReboot = B("reboot", true);
     return Cmd{true, g_wantReboot ? "stored - rebooting to join it"
                                   : "stored - takes effect on the next boot"};
@@ -1033,39 +1027,14 @@ void routes() {
 }
 
 void startWifi() {
-  Preferences p;
-  String ssid, pass;
-  if (p.begin(kWifiNamespace, true)) { ssid = p.getString("ssid",""); pass = p.getString("pass",""); p.end(); }
-  WiFi.persistent(false);
-  WiFi.setSleep(true);
-  bool sta = false;
-  if (ssid.length()) {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid.c_str(), pass.c_str());
-    const uint32_t t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < kStaJoinMs) delay(100);
-    sta = (WiFi.status() == WL_CONNECTED);
-  }
-  if (!sta) { WiFi.mode(WIFI_AP); WiFi.softAP(kApSsid, kApPass); }
-  if (MDNS.begin(kMdnsName)) MDNS.addService("http", "tcp", 80);
-  const String ip = sta ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
-  Serial.printf("\n[media] %s ip=%s  http://%s/  OTA http://%s/update\n",
-                sta ? "STA" : "AP", ip.c_str(), ip.c_str(), ip.c_str());
+  affanet::startWifi(kApSsid, kApPass, kMdnsName, "media");
 }
 
 void startHttp() {
-  g_server.config.lru_purge_enable  = true;
-  g_server.config.max_open_sockets  = 7;
-  g_server.config.recv_wait_timeout = 3;
-  g_server.config.send_wait_timeout = 3;
-  g_server.config.max_uri_handlers  = 64;
-  g_server.config.stack_size        = 10240;
-  g_server.listen(80);
-  // OTA FIRST — the only way back into a board with no cable.
-  ElegantOTA.onStart([]() { g_link.setTxGate(false); logmsg("ota started"); });
-  ElegantOTA.onEnd([](bool ok) { if (!ok) g_link.setTxGate(true); logmsg("ota %s", ok?"ok":"FAILED"); });
-  ElegantOTA.begin(&g_server);
-  routes();
+  affanet::startHttp(g_server,
+                     []() { g_link.setTxGate(false); logmsg("ota started"); },
+                     [](bool ok) { if (!ok) g_link.setTxGate(true); logmsg("ota %s", ok ? "ok" : "FAILED"); },
+                     &routes);
 }
 
 }  // namespace

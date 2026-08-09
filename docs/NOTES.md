@@ -7,8 +7,13 @@ cannot answer.
 
 Everything else — ~8 000 lines across nine documents — was deleted on 2026-08-08. It was
 inference, third-party source reconstruction, and prose transcription of captures we still
-have. Raw evidence lives in `docs/captures/`; what has been seen on real
-glass lives in `docs/BENCH-VERIFIED.md`.
+have.
+
+**Raw evidence lives in `docs/captures/`** — the 24-file OEM corpus and the four
+acknowledge-display CSVs, third-party recordings of a real Renault radio talking to a real
+panel, which we cannot reproduce. `tools/decode_oem_csv.py` reads them: it splits sync from
+functional traffic, reassembles ISO-TP on every channel and names each payload by its command
+byte. **What has been seen on real glass lives in `docs/BENCH-VERIFIED.md`.**
 
 ---
 
