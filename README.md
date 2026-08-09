@@ -167,10 +167,12 @@ optional `.cpp` gates its whole body and compiles to an empty object file.
 
 ## Examples
 
-`01_bringup` — does the link come up, in the order it has to be proved · `03_hello` — sixty
-lines · **`17_mediascreen`** — the console: every render, a live frame ring, key capture and
-the byte-level probes · `18_aiscreen` — a content feed from anything that can compose a
-document.
+`03_hello` — sixty lines, the smallest correct program · **`17_mediascreen`** — the console:
+every render, a live frame ring, key capture, the byte-level override, and a **self-check**
+that proves the link one step at a time and names the step that failed · `18_aiscreen` — a
+content feed from anything that can compose a document.
+
+**Flash `17_mediascreen` first on new hardware** and press RUN SELF-CHECK.
 
 ## Documents
 

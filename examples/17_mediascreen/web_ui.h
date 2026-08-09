@@ -65,6 +65,7 @@ th{color:var(--dim);font-weight:normal}
   <button id="t-menus"  onclick="tab('menus')">Menus</button>
   <button id="t-keys"   onclick="tab('keys')">Keys</button>
   <button id="t-wire"   onclick="tab('wire')">Wire</button>
+  <button id="t-health" onclick="tab('health')">Health</button>
   <button id="t-set"    onclick="tab('set')">Settings</button>
 </nav>
 
@@ -523,6 +524,40 @@ th{color:var(--dim);font-weight:normal}
   </section>
 </main>
 
+<main id="p-health" class="hide">
+  <section style="flex:1;min-width:340px">
+    <h2>Self-check &mdash; the only verdicts that mean the PANEL answered</h2>
+    <div class="r">
+      <button class="p" onclick="cmd('selfcheck')">RUN SELF-CHECK</button>
+      <span id="hcs" class="k"></span>
+    </div>
+    <table id="hct"><tbody></tbody></table>
+    <p><small>
+      Four steps, each waiting on <b>its own ticket's completion</b> &mdash; so a tick means the
+      panel acknowledged, not that a render was accepted into a queue. That distinction is the
+      whole point: <span class="k">Ok</span> from <span class="k">setText()</span> means
+      &ldquo;queued&rdquo;, and every counter below has been zero on a board whose glass never
+      moved.
+      <br><br>
+      <b>power</b> is followed by a deliberate 1.2 s wait. The panel acknowledges before the
+      glass is lit, and text drawn inside that window goes into a display still coming up &mdash;
+      the usual conclusion being &ldquo;setText does not work&rdquo;.
+    </small></p>
+  </section>
+
+  <section style="flex:1;min-width:300px">
+    <h2>Dashboard</h2>
+    <div class="r">
+      <button onclick="cmd('txgate',{on:0})">gate TX off</button>
+      <button onclick="cmd('txgate',{on:1})">gate TX on</button>
+    </div>
+    <p><small><b>The thirty-second diagnostic.</b> Gate our transmitter and watch the link
+      counters: if errors keep climbing with nothing of ours on the wire, the fault is not
+      ours. It has settled more arguments on this bench than any other single control.</small></p>
+    <pre id="hd">&hellip;</pre>
+  </section>
+</main>
+
 <main id="p-set" class="hide">
   <section>
     <h2>Panel family &mdash; a BOOT choice</h2>
@@ -629,7 +664,7 @@ function say(ok, m) { var e = el('res'); e.className = ok ? 'g' : 'b'; e.textCon
 
 var cur = 'bitmap';
 function tab(n) {
-  var all = ['bitmap', 'text', 'menus', 'keys', 'wire', 'set'];
+  var all = ['bitmap', 'text', 'menus', 'keys', 'wire', 'health', 'set'];
   for (var i = 0; i < all.length; i++) {
     el('p-' + all[i]).className = (all[i] === n) ? '' : 'hide';
     el('t-' + all[i]).className = (all[i] === n) ? 'on' : '';
@@ -774,6 +809,44 @@ var WORDS = ['ROUTE CALCULATED', 'NAVIGATION READY', 'TRAFFIC AHEAD', 'DESTINATI
 function pick() { return WORDS[Math.floor(Math.random() * WORDS.length)]; }
 function randomFull() { cmd('fullscreen', { a: pick(), b: pick(), c: pick() }); }
 
+
+// ---------------------------------------------------------------------------
+// Health
+// ---------------------------------------------------------------------------
+// Polled only while the tab is open. Every field here is a COUNTER, so the page can be
+// opened after the fact and still say what happened.
+var HV = ["waiting", "OK", "FAILED"];
+function health() {
+  if (cur !== "health") return;
+  fetch("/api/health").then(function (r) { return r.json(); }).then(function (h) {
+    el("hcs").textContent = h.check.state + (h.check.why ? "  2014  " + h.check.why : "");
+    var tb = el("hct").getElementsByTagName("tbody")[0];
+    tb.innerHTML = "";
+    h.check.steps.forEach(function (s) {
+      var r = tb.insertRow(-1);
+      r.insertCell(0).textContent = s.n;
+      var c = r.insertCell(1);
+      c.textContent = HV[s.v];
+      c.className = s.v === 1 ? "g" : (s.v === 2 ? "b" : "w");
+    });
+    el("hd").textContent = [
+      "link   live " + h.link.live + "   rx " + h.link.rx + "   tx " + h.link.tx,
+      "       dropped " + h.link.drop + "   ring overflow " + h.link.ovf,
+      "",
+      "panel  " + h.panel.phase + "   registered " + h.panel.registered,
+      "       sessions lost " + h.panel.lost + "   " + h.panel.why,
+      "       opening done " + h.panel.opened,
+      "",
+      "task   worst poll " + h.task.late + " us",
+      "       slowest callback " + h.task.cb + " " + h.task.cbms + " ms at " + h.task.cbat + " ms",
+      "       overruns " + h.task.over + "   foreign polls " + h.task.foreign,
+      "       posted " + h.task.posted + "   post-dropped " + h.task.dropped,
+      "       stack free " + h.task.stack + " B",
+      "",
+      "heap   " + h.heap + " B      uptime " + h.up + " s"
+    ].join("\n");
+  }).catch(function () { el("hd").textContent = "unreachable"; });
+}
 
 // ---------------------------------------------------------------------------
 // Override
@@ -1118,6 +1191,8 @@ stySync();
 iconChips();
 poll();
 setInterval(poll, 1500);
+setInterval(health, 1500);
+health();
 </script>
 </body></html>
 )HTML";

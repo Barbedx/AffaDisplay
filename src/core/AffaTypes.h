@@ -381,6 +381,27 @@ enum class CbKind : uint8_t {
   FrameTap,   // onFrame     — EVERY frame, both directions; the easiest one to make slow
 };
 
+// A Result as text. Next to the enum because every consumer that logs one would otherwise
+// write this switch, and a switch written twice drifts once: 01_bringup carried a copy that
+// predated Result::Aborted.
+inline const char* resultName(Result r) {
+  switch (r) {
+    case Result::Ok:           return "Ok";
+    case Result::NoSync:       return "NoSync";
+    case Result::UnknownFunc:  return "UnknownFunc";
+    case Result::SendFailed:   return "SendFailed";
+    case Result::Timeout:      return "Timeout";
+    case Result::TooLong:      return "TooLong";
+    case Result::QueueFull:    return "QueueFull";
+    case Result::NotSupported: return "NotSupported";
+    case Result::BadArgument:  return "BadArgument";
+    case Result::LinkDown:     return "LinkDown";
+    case Result::Cancelled:    return "Cancelled";
+    case Result::Aborted:      return "Aborted";
+  }
+  return "?";
+}
+
 inline const char* cbName(CbKind k) {
   switch (k) {
     case CbKind::None:     return "none";

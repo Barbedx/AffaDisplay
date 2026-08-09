@@ -329,6 +329,127 @@ void onKey(affa::Key k, affa::KeyEdge e, void*) {
 //   52 09 00  display ON. The "display off" traces send 52 00 00 and nothing follows.
 //   54 01     unexplained, always sent
 //   54 03     closes the full window, so the windowed layout is current
+
+// ---------------------------------------------------------------------------
+// SELF-CHECK — the link proved one step at a time, each with its own verdict
+// ---------------------------------------------------------------------------
+// Absorbed from 01_bringup, which existed for this and carried a whole second console to
+// hold it. The opening above LIGHTS THE GLASS; this proves the link works and, when it does
+// not, names the step and the reason instead of leaving you with "nothing happened".
+//
+// Each step waits for its own ticket's completion, so a verdict means the PANEL answered —
+// not that a render was accepted into a queue. That distinction is the entire point:
+// `Ok` from setText() means "queued", and the four counters below have all been zero on a
+// board whose glass never moved.
+enum class Chk : uint8_t { Idle, Link, Power, Warm, Text, Time, Done, Failed };
+constexpr uint8_t  kChkTries  = 3;
+constexpr uint32_t kChkAckMs  = 2500;   // one ACK timeout plus slack
+constexpr uint32_t kChkWarmMs = 1200;   // the panel is lit but not ready; see below
+
+struct SelfCheck {
+  Chk      step = Chk::Idle;
+  uint8_t  tries = 0;
+  uint32_t deadline = 0;
+  affa::TxTicket req = affa::kNoTicket;
+  affa::Result   last = affa::Result::Ok;
+  bool     acked = false;
+  uint8_t  verdict[4] = {0, 0, 0, 0};   // link, power, text, time: 0 pending 1 ok 2 fail
+  char     why[48] = {0};
+} g_chk;
+
+const char* chkName(Chk s) {
+  switch (s) {
+    case Chk::Idle: return "idle";     case Chk::Link:  return "link";
+    case Chk::Power: return "power";   case Chk::Warm:  return "warm";
+    case Chk::Text: return "text";     case Chk::Time:  return "time";
+    case Chk::Done: return "done";     default:         return "FAILED";
+  }
+}
+
+void chkStart() {
+  g_chk = SelfCheck{};
+  g_chk.step = Chk::Link;
+  logmsg("self-check: waiting for the link");
+}
+
+void chkFail(uint8_t slot, const char* why) {
+  snprintf(g_chk.why, sizeof(g_chk.why), "%s: %s", chkName(g_chk.step), why);
+  g_chk.verdict[slot] = 2;
+  g_chk.step = Chk::Failed;
+  logmsg("self-check %s", g_chk.why);
+}
+
+// Issue a render and wait on ITS ticket. A refusal is not a failure of the step — the queue
+// was full or the task is not running — so it retries rather than condemning the panel.
+bool chkIssue(const affa::Submitted& s, uint8_t slot, const char* what) {
+  if (!s) {
+    if (++g_chk.tries >= kChkTries) { chkFail(slot, "refused every time"); return false; }
+    g_chk.deadline = ::millis() + 400;
+    logmsg("self-check %s: %s, retry %u", what, affa::resultName(s.result), g_chk.tries);
+    return false;
+  }
+  g_chk.req = s.ticket;
+  g_chk.acked = false;
+  g_chk.deadline = ::millis() + kChkAckMs;
+  return true;
+}
+
+void chkPoll() {
+  if (g_chk.step == Chk::Idle || g_chk.step == Chk::Done || g_chk.step == Chk::Failed) return;
+  const uint32_t now = ::millis();
+  const bool     due = static_cast<int32_t>(now - g_chk.deadline) >= 0;
+
+  switch (g_chk.step) {
+    case Chk::Link:
+      if (g_base->phase() != affa::Phase::Ready) return;   // no deadline: a silent bus is
+      g_chk.verdict[0] = 1;                                // normal until the panel speaks
+      g_chk.tries = 0; g_chk.deadline = 0; g_chk.step = Chk::Power;
+      logmsg("self-check link OK");
+      return;
+
+    case Chk::Power:
+      if (!g_chk.req) { if (due) chkIssue(g_panel->setPower(true), 1, "power"); return; }
+      if (g_chk.acked) {
+        g_chk.req = affa::kNoTicket;
+        if (g_chk.last != affa::Result::Ok) { chkFail(1, affa::resultName(g_chk.last)); return; }
+        g_chk.verdict[1] = 1;
+        // THE WAIT THE PANEL NEEDS. It has acknowledged; the glass is not lit yet. Text
+        // drawn inside this window goes into a display still coming up, and the usual
+        // conclusion is "setText does not work".
+        g_chk.deadline = now + kChkWarmMs; g_chk.step = Chk::Warm;
+        logmsg("self-check power OK, warming %lu ms", (unsigned long)kChkWarmMs);
+      } else if (due) { g_chk.req = affa::kNoTicket; chkFail(1, "no completion"); }
+      return;
+
+    case Chk::Warm:
+      if (due) { g_chk.tries = 0; g_chk.step = Chk::Text; }
+      return;
+
+    case Chk::Text:
+      if (!g_chk.req) { if (due) chkIssue(g_panel->setText("SELFCHECK"), 2, "text"); return; }
+      if (g_chk.acked) {
+        g_chk.req = affa::kNoTicket;
+        if (g_chk.last != affa::Result::Ok) { chkFail(2, affa::resultName(g_chk.last)); return; }
+        g_chk.verdict[2] = 1; g_chk.tries = 0; g_chk.deadline = now;
+        g_chk.step = g_panel->supports(affa::Feature::Time) ? Chk::Time : Chk::Done;
+        logmsg("self-check text OK");
+      } else if (due) { g_chk.req = affa::kNoTicket; chkFail(2, "no completion"); }
+      return;
+
+    case Chk::Time:
+      if (!g_chk.req) { if (due) chkIssue(g_panel->setTime("1000"), 3, "time"); return; }
+      if (g_chk.acked) {
+        g_chk.req = affa::kNoTicket;
+        if (g_chk.last != affa::Result::Ok) { chkFail(3, affa::resultName(g_chk.last)); return; }
+        g_chk.verdict[3] = 1; g_chk.step = Chk::Done;
+        logmsg("self-check PASSED");
+      } else if (due) { g_chk.req = affa::kNoTicket; chkFail(3, "no completion"); }
+      return;
+
+    default: return;
+  }
+}
+
 struct Opening { bool done = false; uint8_t step = 0; uint32_t nextMs = 0; } g_open;
 
 void openingPoll() {
@@ -422,6 +543,7 @@ void pushFrame() {
 void onDone(affa::TxTicket t, affa::Result r, void*) {
   if (t == g_menuTicket) { g_menuBusy = false; g_menuTicket = affa::kNoTicket; }
   if (t == g_rawTicket)  { g_rawBusy  = false; g_rawTicket  = affa::kNoTicket; }
+  if (t == g_chk.req && g_chk.req != affa::kNoTicket) { g_chk.acked = true; g_chk.last = r; }
   if (t != g_navTicket) return;
   g_navBusy = false;
   if (r == affa::Result::Ok) { ++g_ok; g_txMs += ::millis() - g_frameStart; }
@@ -811,6 +933,14 @@ Cmd dispatch(PsychicRequest* r) {
     g_rawBusy   = true;
     return kOk;
   }
+  // Absorbed from 01_bringup, which is deleted.
+  if (op == "selfcheck") { chkStart(); return kOk; }
+
+  // THE THIRTY-SECOND DIAGNOSTIC. Gate our transmitter and watch the counters: if errors keep
+  // climbing with nothing of ours on the wire, the fault is not ours. It has settled more
+  // arguments on this bench than any other single control.
+  if (op == "txgate") { g_link.setTxGate(B("on", true)); return kOk; }
+
   if (op == "opening") { g_open.done = false; g_open.step = 0; g_open.nextMs = ::millis();
                          return kOk; }
 
@@ -931,6 +1061,53 @@ void routes() {
     PsychicResponse res(r);
     res.setContentType("text/plain");
     res.setContent(hex);
+    return res.send();
+  });
+
+  // ONE PAGE THAT ANSWERS "IS THIS THING WELL, AND IF NOT WHERE". Four groups, and the order
+  // is the order you read them in when a panel is dark:
+  //
+  //   check   the self-check's per-step verdicts — the only ones that mean the PANEL answered
+  //   link    the controller: is it live, is it erroring, is the ring overflowing
+  //   panel   the protocol: which phase, registered, and who took the session away
+  //   task    the library's own poll loop: what blocked it and when
+  //
+  // Everything here is COUNTED, never sampled, so a 300 ms fault an hour ago is still here.
+  g_server.on("/api/health", HTTP_GET, [](PsychicRequest* r) {
+    const affa::rtos::Status st = g_task.status();
+    const affa::Stats        ls = g_link.stats();
+    static const char* kStepName[4] = {"link", "power", "text", "time"};
+    String j("{\"check\":{\"state\":\"");
+    j += chkName(g_chk.step); j += "\",\"why\":\""; j += g_chk.why; j += "\",\"steps\":[";
+    for (int i = 0; i < 4; ++i) {
+      if (i) j += ",";
+      j += "{\"n\":\""; j += kStepName[i];
+      j += "\",\"v\":"; j += String(static_cast<int>(g_chk.verdict[i])); j += "}";
+    }
+    j += "]},\"link\":{\"live\":";  j += g_link.isLive() ? "true" : "false";
+    j += ",\"rx\":";    j += String((unsigned long)ls.rxFrames);
+    j += ",\"tx\":";    j += String((unsigned long)ls.txFrames);
+    j += ",\"drop\":";  j += String((unsigned long)ls.txDropped);
+    j += ",\"ovf\":";   j += String((unsigned long)ls.ringOverflow);
+    j += "},\"panel\":{\"phase\":\""; j += affa::phaseName(g_base->phase());
+    j += "\",\"registered\":"; j += st.registered ? "true" : "false";
+    j += ",\"lost\":";  j += String((unsigned long)st.sessionsLost);
+    j += ",\"why\":\"";  j += affa::lossReasonName(g_base->lastLossReason()); j += "\"";
+    j += ",\"opened\":"; j += g_open.done ? "true" : "false";
+    j += "},\"task\":{\"late\":"; j += String((unsigned long)st.pollLateMaxUs);
+    j += ",\"cb\":\"";   j += affa::cbName(st.slowestCb); j += "\"";
+    j += ",\"cbms\":";  j += String((unsigned long)st.slowestCbMs);
+    j += ",\"cbat\":";  j += String((unsigned long)st.slowestCbAtMs);
+    j += ",\"over\":";  j += String((unsigned long)st.cbOverruns);
+    j += ",\"foreign\":"; j += String((unsigned long)st.foreignPolls);
+    j += ",\"posted\":";  j += String((unsigned int)st.posted);
+    j += ",\"dropped\":"; j += String((unsigned long)st.postDropped);
+    j += ",\"stack\":";   j += String((unsigned long)st.stackFreeBytes);
+    j += "},\"heap\":";   j += String((unsigned long)ESP.getFreeHeap());
+    j += ",\"up\":";      j += String((unsigned long)(::millis() / 1000)); j += "}";
+    PsychicResponse res(r);
+    res.setContentType("application/json");
+    res.setContent(j.c_str());
     return res.send();
   });
 
@@ -1137,6 +1314,7 @@ void loop() {
   // NO poll() HERE — g_task owns it. loop() may block without costing a timed-out ACK.
   ElegantOTA.loop();
   openingPoll();
+  chkPoll();
 
   const uint32_t now = millis();
   if (static_cast<int32_t>(now - g_nextSecondMs) >= 0) { g_nextSecondMs = now + 1000; ++g_uptimeS; }

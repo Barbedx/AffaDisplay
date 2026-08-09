@@ -120,7 +120,7 @@ application-level TWAI watchdog.
 
 ## Validation surface
 
-The normal library and examples `ex01_bringup`, `ex03_hello`, `ex04_rows`, and
+The normal library and the shipped examples, and
 `ex06_authclock` build without `ESP32_CAN` or `can_common`. `ex02_canspy` and
 `ex05_pingpong` deliberately retain the legacy wrapper as comparison diagnostics; they are
 not dependencies of the library or normal examples.
