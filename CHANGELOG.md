@@ -6,7 +6,95 @@ described the panel wrongly, and a silent behaviour change would have been worse
 
 ---
 
-## Unreleased
+## 2.0.0 — 2026-08-09
+
+**BREAKING, and the theme is subtraction.** `src/` went from ~14 000 lines to 8 400, the
+test suite from 7 976 to 1 934, the documentation from 8 176 to 2 297, and the repository
+from 9.7 MB to 4.8. Nothing on the wire moved: every golden vector is byte-identical.
+
+### The library is a transport, not a UI
+
+`src/widget/` is gone — the menu state machine, the marquee, the three-row live screen — and
+so are `MenuController`, `IPage`, `CarminatMenuRenderer` and the AMS key gesture that lived
+in `UpdateListBase` and survived the first purge by not being in `widget/`.
+
+> Which item is selected, what a long press means, how fast a title scrolls and when to
+> repaint are decisions about a **product**. A CAN driver that makes them is a CAN driver you
+> cannot use for a different product.
+
+The render calls were always the panel's contract and they are unconditional now:
+`showMenu`, `showMenuN`, `highlightItem`, `selectMenuItem`, `setText`, `showInfoMenu`.
+
+**Gates deleted:** `AFFA_ENABLE_MENU`, `AFFA_ENABLE_MARQUEE`, `AFFA_ENABLE_ISOTP_RX`,
+`AFFA_ENABLE_ESP32CAN_LINK`, `AFFA_PANEL_UPDATELIST_MENU`, `AFFA_MAX_SUBSCRIPTIONS`,
+`AFFA_TASK_QUEUE_DEPTH`, `AFFA_MENU_MAX_*`. Each is still named in `AffaConfig.h` with what
+it did and why it went.
+
+### Every render is callable from any task
+
+The cross-task boundary moved down into `enqueue()`, below every builder — so the guarantee
+holds for renders written after it, not just the ones somebody remembered to mirror. The old
+`rtos/AffaCommand.h` queue sat one layer too high and is deleted.
+
+`AFFA_ENABLE_TASK` now defaults to **1** on ESP32. It was 0, and thirteen of nineteen
+shipped examples turned it off and pumped `poll()` from `loop()` — including the one whose
+HTTP handlers then raced the queue.
+
+### One encoding for every UpdateList glass
+
+`UpdateListMenuDisplay` is deleted. Byte `[2]` of the `0x121` text command is a command
+**flavour**, not a panel selector: `0x76`, `0x7E` and `0x7F` have all been seen there, and
+independent projects have driven both `0x76` and `0x7F` into the same family of display. Our
+reconstruction of the `0x7F` form disagreed with the only real capture in two bytes and was
+never transmitted from here. `docs/WIRE.md` §9.2 keeps the record.
+
+`panelGeometry().mainChars` is 8 for this family — a **promise**, not a measurement: the
+frame always carries 12 cells, so a wider glass shows more for free.
+
+### Two protocol bugs, both found on the bench
+
+**A session that died during `Registering` could never recover.** `needsHelloBeforeAuth`
+tested `!atLeast(_phase, AwaitPeerChannel) || Failed`; neither is true at `Registering`, and
+the void branch above needs `FuncsReg`, which a half-open session does not hold. Measured:
+`RX 3CF 61 11 00` five times a second for eight minutes against `TX 151 70` every 2.5 s,
+never acknowledged. Registration now gives up after one terminally failed burst and falls
+back to the **announce** — pinned by
+`test_unanswered_registration_falls_back_to_the_announce`, which fails without the fix.
+
+**`-D AFFA_ENABLE_FULLSCREEN=0` did not link.** Its `#if` had grown to enclose the `BIGMENU`
+and `NAV` blocks, so turning fullscreen off removed the definitions of `selectMenuItem`,
+`showMenuN`, `showNavBitmap`, `showNavBitmapWithHeader` and `navTick` while the header went
+on declaring them.
+
+Also: `CarminatDisplay::supports()` read `AFFA_ENABLE_MENU != 0` — a *C++ expression*, so an
+undefined macro is a hard error. The library compiled only because every env in this
+repository still passed `-D AFFA_ENABLE_MENU=0`. **A consumer that did not would not build.**
+
+### Documentation is generated or deleted
+
+`docs/WIRE.md` is written by `tools/gen_wire_doc.js` from the golden vectors CI asserts —
+103 frames, each tagged with the test that pins it, and the generator refuses to publish a
+document it knows is short. Nine prose documents totalling ~8 000 lines were deleted; what
+survives is `API.md` (contracts), `NOTES.md` (what we do not know, and how this project has
+got things wrong eight times), `BENCH-VERIFIED.md` (what a human saw on glass) and
+`ESP32CAN-CONTRACT.md`.
+
+### What this release does NOT have
+
+**The behavioural test suites are gone** — 165 tests across eleven files, kept only where
+they asserted a golden wire vector. The §3b guarantees (one-poll key delivery, coalescing,
+`abortPending`, `Priority::Urgent`) are implemented and documented but **no longer
+enforced**. `docs/API.md` §3b.9 says so in those words.
+
+Untested at all, and previously so: `ILogSink`, `shouldAutoAck()`, `PanelGeometry` for the
+two working families, `stats()`, and `CanCommonLink` in its entirety — the real link. The
+cluster family has never run against hardware and its opening cannot complete.
+
+---
+
+## 1.0.x — the work that became 2.0.0
+
+Everything below landed before the version bump and is included in 2.0.0.
 
 ### The list screen has a pictogram and a scrollbar, and the library was hiding both
 
