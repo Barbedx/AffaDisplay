@@ -97,7 +97,7 @@ laptop, and it is worth more than any single feature in here.
 | `PanelGeometry.h` | What a given glass can actually show, queried rather than assumed. §6. |
 | `AffaConstants.h` | Constants shared by every panel: ISO-TP opcodes, `kReplyFlag`, ACK bytes. No panel IDs. |
 | `AffaSyncProfile.h` | `SyncProfile` — the opening expressed as **data**. The per-family instances live in the panel folders. |
-| `AffaRing.h` | `AffaRing<T,N>`, lock-free SPSC. |
+| `AffaRing.h` | `AffaRing<T,N>`, lock-free SPSC. Used by `LoopbackLink` only — `CanCommonLink` carries its own ring sized by `AFFA_RX_RING_DEPTH`. |
 | `AffaDispatch.h` | `AffaMpsc<T,N>` — bounded multi-producer queue, CAS claim plus a publish-last release store. This is what makes a render from any task safe. |
 | `AffaDisplayBase.h` | The whole class in one header; four `.cpp` files because it spans four unrelated jobs. |
 | `AffaDisplayBase.cpp` | Lifecycle, `poll()` orchestration, the RX drain, the key decoder, the capability defaults. |
@@ -629,21 +629,23 @@ quote L2 as "L1 + the remaining frames of the transfer in flight" and nothing mo
 precise; a guessed millisecond figure in a datasheet-shaped table is worse than no
 figure at all.
 
-### 3b.9 The tests that pin this section
+### 3b.9 NOTHING PINS THIS SECTION ANY MORE, and that is a deliberate trade
 
-None of the above is a claim until one of these fails when it is broken. All run on the
-host against `LoopbackLink` + `FakeClock`; none needs hardware.
+A table stood here listing eight tests — `test_isotp/key_latency_matrix`,
+`test_isotp/coalesce_latest_wins`, `test_sync/poll_frequency_independence` and five more —
+each with a sentence saying what it asserted. **Not one of those names ever existed.** The
+suites were called `test_isotp_edges` and `test_sync_profiles`, and the table was written
+from intention rather than from `test/`. It then survived every rename underneath it,
+because prose about tests is checked by nothing at all.
 
-| Test | Asserts |
-| --- | --- |
-| `test_isotp/key_latency_matrix` | The §3b.3 sentence: for queue occupancy 0…`AFFA_TX_QUEUE_DEPTH` × in-flight frame index 0…13, one injected key frame plus exactly one `poll()` fires `KeyCb`. |
-| `test_isotp/coalesce_latest_wins` | With `FuncsReg` already latched, 100 `setText` calls and no `poll()` between them leave exactly one job in the queue, carrying the 100th payload, with 99 tickets completed `Aborted` and zero frames transmitted. |
-| `test_isotp/coalesce_never_touches_started` | A `setText` enqueued while frame 2 of a 3-frame `setText` is in flight does **not** modify the in-flight job; the wire shows both messages complete and in order. |
-| `test_isotp/abort_pending_reports_aborted` | Every dropped ticket produces exactly one `onComplete(_, Aborted)`; the in-flight job is untouched; a nested `abortPending()` returns 0. |
-| `test_isotp/abort_all_frame_boundary` | After `abortAll()` mid-transfer, no further continuation frame of that job appears on the wire, the job completes `Aborted`, and the next message's first transmitted frame is its own frame 0. |
-| `test_isotp/urgent_never_splits` | An `Urgent` enqueue during a 14-frame transfer appears on the wire strictly after the 14th frame and strictly before every queued `Normal` job. |
-| `test_isotp/urgent_never_overtakes_registration` | With `FuncsReg` unlatched, an `Urgent` payload is still transmitted after both `0x70` registration probes. |
-| `test_sync/poll_frequency_independence` | §4.4: one million `poll()` calls across one simulated second emit exactly one `0xB9` and never set `Failed`. |
+On 2026-08-08 the behavioural suites went too: 165 tests across eleven files, kept only
+where they asserted a golden wire vector. So the guarantees in §3b — one-poll key delivery,
+latest-value coalescing, `abortPending()` reporting each dropped ticket, `Priority::Urgent`
+never splitting a transfer — **are implemented and documented but no longer enforced.**
+
+They are stated here because they are the contract the code was written to. Treat them as
+design intent, not as regression cover: `docs/WIRE.md` is the part of this library that CI
+still refuses to let drift.
 
 ## 4. Threading contract
 
@@ -670,7 +672,7 @@ task_LowLevelRX (prio 19)  ->  callbackQueue (depth 16)  ->  task_CAN (prio 15)
                                                                   |
                                                           general callback
                                                                   |
-                                              CanCommonLink::ingest -> AffaRing (SPSC)
+                                            CanCommonLink::onFrame -> its own SPSC ring
                                                                   |
                                                      ... your task calls poll() ...
                                                                   |
@@ -768,7 +770,7 @@ frame sequence must be identical.
 
 Safe from any task, at any time, as long as **only one task drives the library**:
 `poll()`, `enqueue()`, every render call, `abortPending()`, `abortAll()`,
-`pressKey()`, `nav()`, `onFrame()`, `onKey()`, `onText()`, `onRadioText()`,
+`pressKey()`, `nav()`, `onFrame()`, `onKey()`, `onRadioText()`,
 `onComplete()`, and all the observers (`syncState`, `busy`, `pending`, `stats`,
 `panelGeometry`, `supports`, …).
 
@@ -784,7 +786,7 @@ queue is proven code, it is the shape this section has recommended since 0.1.0, 
 having every consumer write it again is how it gets written wrong.
 
 The one thing that is genuinely concurrent, `CanCommonLink::ingest` writing into
-`AffaRing` from `task_CAN` while `poll()` reads, is handled by the ring's SPSC
+CanCommonLink's ring from the driver task while `poll()` reads, is handled by its SPSC
 discipline and needs no lock.
 
 ### 4.6 The recommended shape for key handling
@@ -1153,13 +1155,16 @@ document that described the design.
 
 The receive-direction decoder. It existed to be a **test oracle** — to prove that what the
 builders emit is what a reader would read back — and that is a test's job, not a shipped
-library's. It now lives in `test/affa_decode.h`, where it is used by exactly the code that
-needed it and costs a consumer nothing.
+library's. It moved into the test suite and then went entirely: its last caller was
+`test_isotp_edges`, which is one of the eleven behavioural suites deleted on 2026-08-08.
 
 The transmit-side layout it shared with the TX FSM was never separable in practice and
 lives in `AffaTx.cpp`, where the frames are actually built.
 
-`AFFA_ENABLE_ISOTP_RX` went with it.
+`AFFA_ENABLE_ISOTP_RX` went with it — though NINE `#if` sites survived in `core/` for a
+week afterwards, holding an `onText()` that could never fire and four tests that could never
+run. `examples/17_mediascreen` reassembles its own TX in fifteen lines when it wants a
+payload back, which is where that belongs.
 
 ### 7.3 `link/Esp32CanLink`
 
@@ -1183,7 +1188,7 @@ and `AFFA_MAX_SUBSCRIPTIONS` to size it — in exchange for what `onFrame()` alr
 four lines at the call site. An abstraction whose only user is its own test is a liability
 with documentation.
 
-`onFrame()`, `onKey()`, `onText()`, `onRadioText()` and `onComplete()` remain. §3b.7 and
+`onFrame()`, `onKey()`, `onRadioText()` and `onComplete()` remain. §3b.7 and
 §4 give their threading rules; `CbKind` and `cbName()` are how a slow one is *named* in
 `Status` rather than merely counted.
 
@@ -1219,7 +1224,7 @@ only real capture of it.
 
 ### 7.7 `Feature::RadioText`
 
-It reported a **compile gate**, not a panel capability — and after `onText()` landed, a
+It reported a **compile gate**, not a panel capability, and
 gate that bought nothing. A capability query that answers a question about your own build
 tells the caller nothing about the glass, which is the only thing `supports()` is for.
 
