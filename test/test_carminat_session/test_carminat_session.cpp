@@ -871,6 +871,75 @@ void test_recovery_reasserts_cached_power_before_held_time(void) {
 
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// A registration nobody answers must not drill for ever
+// ---------------------------------------------------------------------------
+
+void test_unanswered_registration_falls_back_to_the_announce(void) {
+  // THE BENCH BUG OF 2026-08-09, as a test. A session that dies while the `151 70` probes
+  // are in flight used to leave the library somewhere nothing could leave from:
+  //
+  //     RX 3CF 61 11 00   five times a second, for eight minutes
+  //     TX 151 70         every ~2.5 s, never acknowledged
+  //
+  // handleSyncFrame's void branch needs FuncsReg, which we do not hold; its hello branch
+  // needs !atLeast(AwaitPeerChannel), and Registering sorts after it. Neither fires, and
+  // pumpSync re-queues the probe every time the last one times out.
+  //
+  // NOTE THE SELF-ACK IS NEVER ARMED. That is the whole scenario: the opening completes,
+  // our probes go out, and the panel answers none of them.
+  CarRig r;
+  r.d.begin();
+  affatest::carminatOpeningRequest(r.d, r.link);
+  finishCarminatHello(r);
+
+  // The probe leaves in the SAME poll as B0#3 — the tests above assert exactly that order —
+  // and then the peer says nothing at all. Drained AFTER looking, not before: draining first
+  // is what threw the only copy of it away on the first attempt at this test.
+  expectFrame(r.link, kCarminatRegText, "the 151 70 probe goes out with B0#3");
+  drain(r.link);
+  TEST_ASSERT_FALSE_MESSAGE(r.d.registered(), "and nothing acknowledges it");
+
+  // ONE BURST COSTS 9 750 ms AND THE ARITHMETIC IS THE POINT:
+  //
+  //     attempt 1                 AFFA_ACK_TIMEOUT_MS
+  //     retry 1  + 250 ms         AFFA_ACK_TIMEOUT_MS
+  //     retry 2  + 500 ms         AFFA_ACK_TIMEOUT_MS
+  //     retry 3  +1000 ms         AFFA_ACK_TIMEOUT_MS
+  //
+  // because armRetry() doubles under a 2 s deadline. A comment here once said the fallback
+  // lands "about six seconds after the peer stops answering"; the bench said 33 s, and the
+  // arithmetic above is why.
+  constexpr uint32_t kOneBurstMs =
+      4u * AFFA_ACK_TIMEOUT_MS + AFFA_TX_RETRY_MS + 2u * AFFA_TX_RETRY_MS +
+      4u * AFFA_TX_RETRY_MS;
+
+  for (uint32_t t = 0; t < kOneBurstMs + 2000u; t += 50) {
+    r.clk.advance(50);
+    r.d.poll();
+  }
+
+  // THE TWO THINGS THAT MATTER, and the first is what was broken:
+  //   * we stopped re-probing a registration nobody was going to answer
+  //   * and went all the way back to the ANNOUNCE, because the captured order is our BA,
+  //     then the panel's NEXT 61 11, then our B0. Returning to Announced instead — which is
+  //     right for a live void, where the panel is demonstrably answering our BA — would
+  //     never emit one.
+  TEST_ASSERT_FALSE_MESSAGE(r.d.registered(), "still not registered, correctly");
+  TEST_ASSERT_TRUE_MESSAGE(static_cast<uint8_t>(r.d.phase()) <=
+                               static_cast<uint8_t>(Phase::Announced),
+                           "the opening restarts at Silent/Announced, not at Registering");
+
+  // AND IT RE-OPENS, rather than sulking. The panel asks again on its own timer, and the
+  // fresh request must draw the announce it could not draw while we were drilling.
+  drain(r.link);
+  r.link.inject(affatest::panelSyncRequest());
+  r.d.poll();
+  affatest::expectFrame(r.link, affatest::radioAnnounce(),
+                        "the next request draws a FRESH BA — the thing the wedge never sent");
+}
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -887,5 +956,6 @@ int main(int, char**) {
   RUN_TEST(test_carminat_never_pongs_between_heartbeats);
   RUN_TEST(test_a_ping_storm_never_moves_the_free_running_heartbeat);
   RUN_TEST(test_recovery_reasserts_cached_power_before_held_time);
+  RUN_TEST(test_unanswered_registration_falls_back_to_the_announce);
   return UNITY_END();
 }

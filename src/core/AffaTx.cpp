@@ -803,6 +803,7 @@ void AffaDisplayBase::finishJob(Result r, bool allowRetry) {
     if (r == Result::Ok) {
       if (!registrationQueued()) {
         _nextPayloadMs = _clock.millis() + _profile.payloadAfterRegistrationMs;
+        _regFails = 0;                 // the whole table answered; the count starts over
         setSync(_sync | SyncState::FuncsReg);
         // THE WHOLE TABLE IS ACKED. Not Ready yet: the captured radio waits ~400 ms before
         // its first payload, and a render inside that window is a screen the panel takes
@@ -999,6 +1000,11 @@ uint8_t AffaDisplayBase::dropRegistrations() {
 // accidentally compare equal to a live epoch after a wrap.
 void AffaDisplayBase::advanceSessionEpoch() {
   if (++_sessionEpoch == 0) _sessionEpoch = 1;
+  // A NEW SESSION OWES THE PEER A CLEAN SLATE. _regFails counts CONSECUTIVE terminal
+  // registration failures, and a count carried across a session boundary is not
+  // consecutive: one stale failure plus one transient in the new session would fall back on
+  // the first burst. Invisible at kRegMaxFails == 1 and a latent bug the moment it is raised.
+  _regFails = 0;
 }
 
 // A new panel session voids the protocol ACK the head job is currently waiting for: the

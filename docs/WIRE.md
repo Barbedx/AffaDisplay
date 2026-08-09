@@ -45,7 +45,7 @@ asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `
 151  70 00 00 00 00 00 00 00
 ```
 
-asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00`, `test_carminat_announces_into_a_silent_bus_slowly_and_ba_only`, `test_carminat_bootstrap_is_held_until_good_auth`, `test_phase_walks_the_measured_opening_in_order`, `test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediately`, `test_recovery_reasserts_cached_power_before_held_time`
+asserted by `test_carminat_hello_is_a_ba_announce_then_three_paced_b0_frames`, `test_carminat_legacy_profile_is_immediate_70_b0_b0_but_still_requires_00`, `test_carminat_announces_into_a_silent_bus_slowly_and_ba_only`, `test_carminat_bootstrap_is_held_until_good_auth`, `test_phase_walks_the_measured_opening_in_order`, `test_carminat_does_not_cancel_the_start_announce_when_00_follows_immediately`, `test_recovery_reasserts_cached_power_before_held_time`, `test_unanswered_registration_falls_back_to_the_announce`
 
 ### `kCarminatRegNav`
 

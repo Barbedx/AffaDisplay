@@ -30,7 +30,7 @@ calls are unconditional, keys come out of `onKey()`, and what happens next is yo
 - **Every render returns `Submitted`** — a ticket and a `Result`, `[[nodiscard]]`, so a
   screen that silently never appeared is a compiler warning rather than a mystery.
 - **An unsupported call returns `NotSupported`**, never a silent success.
-- **The host tests need no hardware.** 30 cases, `platform = native`, ~2 s.
+- **The host tests need no hardware.** 31 cases, `platform = native`, ~2 s.
 
 ## Quick start
 
@@ -184,7 +184,7 @@ content feed from anything that can compose a document.
 | [`docs/BENCH-VERIFIED.md`](docs/BENCH-VERIFIED.md) | What a human looked at on real glass. |
 
 ```
-pio test -e native      # 30 cases, no hardware
+pio test -e native      # 31 cases, no hardware
 pio run                 # 5 environments
 ```
 
@@ -215,7 +215,7 @@ MIT · Arduino + PlatformIO · C++17 · без купи після `begin()` · 
   `enqueue()`, нижче за кожен збирач.
 - **Кожен рендер повертає `Submitted`** — квиток і `Result`, `[[nodiscard]]`.
 - **Непідтриманий виклик повертає `NotSupported`**, а не мовчазний успіх.
-- **Тестам не потрібне залізо.** 30 випадків, `platform = native`, ~2 с.
+- **Тестам не потрібне залізо.** 31 випадок, `platform = native`, ~2 с.
 
 Швидкий старт — код в англійській половині вище, він однаковий.
 
