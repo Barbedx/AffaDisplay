@@ -1,25 +1,18 @@
-// 17_mediascreen — the presentation console. Everything this library can put on a panel.
+// 17_mediascreen — the console. Everything this library can put on a panel, plus the
+// probes for the bytes it does not understand yet.
 //
-// ONE COMMAND ROUTE, not thirty. Every action the console can take is `/api/cmd?op=<name>`
-// and every one returns the same JSON shape: {"ok":bool,"msg":string}. The previous version
-// grew a route per feature and two of them silently did nothing for a day, because there was
-// no single place where "did this actually run?" could be answered. Now there is one
-// dispatcher, one result type, and the console reports the answer for every press.
+// ONE COMMAND ROUTE: /api/cmd?op=<name>, every one returning {"ok":bool,"msg":string}. The
+// version with a route per feature had two that silently did nothing for a day.
 //
-// WHAT IT DEMONSTRATES, and each is a bench result from 2026-08-05:
-//   * the 0x1F1 pane renders a 48x48 bitmap, and it is an INDEPENDENT LAYER — the info menu
-//     draws with it, and the image can be replaced under an open popup
-//   * the OEM animates that channel itself, so animating it is not our invention
-//   * the panel tracks a six-item list but draws two rows of it, and scrolls itself
+//   pio run -e ex17_mediascreen -t upload
+//   http://<ip>/   console      http://<ip>/update   OTA
+//   /api/cmd?op=panic           stops everything, from a bare address bar
+//   /api/cmd?op=lasttx          the last payload the builder made, as hex
+//   /api/cmd?op=raw&b=10 0E ..  send bytes you chose through the ordinary path
 //
-//   pio run -e ex17_mediascreen -t upload --upload-port COM5
-//   http://<ip>/     console        http://<ip>/update    OTA
-//   http://<ip>/api/cmd?op=panic    stops everything, from a bare address bar
-//
-// THE BUS IS THE CONSTRAINT. One image is 304 wire bytes = 44 CAN frames, and the panel runs
-// ISO-TP BlockSize 1, so every consecutive frame costs a round trip: 47-64 ms measured. At a
-// 250 ms period the pane takes ~23% of the link. Identical frames are never resent, so a
-// still image costs one transfer and then nothing.
+// THE BUS IS THE CONSTRAINT. One image is 304 bytes = 44 frames at BlockSize 1, so every
+// consecutive frame costs a round trip: 47-64 ms measured, ~23% of the link at 250 ms.
+// Identical frames are never resent.
 
 #include <Arduino.h>
 #include <AffaDisplay.h>
@@ -80,11 +73,13 @@ bool g_wantReboot = false;
 enum class Scene : uint8_t {
   Spectrum = 0, Vu, Wave, Clock, Stars, Bounce, Rings, Eyes,
   Globe, Tryzub, TryzubClock, Renault, Dash, Gauges, Combo, FontSheet, Checker,
+  EyesStill, EyesLeft, EyesBlink, EyesHappy,
   Custom, Blank, kCount
 };
 const char* kSceneName[] = {
   "spectrum","vu","wave","clock","stars","bounce","rings","eyes",
   "globe","tryzub","tryzubclock","renault","dash","gauges","combo","fontsheet","checker",
+  "eyesstill","eyesleft","eyesblink","eyeshappy",
   "custom","blank"
 };
 static_assert(sizeof(kSceneName)/sizeof(kSceneName[0]) == static_cast<size_t>(Scene::kCount),
@@ -112,21 +107,14 @@ volatile bool  g_menuBusy = false;
 affa::TxTicket g_menuTicket = affa::kNoTicket;
 
 // ---- the OEM's own Navigation menu, byte for byte ---------------------------
-// Extracted from docs/captures/"some more logs from origin"/
-// "mENU NAVIGATION MAIN SCREEN AFTER BACK.csv" — one ISO-TP message, `10 C6` = FF_DL 198 =
-// 36 + 27*6, reassembled with ZERO sequence gaps. PCI included, so this is exactly what the
-// OEM head unit put on 0x151 while the glass showed the screen in the Carminat handbook:
-// "Menu Principal", a left gutter with a pictogram, one row in inverted video.
+// docs/captures/"some more logs from origin"/"mENU NAVIGATION MAIN SCREEN AFTER BACK.csv",
+// one ISO-TP message, `10 C6` = FF_DL 198 = 36 + 27*6, PCI included.
 //
-// WHY IT IS STILL HERE NOW THAT THE FIELD IS DECODED. It was the control that settled the
-// question on 2026-08-07: the panel drew the book from these exact bytes, and then
-// showMenuN() drew the same book from its own title and its own items. Keeping it means a
-// builder change that stops drawing an icon can be told apart from a panel that stopped
-// accepting one — press this, and if the book is still there the builder moved, not the
-// panel.
+// IT IS THE CONTROL. Press it and if the book is still drawn, a builder change moved —
+// not the panel. That is how the pictogram field was settled on 2026-08-07.
 //
-//   op=oem                 -> verbatim, [3][4] = 3D 14, the book
-//   op=oem&i0=0x80&i1=0x00 -> the same 200 bytes with the "no icon" pair
+//   op=oem                 verbatim, [3][4] = 3D 14, the book
+//   op=oem&i0=0x80&i1=0x00 the same 200 bytes with the "no icon" pair
 constexpr uint16_t kOemNavBytes = 200;
 const uint8_t kOemNavMenu[kOemNavBytes] = {
   0x10, 0xC6, 0x21, 0x01, 0x01, 0x3D, 0x14, 0x00, 0x86, 0xFF, 0x03, 0x4E,
@@ -230,16 +218,76 @@ FrameRec g_fr[kFrameRing];
 uint16_t g_frHead = 0;
 bool     g_tapAll = false;
 
+
+// ---------------------------------------------------------------------------
+// OVERRIDE — the payload, not the frames
+// ---------------------------------------------------------------------------
+// The frame ring shows what left the controller; this shows what the BUILDER produced,
+// which is the thing worth editing. TX frames are reassembled here rather than by a
+// library — ours to build, ours to concatenate, and fifteen exact lines.
+constexpr uint16_t kOvrMax = 320;   // one nav screen is 304; nothing this console sends is bigger
+uint8_t  g_lastTx[kOvrMax];
+uint16_t g_lastTxLen = 0;
+uint16_t g_lastTxId  = 0;
+uint8_t  g_asm[kOvrMax];       // in progress
+uint16_t g_asmLen = 0, g_asmId = 0, g_asmWant = 0;
+
+
+// One log line per payload, hex, ready to paste back into op=raw or next to docs/WIRE.md.
+void logHex(const char* what, uint16_t id, const uint8_t* d, uint16_t n) {
+  char line[3 * kOvrMax + 32];
+  int k = snprintf(line, sizeof(line), "%s %03X ", what, id);
+  for (uint16_t i = 0; i < n && k < static_cast<int>(sizeof(line)) - 4; ++i)
+    k += snprintf(line + k, sizeof(line) - k, "%02X ", d[i]);
+  logmsg("%s", line);
+}
+
+void captureTx(const affa::Frame& f) {
+  if (!f.len) return;
+  const uint8_t pci = f.data[0] & 0xF0;
+  if (pci == 0x00) {                                   // single frame: len in the low nibble
+    const uint8_t n = static_cast<uint8_t>((f.data[0] & 0x0F) + 1);
+    g_lastTxId = static_cast<uint16_t>(f.id);
+    g_lastTxLen = n > f.len ? f.len : n;
+    memcpy(g_lastTx, f.data, g_lastTxLen);
+    g_asmLen = 0;
+    return;
+  }
+  if (pci == 0x10) {                                   // first frame: 12-bit declared length
+    g_asmId  = static_cast<uint16_t>(f.id);
+    g_asmWant = static_cast<uint16_t>(((f.data[0] & 0x0F) << 8) | f.data[1]) + 2;
+    g_asmLen = f.len;
+    memcpy(g_asm, f.data, f.len);
+    return;
+  }
+  if (pci == 0x20 && g_asmLen && static_cast<uint16_t>(f.id) == g_asmId) {
+    const uint8_t n = static_cast<uint8_t>(f.len - 1);
+    if (g_asmLen + n <= kOvrMax) { memcpy(g_asm + g_asmLen, f.data + 1, n); g_asmLen += n; }
+    if (g_asmLen >= g_asmWant) {                       // complete
+      g_lastTxId = g_asmId;
+      g_lastTxLen = g_asmWant < g_asmLen ? g_asmWant : g_asmLen;
+      memcpy(g_lastTx, g_asm, g_lastTxLen);
+      g_asmLen = 0;
+    }
+  }
+}
+
 void onTap(const affa::Frame& f, affa::Direction dir, void*) {
   const uint16_t id = static_cast<uint16_t>(f.id);
-  // Nav CONTINUATIONS are dropped unless asked for: an image is 1 + 43 CFs + 43 flow
-  // controls, and at 4 fps that flushes the ring ten times a second — a tap that records
-  // everything ends up showing nothing. The FIRST frame is always kept; that is the header.
+  const uint8_t  d  = (dir == affa::Direction::Rx) ? 0 : 1;
+
+  // REASSEMBLE FIRST, FILTER SECOND. The filter below exists to keep the display ring
+  // readable, not to hide bytes: a nav screen is 44 frames, and dropping its continuations
+  // before captureTx() means op=lasttx can never show the one payload most worth editing.
+  if (d) captureTx(f);
+
+  // Nav CONTINUATIONS are dropped from the RING unless asked for: 1 + 43 CFs + 43 flow
+  // controls at 4 fps flushes 64 slots ten times a second, and a tap that records everything
+  // ends up showing nothing. The FIRST frame is always kept; that is the header.
   if (!g_tapAll) {
     if (id == affa::carminat::kIdNav && f.len && (f.data[0] & 0xF0) == 0x20) return;
     if (id == (affa::carminat::kIdNav | 0x400)) return;
   }
-  const uint8_t d = (dir == affa::Direction::Rx) ? 0 : 1;
   portENTER_CRITICAL(&g_mux);
   FrameRec& last = g_fr[(g_frHead + kFrameRing - 1) % kFrameRing];
   if (last.count && last.dir == d && last.id == id && last.len == f.len &&
@@ -331,6 +379,10 @@ void renderScene(uint8_t* b) {
     case Scene::Combo:       memcpy(b, navlab::kBmpCombo,       media::kBytes); break;
     case Scene::FontSheet:   memcpy(b, navlab::kBmpFontSheet,   media::kBytes); break;
     case Scene::Checker:     memcpy(b, navlab::kBmpChecker,     media::kBytes); break;
+    case Scene::EyesStill:   memcpy(b, navlab::kBmpEyes,        media::kBytes); break;
+    case Scene::EyesLeft:    memcpy(b, navlab::kBmpEyesLeft,    media::kBytes); break;
+    case Scene::EyesBlink:   memcpy(b, navlab::kBmpEyesBlink,   media::kBytes); break;
+    case Scene::EyesHappy:   memcpy(b, navlab::kBmpEyesHappy,   media::kBytes); break;
     default: media::clear(b); break;
   }
 }
@@ -419,18 +471,13 @@ inline bool mainLineIsOurs() {
          s == affa::RenderSlot::Clock;
 }
 
-// THE SAME QUESTION FOR THE INFO ROWS, and it is a separate function because the answer is
-// NOT `mainLineIsOurs()` and it is not its negation either.
+// THE SAME QUESTION FOR THE INFO ROWS, and the answer is NOT mainLineIsOurs() nor its
+// negation. The rows own the glass when nothing a user DELIBERATELY OPENED is on it.
+// InfoPopup counts as theirs (their own render must not stop them scrolling); Menu,
+// Highlight, Popup, Fullscreen and ConfirmBox do not.
 //
-// The row tick used to be gated on `!mainLineIsOurs()`, which is backwards in both
-// directions and shipped that way: with a MENU on the glass the rows woke up and repainted
-// over it every 700 ms — the "menu hides itself immediately" report — and once they had, the
-// slot read InfoPopup, still "not the main line", so the loop never stopped. With TEXT on
-// the glass they never ticked at all, so a row with scroll enabled sat still.
-//
-// The rows own the glass when nothing a user deliberately opened is on it. InfoPopup is in
-// the list because the rows' own render must not stop them scrolling; Menu, Highlight,
-// Popup, Fullscreen and ConfirmBox are out because those are screens somebody asked for.
+// Gated on !mainLineIsOurs() it was backwards both ways and shipped: a menu got repainted
+// over every 700 ms, and a plain text line never ticked at all.
 inline bool rowsAreOurs() {
   const affa::RenderSlot s = g_base->lastRendered();
   return s == affa::RenderSlot::None || s == affa::RenderSlot::Text ||
@@ -547,18 +594,10 @@ Cmd dispatch(PsychicRequest* r) {
 
   // ---- the main line ------------------------------------------------------
   //
-  // AN EXPLICIT SET TEXT TAKES THE LINE BACK, whatever is on the glass. Until 2026-08-06
-  // this op only updated the variables and returned ok, leaving the actual send to loop()'s
-  // mainLineIsOurs() gate — so after a fullscreen, a menu or a box, SET TEXT reported
-  // SUCCESS AND DID NOTHING, for ever, because the hold defaults to never. Measured on the
-  // bench: `op=fullscreen` then `op=text` -> {"ok":true} with owner still "screen" and
-  // lastRendered() still Fullscreen.
-  //
-  // The repaint gate exists to stop a scroll TICK from repainting over a screen somebody is
-  // reading. It was never meant to stop a person who typed a line and pressed the button,
-  // and a console whose one rule is "every press reports its own result" cannot answer ok
-  // for a frame it never sent. This is also why the panel needs no hideFullscreenText():
-  // the override IS the close.
+  // AN EXPLICIT SET TEXT TAKES THE LINE BACK, whatever is on the glass. This op used to
+  // leave the send to loop()'s repaint gate, so after a fullscreen or a menu it reported
+  // SUCCESS AND SENT NOTHING, for ever. The gate exists to stop a scroll TICK painting over
+  // a screen somebody is reading — never to stop a person who pressed the button.
   if (op == "text") {
     if (r->hasParam("t")) { snprintf(g_main.text, sizeof(g_main.text), "%s", S("t","").c_str());
                             g_main.reset(); }
@@ -715,32 +754,66 @@ Cmd dispatch(PsychicRequest* r) {
     saveSettings();
     return kOk;
   }
+  // What the LAST builder actually produced, as one payload — the thing to copy, edit and
+  // send back through op=raw.
+  if (op == "lasttx") {
+    if (!g_lastTxLen) return fail("nothing sent yet");
+    static char msg[3 * kOvrMax + 24];
+    int k = snprintf(msg, sizeof(msg), "%03X ", g_lastTxId);
+    for (uint16_t i = 0; i < g_lastTxLen && k < static_cast<int>(sizeof(msg)) - 4; ++i)
+      k += snprintf(msg + k, sizeof(msg) - k, "%02X ", g_lastTx[i]);
+    return Cmd{true, msg};
+  }
+
   if (op == "navtick") {
     if (!g_carminat) return fail("Carminat only");
     return fromResult(g_carminat->navTick(N("n",0) != 0));
   }
 
+  // OVERRIDE — send bytes you typed, on any function id.
+  //
+  //   op=raw&id=0x151&b=10 0E 77 55 55 FF 60 01 52 45 ...
+  //
+  // Straight to enqueue(), the choke point every builder uses, so segmentation, retries and
+  // the ACK verdict are the ordinary ones — the only thing that differs is who chose the
+  // bytes. `id` defaults to the family text id; separators in `b` are ignored.
+  if (op == "raw") {
+    if (!g_base) return fail("no panel");
+    uint8_t  buf[kOvrMax];
+    uint16_t n = 0;
+    const String hex = S("b", "");
+    const char* p = hex.c_str();
+    while (*p && n < kOvrMax) {
+      while (*p && !isxdigit(static_cast<unsigned char>(*p))) ++p;
+      if (!*p) break;
+      char* end = nullptr;
+      const long v = strtol(p, &end, 16);
+      if (end == p) break;
+      buf[n++] = static_cast<uint8_t>(v & 0xFF);
+      p = end;
+    }
+    if (!n) return fail("no bytes");
+    const uint16_t id = static_cast<uint16_t>(N("id", g_family == Family::Carminat
+                                                    ? affa::carminat::kIdSetText
+                                                    : affa::updatelist::kIdSetText));
+    // Logged BEFORE the verdict, because the verdict is the least interesting part: a
+    // refusal still tells you what you asked for.
+    logHex("raw", id, buf, n);
+    return fromResult(g_base->enqueue(id, buf, static_cast<uint8_t>(n)));
+  }
+
   // THE NAV HEADER SWEEP — fourteen bytes, ten of them unmeasured.
   //
-  // showNavBitmap() welded all fourteen into the builder, which is the same defect the list
-  // screen's gutter glyph and scrollbar had: a capability that does not exist as far as this
-  // library is concerned, because the byte that selects it is unreachable.
+  //   op=navhdr                    the captured header (the baseline)
+  //   op=navhdr&b3=0x2E            with byte [3] changed
   //
-  // WHY IT IS DRIVEN BY HAND, one step at a time. A scripted sweep is the obvious idea and it
-  // does not work here: the panel ACKs a screen it never lights, so 256 automated steps
-  // produce 256 rows of "ok" and no information. THE ORACLE IS A HUMAN LOOKING AT GLASS. So
-  // the console sends one value and logs exactly what went out; the operator supplies the one
-  // bit no machine on this bus has.
+  // ONE BYTE AT A TIME: three co-varying captures are what produced the "one icon field"
+  // misreading the list sweep took apart. There is no scripted sweep because the panel ACKs
+  // a screen it never lights — 256 steps would give 256 rows of ok and no information, so
+  // the console logs what went out and the operator supplies the verdict.
   //
-  //   op=navhdr                    send the captured header (the baseline)
-  //   op=navhdr&b3=0x2E            send it with byte [3] changed
-  //   op=navhdr&b3=0x2E&b11=0x02   …or several at once, though ONE AT A TIME is the rule:
-  //                                three co-varying captures are what produced the "one icon
-  //                                field" misreading the list sweep took apart.
-  //
-  // [12] and [13] are the geometry and are refused: the declared ISO-TP length is computed
-  // from the 288-byte image, so a header claiming a different size describes a payload that
-  // is not there.
+  // [12] and [13] are refused: the declared ISO-TP length comes from the 288-byte image, so
+  // a header claiming another size describes a payload that is not there.
   if (op == "navhdr") {
     if (!g_carminat) return fail("Carminat only");
     uint8_t hdr[sizeof(affa::carminat::kNavHeader)];
@@ -778,16 +851,9 @@ Cmd dispatch(PsychicRequest* r) {
     g_wantReboot = true;
     return Cmd{true, "stored - rebooting into that family"};
   }
-  // WRITE the STA credentials. startWifi() reads NVS `megaopen`/`ssid`/`pass` and this
-  // console had no way to WRITE them, so moving the board between networks meant a reflash
-  // — the one iteration loop this example exists to protect.
-  //
-  // A WRONG PASSWORD IS NOT A BRICK: startWifi() waits kStaJoinMs and then brings up the
-  // SoftAP, so a failed join lands back on AffaMedia / 192.168.4.1 with OTA intact. That is
-  // the whole reason this is safe to expose.
-  //
-  // With no `ssid` param it REPORTS instead of writing, and reports the SSID only — a stored
-  // password has no business coming back out over an open AP.
+  // WRITE the STA credentials — without this, moving the board between networks means a
+  // reflash. A wrong password is NOT a brick: the join is bounded and the SoftAP comes up
+  // behind it with OTA intact. With no `ssid` param it REPORTS, and reports the SSID only.
   if (op == "wifi") {
     if (!r->hasParam("ssid")) {
       String s;
@@ -890,19 +956,14 @@ void routes() {
     String j("{");
     j += "\"family\":\"";  j += (g_family == Family::Carminat) ? "carminat" : "updatelist"; j += "\"";
     j += ",\"phase\":\"";  j += affa::phaseName(g_base->phase()); j += "\"";
-    // THE FOUR NUMBERS THAT SAY WHY IT BROKE, not merely that it did. Every one is COUNTED
-    // rather than sampled, so a fault that lasted 300 ms an hour ago is still visible.
-    //
-    //   lost/why      the panel taking the session away — invisible for a whole 96-minute
-    //                 soak once, because nothing counted it
-    //   posted        renders from another task waiting to be admitted; a number that never
-    //                 falls means the poll task is stuck
-    //   dropped       …and ones refused because the ring was full
-    //   foreign       poll() called by a task that does not own it — should be 0 for ever
-    //   cbworst/cbms  WHICH callback blocked the poll task, and for how long. `cbat` is when:
-    //                 a peak at boot is WiFi associating, a peak that keeps moving is a
-    //                 callback that blocks every time, and without the timestamp they are
-    //                 the same number.
+    // FOUR COUNTERS THAT SAY WHY IT BROKE, not merely that it did. All counted, never
+    // sampled, so a 300 ms fault an hour ago is still visible.
+    //   lost/why      the panel taking the session away
+    //   posted/dropped renders from other tasks waiting, and ones the ring refused
+    //   foreign       poll() called by a task that does not own it — 0 for ever
+    //   cbworst/cbms/cbat  WHICH callback blocked the poll task, how long, and WHEN. A
+    //                 peak at boot is WiFi associating; a peak that keeps moving is a
+    //                 callback that blocks every time. Without cbat they read alike.
     {
       const affa::rtos::Status st = g_task.status();
       j += ",\"lost\":";     j += st.sessionsLost;

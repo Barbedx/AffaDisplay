@@ -106,6 +106,12 @@ th{color:var(--dim);font-weight:normal}
       <button onclick="img('fontsheet')">font</button>
       <button onclick="img('checker')">checker</button>
     </div>
+    <div class="r">
+      <button onclick="img('eyesstill')">eyes</button>
+      <button onclick="img('eyesleft')">eyes left</button>
+      <button onclick="img('eyesblink')">eyes shut</button>
+      <button onclick="img('eyeshappy')">eyes happy</button>
+    </div>
     <p><small>
       Goes <b>straight to the glass</b> and into the editor, same as the animation buttons
       below &mdash; the image lives in device flash, so this costs one command, not a 288-byte
@@ -473,7 +479,27 @@ th{color:var(--dim);font-weight:normal}
 
 <main id="p-wire" class="hide">
   <section style="flex:1;min-width:360px">
-    <h2>Every frame, both directions</h2>
+    <h2>Override &mdash; the payload, not the frames</h2>
+    <div class="r">
+      <small>id</small><input id="rid" size="6" value="0x151">
+      <button onclick="ovrLast()">load last TX</button>
+      <button class="p" onclick="ovrSend()">SEND THESE BYTES</button>
+      <span id="rn" class="k"></span>
+    </div>
+    <div class="r"><textarea id="rb" rows="4" style="width:100%;font:inherit"
+      placeholder="10 0E 77 55 55 FF 60 01 52 45 4E 41 55 4C 54" oninput="ovrCount()"></textarea></div>
+    <p><small>
+      Goes straight to <span class="k">enqueue()</span> &mdash; the same choke point every builder
+      uses &mdash; so segmentation, flow control, retries and the ACK verdict are the ordinary
+      ones. <b>The only thing that differs is who chose the bytes.</b>
+      <br><br>
+      <b>load last TX</b> fills this with the last complete payload the library built,
+      reassembled from our own frames. Edit a byte, send it back, watch the glass. Separators
+      are ignored, so a line pasted out of the log below or out of <span class="k">docs/WIRE.md</span>
+      goes in as it stands.
+    </small></p>
+
+    <h2 style="margin-top:15px">Every frame, both directions</h2>
     <div class="r">
       <button onclick="cmd('tap',{all:0})">hide nav continuations</button>
       <button onclick="cmd('tap',{all:1})">show everything</button>
@@ -822,6 +848,36 @@ function nhNote() {
   var r = tb.insertRow(0);
   r.insertCell(0).innerHTML = '<span class="k">' + el('nhpv').textContent.split('—')[0].trim() + '</span>';
   r.insertCell(1).textContent = what;
+}
+
+// ---------------------------------------------------------------------------
+// Override
+// ---------------------------------------------------------------------------
+// The byte count is shown live because "did my paste survive" is the first question, and
+// counting hex pairs by eye on a 304-byte nav screen is not a thing anyone does twice.
+function ovrBytes() {
+  var m = el("rb").value.match(/[0-9a-fA-F]{1,2}/g) || [];
+  return m.filter(function (t) { return t.length <= 2; });
+}
+function ovrCount() {
+  var n = ovrBytes().length;
+  el("rn").textContent = n ? n + " bytes" : "";
+}
+function ovrSend() {
+  var b = ovrBytes();
+  if (!b.length) { say(false, "no bytes"); return; }
+  cmd("raw", { id: el("rid").value, b: b.join(" ") });
+}
+// The reply is "&lt;id&gt; &lt;bytes...&gt;", so the id goes to its own field and the rest to the
+// editor — paste-ready in one press rather than two.
+function ovrLast() {
+  cmd("lasttx").then(function (j) {
+    if (!j || !j.ok) return;
+    var p = String(j.msg).trim().split(/s+/);
+    el("rid").value = "0x" + p.shift();
+    el("rb").value = p.join(" ");
+    ovrCount();
+  });
 }
 
 function sty() { return { i0: el('ms0').value, i1: el('ms1').value }; }

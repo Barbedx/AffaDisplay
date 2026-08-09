@@ -159,6 +159,8 @@ const Scene kScenes[] = {
   { "tryzub",  navlab::kBmpTryzub,  nullptr },
   { "renault", navlab::kBmpRenault, nullptr },
   { "gauges",  navlab::kBmpGauges,  nullptr },
+  { "eyesstill", navlab::kBmpEyes,      nullptr },
+  { "eyeshappy", navlab::kBmpEyesHappy, nullptr },
   { "clock",   nullptr, [](uint8_t* b) { media::drawClockFace(b, ::millis() / 1000); } },
   { "rings",   nullptr, [](uint8_t* b) { media::drawRings(b, g_sceneFrame); } },
   // The face. It belongs on THIS example more than on the demo: an AI that tells you an
