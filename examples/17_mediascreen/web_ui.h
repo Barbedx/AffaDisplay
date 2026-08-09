@@ -145,30 +145,6 @@ th{color:var(--dim);font-weight:normal}
       glass &mdash; no command to erase this pane is known; <b>blank</b> sends 288 zero bytes.
     </small></p>
 
-    <h2 style="margin-top:15px">Nav header &mdash; 14 bytes, ten of them unmeasured</h2>
-    <div class="r" id="nhrow"></div>
-    <div class="r">
-      <button onclick="nhSend()">SEND with these bytes</button>
-      <button onclick="nhReset()">restore captured</button>
-      <button onclick="nhNote()">log what I saw</button>
-    </div>
-    <div class="r"><b>wire:</b>&nbsp;<span id="nhpv" class="k"></span></div>
-    <table id="nht"><thead><tr><th>header</th><th>on the glass</th></tr></thead><tbody></tbody></table>
-    <p><small>
-      Sends the picture currently in the editor with a header you choose. Bytes
-      <span class="k">[12] [13]</span> are the geometry and are <b>locked</b>: the declared
-      ISO-TP length is computed from the 288-byte image, so a header claiming another size
-      describes a payload that is not there.
-      <br><br>
-      <b>Sweep one byte at a time.</b> Three captures where two bytes moved together are what
-      produced the &ldquo;one icon field&rdquo; misreading on the list screen &mdash; co-varying
-      samples are not a field.
-      <br><br>
-      <b>There is no automated sweep and there will not be one.</b> The panel ACKs a screen it
-      never lights, so 256 scripted steps give 256 rows of <i>ok</i> and no information. The
-      oracle is you, looking at the glass. <b>log what I saw</b> writes the header you just
-      sent next to your own words, and <b>export</b> on the Wire tab takes the table with it.
-    </small></p>
   </section>
 </main>
 
@@ -483,9 +459,18 @@ th{color:var(--dim);font-weight:normal}
     <div class="r">
       <small>id</small><input id="rid" size="6" value="0x151">
       <button onclick="ovrLast()">load last TX</button>
+      <button onclick="ovrOem()">load OEM nav menu</button>
       <button class="p" onclick="ovrSend()">SEND THESE BYTES</button>
       <span id="rn" class="k"></span>
     </div>
+    <div class="r">
+      <small>byte</small><input id="rix" size="3" value="3">
+      <button onclick="ovrStep(-1)">&minus;1</button>
+      <button onclick="ovrStep(1)">+1</button>
+      <button onclick="ovrNote()">log what I saw</button>
+      <span id="rd" class="k"></span>
+    </div>
+    <table id="rt"><thead><tr><th>payload</th><th>on the glass</th></tr></thead><tbody></tbody></table>
     <div class="r"><textarea id="rb" rows="4" style="width:100%;font:inherit"
       placeholder="10 0E 77 55 55 FF 60 01 52 45 4E 41 55 4C 54" oninput="ovrCount()"></textarea></div>
     <p><small>
@@ -494,9 +479,21 @@ th{color:var(--dim);font-weight:normal}
       ones. <b>The only thing that differs is who chose the bytes.</b>
       <br><br>
       <b>load last TX</b> fills this with the last complete payload the library built,
-      reassembled from our own frames. Edit a byte, send it back, watch the glass. Separators
-      are ignored, so a line pasted out of the log below or out of <span class="k">docs/WIRE.md</span>
-      goes in as it stands.
+      reassembled from our own frames &mdash; including a 304-byte nav screen, whose first
+      fourteen bytes are the header and ten of those are unmeasured. <b>load OEM nav menu</b>
+      loads the 200 captured bytes that drew a pictogram on a real car: the control, so a
+      builder change can be told apart from a panel that stopped accepting one.
+      <br><br>
+      <b>Step ONE byte at a time.</b> The diff line names what moved and shouts when more than
+      one did &mdash; three captures where two bytes moved together are what produced the
+      &ldquo;one icon field&rdquo; misreading on the list screen. Co-varying samples are not a
+      field.
+      <br><br>
+      <b>There is no automated sweep and there will not be one.</b> The panel ACKs a screen it
+      never lights, so 256 scripted steps give 256 rows of <i>ok</i> and no information. The
+      oracle is you, looking at the glass; <b>log what I saw</b> puts your sentence next to the
+      bytes that produced it. Separators are ignored, so a line pasted out of the log or out
+      of <span class="k">docs/WIRE.md</span> goes in as it stands.
     </small></p>
 
     <h2 style="margin-top:15px">Every frame, both directions</h2>
@@ -777,78 +774,6 @@ var WORDS = ['ROUTE CALCULATED', 'NAVIGATION READY', 'TRAFFIC AHEAD', 'DESTINATI
 function pick() { return WORDS[Math.floor(Math.random() * WORDS.length)]; }
 function randomFull() { cmd('fullscreen', { a: pick(), b: pick(), c: pick() }); }
 
-// ---- menus -----------------------------------------------------------------
-// TWO FIELDS, EDITED IN ONE PLACE AND SENT BY AN EXPLICIT PRESS. `ms0` is the glyph index at
-// payload [3], `ms1` the scrollbar thumb at [4] — unrelated to each other, and the reason
-// they sit together is that they are the two bytes this screen still had no UI for.
-//
-// Nothing is on a timer: an earlier version swept [4] and pulsed bit 7 on setInterval, so the
-// glass changed while you were still reading it and no press mapped to one screen.
-//
-// Sent as text, because the dispatcher parses with strtol base 0 — `0x14` and `20` both
-// arrive as 20, so a hand-typed byte works in either notation.
-// ---------------------------------------------------------------------------
-// The nav header sweep
-// ---------------------------------------------------------------------------
-// FOURTEEN CELLS, BUILT BY A LOOP rather than written out. Fourteen hand-written input rows
-// is where a UI starts disagreeing with itself: one cell gets a step button the others do
-// not, one preset forgets to refresh the preview. There is one cell template, so there is
-// one behaviour.
-//
-// The captured header, from carminat::kNavHeader. [4..10] held "ABCDEF\0" in the OEM capture
-// and are CONFIRMED NOT TO BE TEXT — ASCII written there puts nothing on the glass — which
-// is exactly the kind of thing worth stepping through here.
-var NH_CAP = [0x21, 0x0B, 0x00, 0x25, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x00, 0x01, 48, 48];
-var NH_WHAT = ['cmd', 'screen', '?', '?', '?', '?', '?', '?', '?', '?', '?', 'fmt?', 'w', 'h'];
-var nh = NH_CAP.slice();
-
-function nhBuild() {
-  var h = '';
-  for (var i = 0; i < 14; ++i) {
-    var lock = i >= 12;                            // geometry: shown, never sent
-    h += '<span style="display:inline-block;text-align:center;margin:0 1px">'
-       + '<small>[' + i + '] ' + NH_WHAT[i] + '</small><br>'
-       + (lock ? '' : '<button onclick="nhStep(' + i + ',-1)">&minus;</button>')
-       + '<input id="nh' + i + '" size="3" oninput="nhSync()"' + (lock ? ' disabled' : '') + '>'
-       + (lock ? '' : '<button onclick="nhStep(' + i + ',1)">+</button>')
-       + '</span>';
-  }
-  el('nhrow').innerHTML = h;
-  nhPut();
-}
-function nhPut() { for (var i = 0; i < 14; ++i) el('nh' + i).value = hx(nh[i]); nhSync(); }
-function nhGet(i) { return parseInt(el('nh' + i).value, 16) & 255; }
-function nhStep(i, d) { el('nh' + i).value = hx((nhGet(i) + d) & 255); nhSync(); }
-function nhReset() { nh = NH_CAP.slice(); nhPut(); }
-
-// THE WIRE, BEFORE IT GOES OUT, and the differences called out by name. Seeing "[3] 25->2E"
-// is what stops a sweep from drifting into two changed bytes without noticing.
-function nhSync() {
-  var s = '', diff = [];
-  for (var i = 0; i < 14; ++i) {
-    var v = i >= 12 ? NH_CAP[i] : nhGet(i);
-    s += hx(v).slice(2) + ' ';
-    if (v !== NH_CAP[i]) diff.push('[' + i + '] ' + hx(NH_CAP[i]).slice(2) + '→' + hx(v).slice(2));
-  }
-  el('nhpv').textContent = s + (diff.length ? '   — ' + diff.join(', ')
-                                            + (diff.length > 1 ? '   (MORE THAN ONE BYTE MOVED)' : '')
-                                            : '   — as captured');
-}
-function nhSend() {
-  var p = {};
-  for (var i = 0; i < 12; ++i) if (nhGet(i) !== NH_CAP[i]) p['b' + i] = hx(nhGet(i));
-  cmd('navhdr', p);
-}
-// The human half of the loop. The panel cannot tell us what it drew, so the row is only
-// worth anything with a person's sentence attached to it.
-function nhNote() {
-  var what = prompt('What did the glass do?');
-  if (what === null) return;
-  var tb = el('nht').getElementsByTagName('tbody')[0];
-  var r = tb.insertRow(0);
-  r.insertCell(0).innerHTML = '<span class="k">' + el('nhpv').textContent.split('—')[0].trim() + '</span>';
-  r.insertCell(1).textContent = what;
-}
 
 // ---------------------------------------------------------------------------
 // Override
@@ -862,11 +787,64 @@ function ovrBytes() {
 function ovrCount() {
   var n = ovrBytes().length;
   el("rn").textContent = n ? n + " bytes" : "";
+  ovrDiff();
 }
+// STEP ONE BYTE, and the diff line is the guard: three captures where two bytes moved
+// together are what produced the "one icon field" misreading on the list screen.
+// Co-varying samples are not a field.
+var OVR_BASE = [];
+function ovrStep(d) {
+  var b = ovrBytes(), i = parseInt(el("rix").value, 10);
+  if (!b.length || !(i >= 0 && i < b.length)) { say(false, "byte out of range"); return; }
+  b[i] = hx((parseInt(b[i], 16) + d) & 255).slice(2);
+  el("rb").value = b.join(" ");
+  ovrCount();
+}
+// What CHANGED since the payload was loaded, named byte by byte — and it shouts when more
+// than one moved, because that is the mistake, not the typo.
+function ovrDiff() {
+  var b = ovrBytes(), out = [];
+  for (var i = 0; i < b.length && i < OVR_BASE.length; ++i)
+    if (b[i].toUpperCase() !== OVR_BASE[i].toUpperCase())
+      out.push("[" + i + "] " + OVR_BASE[i] + "→" + b[i]);
+  el("rd").textContent = out.length
+    ? out.join(", ") + (out.length > 1 ? "   (MORE THAN ONE BYTE MOVED)" : "")
+    : (OVR_BASE.length ? "as loaded" : "");
+}
+// The OEM Navigation menu, as the CONTROL: if the book still draws from these 200 bytes,
+// a builder change moved and not the panel.
+function ovrOem() { ovrFill("oemhex"); }
+function ovrFill(op) {
+  cmd(op).then(function (j) {
+    if (!j || !j.ok) return;
+    var p = String(j.msg).trim().split(/s+/);
+    el("rid").value = "0x" + p.shift();
+    el("rb").value = p.join(" ");
+    OVR_BASE = p.slice();
+    ovrCount();
+  });
+}
+// The panel ACKs a screen it never lights, so no script can read this back. The oracle is
+// you, and this is where your sentence goes next to the bytes that produced it.
+function ovrNote() {
+  var what = prompt("What did the glass do?");
+  if (what === null) return;
+  var tb = el("rt").getElementsByTagName("tbody")[0], r = tb.insertRow(0);
+  r.insertCell(0).innerHTML = '<span class="k">' + ovrBytes().join(" ").slice(0, 96) + '</span>';
+  r.insertCell(1).textContent = what;
+}
+
+// POSTS the bytes. 200 bytes of hex is 600 characters and esp_http_server caps a URI at
+// 512, so the OEM control could not go out through a query string at all — it failed with a
+// server error page the dispatcher never saw.
 function ovrSend() {
   var b = ovrBytes();
   if (!b.length) { say(false, "no bytes"); return; }
-  cmd("raw", { id: el("rid").value, b: b.join(" ") });
+  fetch("/api/cmd?op=raw&id=" + encodeURIComponent(el("rid").value),
+        { method: "POST", body: b.join(" ") })
+    .then(function (r) { return r.json(); })
+    .then(function (j) { say(j.ok, "raw: " + j.msg); poll(); })
+    .catch(function (e) { say(false, String(e)); });
 }
 // The reply is "&lt;id&gt; &lt;bytes...&gt;", so the id goes to its own field and the rest to the
 // editor — paste-ready in one press rather than two.
@@ -1137,7 +1115,6 @@ function poll() {
 load('tryzub');
 cLabels();
 stySync();
-nhBuild();
 iconChips();
 poll();
 setInterval(poll, 1500);

@@ -229,6 +229,8 @@ constexpr uint16_t kOvrMax = 320;   // one nav screen is 304; nothing this conso
 uint8_t  g_lastTx[kOvrMax];
 uint16_t g_lastTxLen = 0;
 uint16_t g_lastTxId  = 0;
+volatile bool  g_rawBusy = false;      // an override past 113 bytes is BORROWED until done
+affa::TxTicket g_rawTicket = affa::kNoTicket;
 uint8_t  g_asm[kOvrMax];       // in progress
 uint16_t g_asmLen = 0, g_asmId = 0, g_asmWant = 0;
 
@@ -419,6 +421,7 @@ void pushFrame() {
 
 void onDone(affa::TxTicket t, affa::Result r, void*) {
   if (t == g_menuTicket) { g_menuBusy = false; g_menuTicket = affa::kNoTicket; }
+  if (t == g_rawTicket)  { g_rawBusy  = false; g_rawTicket  = affa::kNoTicket; }
   if (t != g_navTicket) return;
   g_navBusy = false;
   if (r == affa::Result::Ok) { ++g_ok; g_txMs += ::millis() - g_frameStart; }
@@ -642,26 +645,16 @@ Cmd dispatch(PsychicRequest* r) {
     if (!g_carminat) return fail("Carminat only");
     return fromResult(g_carminat->selectMenuItem(static_cast<uint8_t>(N("n",0))));
   }
-
-  // The OEM's Navigation menu replayed verbatim — the bytes that drew a pictogram on a real
-  // car. `s0`/`s1`/`sel` patch three bytes of the copy; everything else stays as captured.
-  // Borrowed like every other long payload here: the buffer must outlive the ticket, so it
-  // shares g_menuBuf's busy flag rather than inventing a second one.
-  if (op == "oem") {
-    if (!g_carminat) return fail("Carminat only");
-    if (g_menuBusy)  return fail("busy: the menu buffer is still lent out");
-    static_assert(sizeof(g_menuBuf) >= kOemNavBytes, "g_menuBuf holds the OEM screen");
-    memcpy(g_menuBuf, kOemNavMenu, kOemNavBytes);
-    g_menuBuf[kOemAtSel] = static_cast<uint8_t>(N("sel", kOemNavMenu[kOemAtSel]));
-    g_menuBuf[kOemAtI0]  = static_cast<uint8_t>(N("i0",  kOemNavMenu[kOemAtI0]));
-    g_menuBuf[kOemAtI1]  = static_cast<uint8_t>(N("i1",  kOemNavMenu[kOemAtI1]));
-    affa::TxOptions opt;
-    const affa::Submitted oem =
-        g_base->enqueueExternal(affa::carminat::kIdSetText, g_menuBuf, kOemNavBytes, opt);
-    if (!oem) return fail("refused");
-    g_menuTicket = oem.ticket;
-    g_menuBusy = true;
-    return kOk;
+  // The OEM Navigation menu, as HEX into the override editor rather than as a second send
+  // path. It is the CONTROL — press it and if the book still draws, a builder change moved,
+  // not the panel — and a control is worth more when it goes out through exactly the same
+  // enqueue() as everything else.
+  if (op == "oemhex") {
+    static char msg[3 * kOemNavBytes + 8];
+    int k = snprintf(msg, sizeof(msg), "151 ");
+    for (uint16_t i = 0; i < kOemNavBytes && k < static_cast<int>(sizeof(msg)) - 4; ++i)
+      k += snprintf(msg + k, sizeof(msg) - k, "%02X ", kOemNavMenu[i]);
+    return Cmd{true, msg};
   }
 
   // ---- info menu ----------------------------------------------------------
@@ -779,9 +772,16 @@ Cmd dispatch(PsychicRequest* r) {
   // bytes. `id` defaults to the family text id; separators in `b` are ignored.
   if (op == "raw") {
     if (!g_base) return fail("no panel");
-    uint8_t  buf[kOvrMax];
+    if (g_rawBusy) return fail("busy: the last override is still lent out");
+    // STATIC, not a stack buffer: anything past AFFA_MAX_PAYLOAD goes out through
+    // enqueueExternal(), which BORROWS the pointer until the ticket completes.
+    static uint8_t buf[kOvrMax];
     uint16_t n = 0;
-    const String hex = S("b", "");
+    // BODY FIRST, QUERY SECOND. 200 bytes of hex is 600 characters and esp_http_server
+    // caps a URI at 512 — the OEM control simply would not fit, and the failure is a server
+    // error page rather than anything this dispatcher could report. A POST body has no such
+    // ceiling, so the console posts and the address bar still works for short payloads.
+    const String hex = r->body().length() ? r->body() : S("b", "");
     const char* p = hex.c_str();
     while (*p && n < kOvrMax) {
       while (*p && !isxdigit(static_cast<unsigned char>(*p))) ++p;
@@ -799,39 +799,17 @@ Cmd dispatch(PsychicRequest* r) {
     // Logged BEFORE the verdict, because the verdict is the least interesting part: a
     // refusal still tells you what you asked for.
     logHex("raw", id, buf, n);
-    return fromResult(g_base->enqueue(id, buf, static_cast<uint8_t>(n)));
-  }
 
-  // THE NAV HEADER SWEEP — fourteen bytes, ten of them unmeasured.
-  //
-  //   op=navhdr                    the captured header (the baseline)
-  //   op=navhdr&b3=0x2E            with byte [3] changed
-  //
-  // ONE BYTE AT A TIME: three co-varying captures are what produced the "one icon field"
-  // misreading the list sweep took apart. There is no scripted sweep because the panel ACKs
-  // a screen it never lights — 256 steps would give 256 rows of ok and no information, so
-  // the console logs what went out and the operator supplies the verdict.
-  //
-  // [12] and [13] are refused: the declared ISO-TP length comes from the 288-byte image, so
-  // a header claiming another size describes a payload that is not there.
-  if (op == "navhdr") {
-    if (!g_carminat) return fail("Carminat only");
-    uint8_t hdr[sizeof(affa::carminat::kNavHeader)];
-    memcpy(hdr, affa::carminat::kNavHeader, sizeof(hdr));
-    for (uint8_t i = 0; i < sizeof(hdr) - 2; ++i) {     // 0..11; the geometry is fixed
-      char key[6];
-      snprintf(key, sizeof(key), "b%u", i);
-      if (r->hasParam(key)) hdr[i] = static_cast<uint8_t>(N(key, hdr[i]));
-    }
-    const affa::Submitted s =
-        g_carminat->showNavBitmapWithHeader(hdr, g_frame[g_drawInto ^ 1]);
-    // LOG THE BYTES, NOT THE VERDICT. "ok" is what the panel says about every one of these;
-    // what a sweep needs afterwards is which fourteen bytes produced which glass, in a form
-    // that pastes next to docs/captures/*.csv.
-    logmsg("navhdr %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
-           hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5], hdr[6],
-           hdr[7], hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13]);
-    return fromResult(s);
+    // WHICH ENQUEUE IS A LENGTH QUESTION, and the library is explicit about it: inline slots
+    // are AFFA_MAX_PAYLOAD (113) and a nav screen is 304. Past the ceiling the payload is
+    // BORROWED, so the buffer must stay put and unchanged until onDone releases it.
+    if (n <= AFFA_MAX_PAYLOAD)
+      return fromResult(g_base->enqueue(id, buf, static_cast<uint8_t>(n)));
+    const affa::Submitted s = g_base->enqueueExternal(id, buf, n);
+    if (!s) return fromResult(s);
+    g_rawTicket = s.ticket;
+    g_rawBusy   = true;
+    return kOk;
   }
   if (op == "opening") { g_open.done = false; g_open.step = 0; g_open.nextMs = ::millis();
                          return kOk; }
@@ -887,16 +865,7 @@ Cmd dispatch(PsychicRequest* r) {
 #include "web_ui.h"
 
 // ---------------------------------------------------------------------------
-void routes() {
-  g_server.on("/", HTTP_GET, [](PsychicRequest* r) {
-    PsychicResponse res(r);
-    res.setContentType("text/html; charset=utf-8");
-    res.setContent(kIndexHtml);
-    return res.send();
-  });
-
-  // ONE ROUTE. Every action, one result shape, and the console shows the answer for each.
-  g_server.on("/api/cmd", HTTP_GET, [](PsychicRequest* r) {
+esp_err_t cmdReply(PsychicRequest* r) {
     const String op = r->hasParam("op") ? r->getParam("op")->value() : String();
     const Cmd c = dispatch(r);
     logmsg("%s -> %s", op.c_str(), c.ok ? "ok" : c.msg);
@@ -912,7 +881,21 @@ void routes() {
     // business — `wifi` can be asked not to — and the list had already been forgotten once.
     if (g_wantReboot) { g_wantReboot = false; delay(250); ESP.restart(); }
     return e;
+}
+
+void routes() {
+  g_server.on("/", HTTP_GET, [](PsychicRequest* r) {
+    PsychicResponse res(r);
+    res.setContentType("text/html; charset=utf-8");
+    res.setContent(kIndexHtml);
+    return res.send();
   });
+
+  // ONE ROUTE. Every action, one result shape, and the console shows the answer for each.
+  // GET and POST on the same route: everything works from an address bar, and the one op
+  // that can exceed a 512-byte URI (raw) reads its bytes from the body instead.
+  g_server.on("/api/cmd", HTTP_GET,  [](PsychicRequest* r) { return cmdReply(r); });
+  g_server.on("/api/cmd", HTTP_POST, [](PsychicRequest* r) { return cmdReply(r); });
 
   // The editor's bitmap: 288 bytes as hex is 576 characters, past what a query string can
   // carry safely, so it is a POST body.
