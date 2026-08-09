@@ -182,6 +182,7 @@ content feed from anything that can compose a document.
 | [`docs/API.md`](docs/API.md) | The contracts: threading, `Result`, latency, capabilities. It does **not** copy declarations — the headers are the declarations. |
 | [`docs/NOTES.md`](docs/NOTES.md) | What we do **not** know, how this project has got things wrong eight times running, and the incidents behind the threading model. |
 | [`docs/BENCH-VERIFIED.md`](docs/BENCH-VERIFIED.md) | What a human looked at on real glass. |
+| [`HANDOFF.md`](HANDOFF.md) | **Start here if you are picking this up.** The bench rig, what is proven and what is not, where silence is dangerous, and the traps that have each cost hours. |
 
 ```
 pio test -e native      # 31 cases, no hardware

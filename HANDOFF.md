@@ -1,0 +1,154 @@
+# Handoff — 2026-08-09, v2.0.0
+
+For whoever takes this into implementation. Everything here is checkable; where it is not,
+it says so.
+
+---
+
+## What this is
+
+An ESP32 CAN driver for Renault **AFFA2 / AFFA3** dash panels. It speaks the protocol —
+handshake, ISO-TP, registration, heartbeat, key decode and ACK, and the frame builders for
+every screen the panel has. **It is not a UI.** Widgets were deleted in 2.0; what a gesture
+means is yours.
+
+```
+pio test -e native                          31 cases, ~3 s, no hardware
+pio run -e ex17_mediascreen -t upload       the console
+node tools/gen_wire_doc.js --check          fails if docs/WIRE.md drifted
+node tools/check_web_ui.js                  fails on broken console JS
+```
+
+Four envs: `native`, `ex03_hello`, `ex17_mediascreen`, `ex18_aiscreen`.
+
+## The bench rig
+
+**THE IP MOVES. Find the board by MAC, never by a remembered address.** On 2026-08-09 it
+was `192.168.100.97`, STA MAC `ec:e3:34:b3:3c:54`. Sweep `arp -a` for the Espressif OUI.
+
+| | |
+|---|---|
+| CAN | `rx = GPIO_NUM_5`, `tx = GPIO_NUM_4`, 500 kbit/s. **RX FIRST** in `begin()` — the usual trap |
+| WiFi | SSID from NVS namespace `megaopen`, keys `ssid` / `pass`. 2.4 GHz only |
+| no credentials | comes up as its own AP, `AffaMedia` / `affa1234`, `http://192.168.4.1/`, **OTA intact**. This is the recovery path, not a fault |
+| change network | `/api/cmd?op=wifi&ssid=…&pass=…` — before that existed, moving networks meant a cable |
+| OTA | `GET /ota/start?mode=fr` then `POST /ota/upload` multipart, or `/update` in a browser |
+
+```
+curl -s "http://<ip>/ota/start?mode=fr"
+curl.exe -F "file=@.pio/build/ex17_mediascreen/firmware.bin" "http://<ip>/ota/upload"
+```
+
+**A reflash wipes `.pio/build` if `platformio.ini` changed.** I uploaded an absent binary
+once and spent ten minutes wondering why the new op did not exist. Check the `.bin`
+timestamp before blaming the board.
+
+## Start here when something is wrong
+
+`17_mediascreen`, **Health tab**. Two controls and four groups of counters, in the order you
+read them when a panel is dark.
+
+**RUN SELF-CHECK** — link → power → (1.2 s warm) → text → time, each waiting on **its own
+ticket's completion**. A tick means the *panel answered*, not that a render was queued. That
+distinction is the whole point: `Ok` from `setText()` means "queued", and every counter on
+that page has been zero on a board whose glass never moved.
+
+**gate TX off** — the thirty-second diagnostic. Gate our transmitter and watch the link
+counters. If errors keep climbing with nothing of ours on the wire, the fault is not ours.
+It has settled more arguments here than any other single control.
+
+**Override** (Wire tab) — `load last TX` reassembles the last payload the builder produced,
+including a 304-byte nav screen. Edit a byte, send it back, watch the glass. Step one byte at
+a time; the diff line shouts when more than one moved, because **co-varying samples are not a
+field** — three of them once produced a "one icon field" misreading that took a day to undo.
+
+## What is proven, and what is not
+
+Full record with evidence in `docs/BENCH-VERIFIED.md`.
+
+**Seen on a real Carminat** — handshake and registration (ACK mean 1 287 µs), `setText`,
+`setTime`, `setPower`, the two-row menu with selection, `showMenuN` with a pictogram and a
+positioned scrollbar, popup, fullscreen animating at ~190 ms/screen, the 48 × 48 nav bitmap,
+and an 8.3-hour soak: 257 k frames, zero ring overflows, flat heap. A further 4 h 15 m on
+2026-08-09 at 326 k frames, unattended, after three deliberate wedges and recoveries.
+
+**Seen on a real UpdateList panel** — handshake, `setPower`, normal and menu modes, selected
+row inversion, scrolling text.
+
+**Host-tested, never on glass** — Carminat's info popup and confirm box; UpdateList's icon
+bytes and any row wider than 12 cells.
+
+**Known not to work** — `3EF A6 hh mm` does not set an UpdateList clock: the bus takes the
+frame, the clock does not move. UpdateList fullscreen concatenates into one ~19-character
+line rather than stacking rows.
+
+**Never run at all** — the whole cluster family, and **its opening cannot complete**: there
+is no `61 11` in the one capture, so the hello is never triggered. Whether the trigger is the
+panel's `69` or our own request is not decidable from one sample. `docs/NOTES.md` §1.1.
+
+## Where silence is dangerous
+
+2.0 deleted 165 behavioural tests, keeping only those that assert a golden wire vector. This
+was a deliberate trade and it is the biggest risk in the repository.
+
+**Nothing catches a regression in:** the transmit queue, the owned task, link recovery, the
+dispatch ring, key decoding, or ISO-TP edge lengths. The §3b guarantees in `docs/API.md` —
+one-poll key delivery, latest-value coalescing, `abortPending` reporting each dropped ticket,
+`Priority::Urgent` never splitting a transfer — are implemented and documented but **not
+enforced**. §3b.9 says so in those words.
+
+**Never tested at any point:** `ILogSink`, `shouldAutoAck()`, `PanelGeometry` for the two
+working families, `stats()`, and **`CanCommonLink` in its entirety** — the only code that
+actually talks to hardware. `LoopbackLink` is exercised; the real link is not. If something
+inexplicable happens on the bus, look there first, and expect no test to help.
+
+## Traps that have each cost hours
+
+* **`Ok` is not a rendered screen.** It happened three times with three different causes:
+  rendering to a powered-off panel, rendering under a fullscreen, and a query parameter
+  silently defaulting. Transport succeeded, counters looked healthy, glass did not move.
+* **`rx 0` with zero errors fits three states** — a silent bus, a bus we cannot decode, and
+  a controller that never started. Telling them apart needs `msgs_to_tx`. Without it a dead
+  ESP32-C3 receive path looked exactly like a sleeping display for hours.
+* **The panel acknowledges `setPower` before the glass is lit.** Text drawn inside that
+  window goes into a display still coming up, and the usual conclusion is "setText does not
+  work". The self-check waits 1.2 s for this reason.
+* **PsychicHttp `lru_purge_enable` is a one-way door.** Without it a full socket table is
+  permanent: httpd stops accepting and never resumes — ping answers, mDNS answers, `/update`
+  is gone. It is set in `examples/shared/net.h` with the story attached.
+* **`max_uri_handlers` overflow is silent.** One extra route once unregistered `/ota/upload`
+  and the board needed a cable. OTA is registered *first* for that reason.
+* **PowerShell `Set-Content -Encoding utf8` writes a BOM** and corrupts `platformio.ini`; the
+  error blames the wrong line. Use the editor tools.
+* **`perl -0pi -e` multi-line patterns silently do nothing on CRLF files.** Half this
+  session's edits failed that way before I switched to line-anchored patterns or the editor.
+  If a substitution reports success and changes nothing, that is why.
+
+## Open questions
+
+1. **The cluster's opening.** Needs a cluster on a bench, or an owner's ruling on the
+   trigger. Nothing guards it now — the marker test went with the behavioural suites.
+2. **Ten of the fourteen nav-header bytes** are unmeasured. `[4..10]` held `"ABCDEF\0"` in
+   the capture and are confirmed **not** to be text. The override editor sweeps them; the
+   oracle is a person looking at glass, because the panel ACKs a screen it never lights.
+3. **The `0x7F` text-plus-icons flavour** is documented and not emitted. If icons are
+   implemented, use the captured bytes — our reconstruction disagreed with the only real
+   capture in two places.
+
+## The map
+
+```
+src/            8 437   the library. core/ knows no panel; carminat/ updatelist/ cluster/ are gated
+test/           1 934   three suites, all of them wire vectors
+docs/WIRE.md      GEN   from those vectors, by tools/gen_wire_doc.js  (--check guards it)
+docs/API.md            contracts: threading, Result, latency, capabilities. Copies no declarations
+docs/NOTES.md          what we do not know; how this project has got things wrong eight times
+docs/BENCH-VERIFIED.md what a human saw on glass
+docs/captures/         the OEM corpus — third-party recordings we cannot reproduce. Keep.
+examples/shared/       net.h (WiFi/OTA/HTTP, once), media_render.h, nav_images.h
+```
+
+**Read `docs/NOTES.md` §2 before changing the protocol.** Eight entries, and seven of them
+are the same error: a special case standing in for a general rule. The eighth is a guard
+whose two terms did not cover the middle. They are recorded because this project keeps
+making them.
