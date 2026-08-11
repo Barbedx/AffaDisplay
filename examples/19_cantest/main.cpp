@@ -55,6 +55,7 @@
 //        op=reset                  zero the app counters
 //        op=sample&ms=             live edge count on CRX
 //        op=wifi&ssid=&pass=       store credentials (bare op=wifi reports the SSID)
+//        op=swap&on=0|1        exchange rx and tx                     (NVS, reboots)
 //        op=reboot
 //   /update                        OTA
 //
@@ -104,8 +105,17 @@ namespace {
 #  define AFFA_CANTEST_NODE 0
 #endif
 
-constexpr gpio_num_t kRxPin = static_cast<gpio_num_t>(AFFA_CAN_RX);
-constexpr gpio_num_t kTxPin = static_cast<gpio_num_t>(AFFA_CAN_TX);
+// NOT constexpr, because `op=swap` decides them at boot. The pin PAIR has been read the wrong
+// way round twice on this bench — once off a silkscreen, once out of a working driver for a
+// mirror-soldered board — and each time it cost hours of arguing with instruments. A swapped
+// pair is indistinguishable from a dead transceiver in every counter here: driving the pin
+// that is really R fights a push-pull output and loses, and listening on the pin that is
+// really D hears the module's own protective pull-up and nothing else. So it is a switch, not
+// a rebuild.
+constexpr gpio_num_t kRxBuild = static_cast<gpio_num_t>(AFFA_CAN_RX);
+constexpr gpio_num_t kTxBuild = static_cast<gpio_num_t>(AFFA_CAN_TX);
+gpio_num_t kRxPin = kRxBuild;
+gpio_num_t kTxPin = kTxBuild;
 
 // Two ids, low enough to win arbitration against anything a panel sends, and OUTSIDE every id
 // the AffaDisplay protocol uses (0x121/0x151/0x1B1/0x1F1/0x3AF/0x3DF and the key ids). If one
@@ -129,6 +139,7 @@ struct Cfg {
   Role     role    = AFFA_CANTEST_NODE ? Role::B : Role::A;
   uint32_t bitrate = 500000;
   uint16_t rateMs  = 100;
+  bool     swap    = false;      // exchange the rx/tx pins the build asked for
 };
 Cfg g_cfg;
 
@@ -150,7 +161,12 @@ void loadCfg() {
   g_cfg.role    = static_cast<Role>(p.getUChar("role", static_cast<uint8_t>(g_cfg.role)));
   g_cfg.bitrate = p.getULong("bitrate", g_cfg.bitrate);
   g_cfg.rateMs  = static_cast<uint16_t>(p.getUShort("rate", g_cfg.rateMs));
+  g_cfg.swap    = p.getBool("swap", g_cfg.swap);
   p.end();
+  // Resolved once, here, so every probe and both layers see the same pair. Doing it at each
+  // use site is how one of them ends up reading the pin nothing is wired to.
+  kRxPin = g_cfg.swap ? kTxBuild : kRxBuild;
+  kTxPin = g_cfg.swap ? kRxBuild : kTxBuild;
 }
 
 void saveCfg() {
@@ -161,6 +177,7 @@ void saveCfg() {
   p.putUChar("role", static_cast<uint8_t>(g_cfg.role));
   p.putULong("bitrate", g_cfg.bitrate);
   p.putUShort("rate", g_cfg.rateMs);
+  p.putBool("swap", g_cfg.swap);
   p.end();
 }
 
@@ -188,6 +205,69 @@ const char* g_note = "";
 // a count that decays 271018 -> 175088 -> 64281 -> 2720 -> 0 over thirteen seconds with no
 // code change is a mechanical fault, and no A/B of two firmwares can survive it.
 uint32_t g_bootHi = 0, g_bootEdges = 0, g_bootN = 0;
+
+// THE EXTERNAL LOOP, MEASURED AGAINST AN OPPOSING PULL — the part that makes it trustworthy.
+//
+// The obvious version of this test drives D and watches R, and it has already lied on this
+// bench: it read "no response" on a link that was working, and on that reading a healthy
+// transceiver was declared dead. The reason it lies is that a floating pin reads whatever it
+// last saw, so "R did not follow" and "R is not connected" produce the same number.
+//
+// So each direction is sampled with the internal pull-up or pull-down fighting the expected
+// answer. A transceiver's R is push-pull and beats 45 kohm without noticing; a floating or
+// high-Z pin loses to it every time. That turns an ambiguous reading into a yes/no:
+//
+//   dom = 0   with D driven LOW, R stayed LOW against a PULL-UP    -> the loop echoes. Healthy.
+//   dom = 100 with D driven LOW, the pull-up won                   -> nothing drives R.
+//   rec = 100 with D released HIGH, R stayed HIGH against a PULL-DOWN -> R drives recessive.
+//   rec = 0   with D released HIGH, the pull-down won              -> nothing drives R.
+//
+// AND THE DOMINANT IS ASKED FOR AS A SQUARE WAVE, NEVER AS A HELD LEVEL. This transceiver
+// family implements a TXD DOMINANT TIMEOUT of roughly 1-4 ms: hold D low longer than that and
+// it disarms its own driver, by design, so that one stuck node cannot jam a bus. A probe that
+// drives D low and then samples for milliseconds is therefore measuring a driver that has
+// already switched itself off, and it reports a healthy transceiver as dead.
+//
+// That is not a hypothetical. It invalidated a whole session's "the transmit path is
+// physically broken" verdict once (docs and notes both record the retraction), and it
+// invalidated the first version of THIS function too — every `dom` reading it produced was
+// the timeout, not the part. So the dominant is now toggled at ~10 kHz, each one 50 us long
+// and far inside the timeout, and what is counted is EDGES on R:
+//
+//   edges ~200 — R followed D through the transceiver and the bus. Healthy.
+//   edges 0    — nothing came back, and this time the timeout cannot be the reason.
+//   rec = 100  — with D released, R holds recessive against a PULL-DOWN. The receiver drives.
+//   rec = 0    — nothing drives R at all: standby, no supply, or an open R line.
+//
+// Run at boot, before any driver owns the pins. It disturbs a bench bus for about 20 ms.
+uint32_t g_xEdges = 0;
+uint8_t  g_xRec   = 0;
+
+void probeExternalLoop() {
+  pinMode(kTxPin, OUTPUT);
+
+  // Recessive first, and this one IS a static test — no driver is being asked for, so no
+  // timeout can spoil it. It is the reading that survived the first version of this probe.
+  digitalWrite(kTxPin, HIGH);
+  pinMode(kRxPin, INPUT_PULLDOWN);
+  delayMicroseconds(500);
+  for (uint8_t i = 0; i < 100; ++i) { if (digitalRead(kRxPin)) ++g_xRec; delayMicroseconds(50); }
+
+  // Then the dominant, as a wave.
+  pinMode(kRxPin, INPUT_PULLUP);
+  delayMicroseconds(200);
+  int last = digitalRead(kRxPin);
+  for (uint16_t i = 0; i < 400; ++i) {
+    digitalWrite(kTxPin, (i & 1) ? HIGH : LOW);
+    delayMicroseconds(50);
+    const int v = digitalRead(kRxPin);
+    if (v != last) { ++g_xEdges; last = v; }
+  }
+
+  digitalWrite(kTxPin, HIGH);
+  pinMode(kRxPin, INPUT);
+  pinMode(kTxPin, INPUT);
+}
 
 void countEdges(uint32_t ms, uint32_t& hi, uint32_t& edges, uint32_t& n) {
   hi = edges = n = 0;
@@ -460,9 +540,9 @@ void buildState() {
   jf("{\"node\":\"%c\",\"layer\":\"%s\",\"mode\":\"%s\",\"role\":\"%s\"",
      'A' + AFFA_CANTEST_NODE, layerName(g_cfg.layer), modeName(g_cfg.mode),
      roleName(g_cfg.role));
-  jf(",\"bitrate\":%lu,\"rateMs\":%u,\"rxPin\":%d,\"txPin\":%d,\"busUp\":%s",
+  jf(",\"bitrate\":%lu,\"rateMs\":%u,\"rxPin\":%d,\"txPin\":%d,\"swap\":%s,\"busUp\":%s",
      static_cast<unsigned long>(g_cfg.bitrate), g_cfg.rateMs, static_cast<int>(kRxPin),
-     static_cast<int>(kTxPin), g_busUp ? "true" : "false");
+     static_cast<int>(kTxPin), g_cfg.swap ? "true" : "false", g_busUp ? "true" : "false");
   jf(",\"txId\":\"%03lX\",\"watchId\":\"%03lX\"",
      static_cast<unsigned long>(txId()), static_cast<unsigned long>(watchId()));
 
@@ -497,6 +577,9 @@ void buildState() {
   jf(",\"boot\":{\"edges\":%lu,\"hi\":%lu,\"n\":%lu}",
      static_cast<unsigned long>(g_bootEdges), static_cast<unsigned long>(g_bootHi),
      static_cast<unsigned long>(g_bootN));
+  // edges ~200 and rec 100 is a transceiver echoing D onto R. Zeros mean it drives nothing.
+  jf(",\"xloop\":{\"edges\":%lu,\"rec\":%u}", static_cast<unsigned long>(g_xEdges),
+     static_cast<unsigned>(g_xRec));
   jf(",\"heap\":%lu,\"uptimeMs\":%lu,\"note\":\"%s\"}",
      static_cast<unsigned long>(ESP.getFreeHeap()), static_cast<unsigned long>(::millis()),
      g_note);
@@ -596,6 +679,52 @@ String cmd(PsychicRequest* r) {
     return String("ssid=") + s + " stored — rebooting";
   }
 
+  // Exchange rx and tx and reboot. `xloop` answers it in one boot: a correctly-ordered pair
+  // reads 0/100, and a swapped one reads 100/100 — which is also what a standby transceiver
+  // and an open CTX read, so this is the switch that tells the three apart.
+  if (op == "swap") {
+    const String on = q(r, "on", "1");
+    g_cfg.swap = !(on == "0" || on == "off" || on == "false");
+    saveCfg();
+    rebootSoon();
+    return String("swap=") + (g_cfg.swap ? "on" : "off") + " — rebooting";
+  }
+
+  // HOLD THE BUS DOMINANT FROM THIS NODE, so the OTHER one can say whether it arrived.
+  //
+  // This is the cross-node test, and it exists because each board here has one half that is
+  // proven good and one that is not. It pairs them: this node drives D low with plain GPIO —
+  // its transmit path — while the peer runs op=sample on its own CRX, which is its receive
+  // path. A peer that reports `hi` near zero saw the dominant, and the bus can carry one. A
+  // peer still reading all-high means the dominant never formed, whoever is at fault.
+  //
+  // No self-measurement anywhere in that sentence, which is the point: every instrument that
+  // asks a node about itself has been ambiguous tonight.
+  // TOGGLED, NEVER HELD — see probeExternalLoop(). A held dominant disarms the transceiver's
+  // own driver within a millisecond or so and the peer correctly reports a quiet bus, which
+  // has already been mistaken for a broken transmit path once on this bench and once tonight.
+  if (op == "hold") {
+    const uint32_t ms = static_cast<uint32_t>(constrain(qn(r, "ms", 2000), 50L, 5000L));
+    pinMode(kTxPin, OUTPUT);
+    const uint32_t until = ::millis() + ms;
+    while (static_cast<int32_t>(::millis() - until) < 0) {
+      digitalWrite(kTxPin, LOW);        // ask for a dominant, briefly
+      delayMicroseconds(50);
+      digitalWrite(kTxPin, HIGH);
+      delayMicroseconds(50);
+    }
+    digitalWrite(kTxPin, HIGH);
+    // AND HAND THE PAD BACK TO THE CONTROLLER. pinMode() re-points the pad's output at plain
+    // GPIO; without this the transmitter is silently disconnected until the next boot and
+    // every reading afterwards is a lie. Learned the hard way an hour ago, in loop mode.
+    gpio_set_direction(kTxPin, GPIO_MODE_OUTPUT);
+    esp_rom_gpio_connect_out_signal(kTxPin, TWAI_TX_IDX, false, false);
+    char b[80];
+    snprintf(b, sizeof(b), "toggled gpio%d dominant at 10 kHz for %lu ms", static_cast<int>(kTxPin),
+             static_cast<unsigned long>(ms));
+    return String(b);
+  }
+
   if (op == "reboot") { rebootSoon(); return "rebooting"; }
 
   return "op: layer|mode|bitrate|role|rate|reset|sample|wifi|reboot";
@@ -677,6 +806,13 @@ String page() {
       "0 is a dead line. A live 500k bus reads tens of thousands. READ EDGES, not the ratio");
   row(h, "boot high", String(g_bootHi) + " / " + String(g_bootN),
       "means little: CRX is pulled up, so a disconnected line reads high");
+  row(h, "xloop edges/rec", String(g_xEdges) + " / " + String(g_xRec),
+      g_xEdges > 50 && g_xRec == 100
+        ? "R follows D through the transceiver, and holds recessive against a pull-down. Healthy."
+        : (g_xEdges == 0 && g_xRec == 0
+             ? "R drives NOTHING. Standby (Rs pin), no supply, or an open R line."
+             : "D is toggled at 10 kHz so the TXD dominant timeout cannot spoil it; "
+               "~200 edges and rec 100 is healthy"));
   h += "</table>";
 
   h += "<h2>switches</h2>";
@@ -691,7 +827,9 @@ String page() {
        "<a href='/api/cmd?op=bitrate&v=250000'>250k</a>"
        "<a href='/api/cmd?op=bitrate&v=500000'>500k</a>"
        "<a href='/api/cmd?op=bitrate&v=1000000'>1M</a>"
-       " &nbsp; <a href='/api/cmd?op=reset'>reset counters</a>"
+       " &nbsp; <a href='/api/cmd?op=swap&on=1'>swap pins</a>"
+       "<a href='/api/cmd?op=swap&on=0'>unswap</a>"
+       "<a href='/api/cmd?op=reset'>reset counters</a>"
        "<a href='/api/cmd?op=sample&ms=1000'>sample the pin</a>"
        "<a href='/api/cmd?op=reboot'>reboot</a>"
        "<a href='/api/state'>json</a><a href='/update'>OTA</a></p>";
@@ -747,6 +885,7 @@ void setup() {
   // even started, and read as a dead controller.
   pinMode(kRxPin, INPUT);
   countEdges(1000, g_bootHi, g_bootEdges, g_bootN);
+  probeExternalLoop();
 
   g_busUp = busBegin();
 
