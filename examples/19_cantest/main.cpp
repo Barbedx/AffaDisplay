@@ -948,6 +948,15 @@ void otaEnd(bool) { g_txGate = true;  g_link.setTxGate(true); }
 }  // namespace
 
 void setup() {
+  // A FULL SECOND BEFORE ANYTHING AT ALL — before Serial, before the config, before a pin is
+  // read. Every rail on this bench gets to settle first, the transceiver included, and none
+  // of the probes below can catch a supply on its way up and report it as a dead line.
+  //
+  // It costs a second of boot on a diagnostic tool and nothing else. A settling-time
+  // dependency is also exactly the shape of a fault that "works sometimes", so having it
+  // unconditionally at the very top removes the question rather than leaving it open.
+  delay(1000);
+
   Serial.begin(115200);
 #if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
   delay(1000);          // native USB-CDC re-enumerates after a reboot; 300 ms eats the log
