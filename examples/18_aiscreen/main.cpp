@@ -67,9 +67,9 @@ uint8_t g_menuBuf[affa::CarminatDisplay::menuScreenBytes(affa::carminat::kMenuMa
 // ---------------------------------------------------------------------------
 // The feed
 // ---------------------------------------------------------------------------
-// A RING, NOT A QUEUE, and it is what makes the thing survive a tunnel. Documents pushed by
-// a producer land here and rotate on their own TTL; when the ring runs dry the built-in deck
-// refills it. Nothing ever waits on the network to have something to show.
+// A DRAINING QUEUE ON A CIRCULAR BUFFER, and it is what makes the thing survive a tunnel.
+// Documents pushed by a producer land here and are spent one per TTL; when it runs dry the
+// built-in deck refills it. Nothing ever waits on the network to have something to show.
 //
 // PREFETCH IS THE POINT. A producer sends several documents at once and the device rotates
 // them locally, so a key press is instant and a lost connection costs nothing until the ring
@@ -77,12 +77,22 @@ uint8_t g_menuBuf[affa::CarminatDisplay::menuScreenBytes(affa::carminat::kMenuMa
 // seconds of latency, money per screen, and a blank panel whenever it failed.
 constexpr uint8_t kFeedDepth = 6;
 
+// SHOWN IS SPENT. Until 2026-08-11 nothing ever left this ring — `advance()` only moved a
+// cursor — so it filled once and stayed full for the lifetime of the boot. Two failures came
+// out of that single omission, and both were invisible from the API: the deck's last two
+// cards were unreachable because the refill below is gated on a ring that never shrank (the
+// "NO NETWORK" card could not appear, of all of them), and a producer's fifth document was
+// refused forever because `count` never fell under kFeedDepth. `head` had been sitting here
+// unused since the file was written, which is what a missing pop looks like.
 struct Feed {
   aidoc::DisplayDocument d[kFeedDepth];
   uint8_t  head = 0, count = 0;
-  uint8_t  cur  = 0;
   uint32_t showUntil = 0;
   uint32_t served = 0, pushed = 0, dropped = 0;
+
+  // ONE STEP OF HISTORY, because a spent document is gone and RollUp still has to go back.
+  aidoc::DisplayDocument last;
+  bool                   hasLast = false;
 
   bool push(const aidoc::DisplayDocument& doc) {
     if (count >= kFeedDepth) { ++dropped; return false; }   // refuse, never overwrite
@@ -90,11 +100,26 @@ struct Feed {
     ++count; ++pushed;
     return true;
   }
-  aidoc::DisplayDocument* current() { return count ? &d[cur] : nullptr; }
+  aidoc::DisplayDocument* current() { return count ? &d[head] : nullptr; }
+
   void advance() {
     if (!count) return;
-    cur = static_cast<uint8_t>((cur + 1) % count);
+    last = d[head]; hasLast = true;
+    head = static_cast<uint8_t>((head + 1) % kFeedDepth);
+    --count;
     showUntil = 0;                                          // draw it on the next tick
+  }
+
+  // Puts the last spent document back at the FRONT. It cannot fail into a lost screen: a
+  // full ring means six unshown documents are already waiting, which is the one case where
+  // refusing to go back costs the viewer nothing.
+  bool unspend() {
+    if (!hasLast || count >= kFeedDepth) return false;
+    head = static_cast<uint8_t>((head + kFeedDepth - 1) % kFeedDepth);
+    d[head] = last;
+    ++count; hasLast = false;
+    showUntil = 0;
+    return true;
   }
 };
 Feed g_feed;
@@ -119,11 +144,12 @@ constexpr uint8_t kDeckCount = sizeof(kDeck) / sizeof(kDeck[0]);
 uint8_t g_deckAt = 0;
 
 void refillFromDeck() {
-  const Canned& c = kDeck[g_deckAt];
-  g_deckAt = static_cast<uint8_t>((g_deckAt + 1) % kDeckCount);
+  const uint8_t at = g_deckAt;                              // the card being built, not the next
+  const Canned& c = kDeck[at];
+  g_deckAt = static_cast<uint8_t>((at + 1) % kDeckCount);
 
   aidoc::DisplayDocument doc;
-  snprintf(doc.id, sizeof(doc.id), "deck-%u", g_deckAt);
+  snprintf(doc.id, sizeof(doc.id), "deck-%u", at);
   doc.type = c.type;
   snprintf(doc.title, sizeof(doc.title), "%s", c.title);
   if (*c.l0) snprintf(doc.lines[doc.lineCount++], aidoc::kTextMax, "%s", c.l0);
@@ -241,11 +267,7 @@ void onDone(affa::TxTicket t, affa::Result, void*) {
 void onKey(affa::Key k, affa::KeyEdge e, void*) {
   if (e != affa::KeyEdge::Click) return;
   if (k == affa::Key::RollDown || k == affa::Key::SrcNext) { g_feed.advance(); }
-  else if (k == affa::Key::RollUp || k == affa::Key::SrcPrev) {
-    if (g_feed.count) g_feed.cur = static_cast<uint8_t>((g_feed.cur + g_feed.count - 1) %
-                                                        g_feed.count);
-    g_feed.showUntil = 0;
-  }
+  else if (k == affa::Key::RollUp || k == affa::Key::SrcPrev) { g_feed.unspend(); }
 }
 
 // ---------------------------------------------------------------------------
@@ -341,8 +363,12 @@ esp_err_t state(PsychicRequest* r) {
   jclear();
   jf("{\"phase\":\"%s\",\"live\":%s", affa::phaseName(st.phase),
      g_link.isLive() ? "true" : "false");
-  jf(",\"feed\":{\"queued\":%u,\"cur\":%u,\"served\":%lu,\"pushed\":%lu,\"dropped\":%lu}",
-     g_feed.count, g_feed.cur, static_cast<unsigned long>(g_feed.served),
+  // `cur` was an index into a cursor that no longer exists — the head IS the current
+  // document. `back` replaces it with the thing a producer can act on: whether RollUp has
+  // a step to give.
+  jf(",\"feed\":{\"queued\":%u,\"back\":%s,\"served\":%lu,\"pushed\":%lu,\"dropped\":%lu}",
+     g_feed.count, g_feed.hasLast ? "true" : "false",
+     static_cast<unsigned long>(g_feed.served),
      static_cast<unsigned long>(g_feed.pushed), static_cast<unsigned long>(g_feed.dropped));
   jf(",\"last\":\"%s\",\"renders\":%lu,\"renderFail\":%lu", g_lastId,
      static_cast<unsigned long>(g_renders), static_cast<unsigned long>(g_renderFail));
@@ -366,7 +392,7 @@ void routes() {
   g_server.on("/api/context", HTTP_GET, context);
   g_server.on("/api/state",   HTTP_GET, state);
   g_server.on("/api/next",    HTTP_GET, [](PsychicRequest* r) {
-    g_feed.advance(); jclear(); jf("{\"cur\":%u}", g_feed.cur); return replyJson(r);
+    g_feed.advance(); jclear(); jf("{\"queued\":%u}", g_feed.count); return replyJson(r);
   });
   g_server.on("/", HTTP_GET, [](PsychicRequest* r) {
     return r->reply(200, "text/plain",
@@ -411,9 +437,15 @@ void loop() {
 
   // The feed advances on the document's own TTL. Refilled from the deck when it runs dry, so
   // there is always something on the glass.
+  //
+  // showUntil == 0 MEANS "SOMEONE ALREADY MOVED THE FEED — just draw it". A key press and
+  // /api/next both advance and then zero it, and this tick used to read that zero as an
+  // expired TTL and advance a SECOND time: one press, two documents, the requested one never
+  // seen. It was invisible from the API because the reply reported the index it had just set,
+  // one tick before this loop moved it again.
   if (g_display.phase() == affa::Phase::Ready &&
       static_cast<int32_t>(now - g_feed.showUntil) >= 0) {
-    if (g_feed.count) g_feed.advance();
+    if (g_feed.showUntil && g_feed.count) g_feed.advance();
     if (g_feed.count < 2) refillFromDeck();
     showCurrent();
   }
