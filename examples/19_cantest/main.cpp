@@ -817,7 +817,17 @@ String cmd(PsychicRequest* r) {
     }
 
     uint16_t edges[22] = {0};
-    pinMode(kTxPin, OUTPUT);
+    // AND WATCH THE TRANSMIT PAD ITSELF, which the first version of this scan excluded — so it
+    // could report "nothing follows the bus" without ever establishing that anything was being
+    // driven in the first place. INPUT_OUTPUT keeps the pad driving while enabling its input
+    // buffer, so the pad appears in GPIO_IN_REG alongside every other candidate.
+    //
+    // It turns one ambiguous answer into two distinct ones. The transmit pin showing ~300
+    // edges and no other pin showing any means the chip drove and nothing came back. The
+    // transmit pin showing NOTHING means the pad never moved, and the fault is on this side of
+    // the transceiver entirely — which is a firmware or pin question, not a wiring one.
+    gpio_set_direction(kTxPin, GPIO_MODE_INPUT_OUTPUT);   // Arduino has no INPUT_OUTPUT
+    mask |= (1u << static_cast<uint8_t>(kTxPin));
     uint32_t prev = REG_READ(GPIO_IN_REG);
     for (uint16_t i = 0; i < 600; ++i) {
       digitalWrite(kTxPin, (i & 1) ? HIGH : LOW);
