@@ -702,9 +702,18 @@ String cmd(PsychicRequest* r) {
   if (op == "sample") {
     // digitalRead() only taps the input path, so the controller keeps the pin and nothing is
     // reconfigured. Loop this while someone presses on a joint.
+    // CHUNKED, WITH A YIELD BETWEEN CHUNKS — same reason as op=hold. This is a busy spin on
+    // digitalRead() inside the web server's task, and a spin that outlasts the 3 s socket
+    // timeout takes HTTP down with it. A handful of edges are missed during each yield, which
+    // costs nothing: the question this answers is zero versus tens of thousands.
     const uint32_t ms = static_cast<uint32_t>(constrain(qn(r, "ms", 1000), 10L, 5000L));
     uint32_t hi = 0, edges = 0, n = 0;
-    countEdges(ms, hi, edges, n);
+    for (uint32_t done = 0; done < ms; done += 100) {
+      uint32_t h = 0, e = 0, c = 0;
+      countEdges(ms - done < 100 ? ms - done : 100, h, e, c);
+      hi += h; edges += e; n += c;
+      delay(1);
+    }
     char b[96];
     snprintf(b, sizeof(b), "gpio%d: %lu edges, %lu/%lu high, in %lu ms", static_cast<int>(kRxPin),
              static_cast<unsigned long>(edges), static_cast<unsigned long>(hi),
@@ -748,11 +757,23 @@ String cmd(PsychicRequest* r) {
     const uint32_t ms = static_cast<uint32_t>(constrain(qn(r, "ms", 2000), 50L, 5000L));
     pinMode(kTxPin, OUTPUT);
     const uint32_t until = ::millis() + ms;
+    // IN BURSTS, WITH A YIELD BETWEEN THEM, and that yield is not a nicety. This runs inside
+    // the web server's own task, and delayMicroseconds() is a BUSY SPIN — it never hands the
+    // scheduler back. A handler that spins for four seconds starves the network stack for
+    // four seconds, stale sockets pile up against a 3 s timeout and seven slots, and the board
+    // stops answering HTTP entirely while still replying to ping and still accepting TCP
+    // connections. It looks exactly like a crash and is not one; it cost this DevKit a power
+    // cycle. delay() yields where delayMicroseconds() does not, which is the whole difference
+    // between this and 17_mediascreen's op=wiggle running happily for a minute.
     while (static_cast<int32_t>(::millis() - until) < 0) {
-      digitalWrite(kTxPin, LOW);        // ask for a dominant, briefly
-      delayMicroseconds(50);
-      digitalWrite(kTxPin, HIGH);
-      delayMicroseconds(50);
+      const uint32_t burst = ::millis() + 200;
+      while (static_cast<int32_t>(::millis() - burst) < 0) {
+        digitalWrite(kTxPin, LOW);      // ask for a dominant, briefly
+        delayMicroseconds(50);
+        digitalWrite(kTxPin, HIGH);
+        delayMicroseconds(50);
+      }
+      delay(2);                         // let the server breathe; the peer never notices
     }
     digitalWrite(kTxPin, HIGH);
     // AND HAND THE PAD BACK TO THE CONTROLLER. pinMode() re-points the pad's output at plain
@@ -775,7 +796,16 @@ String cmd(PsychicRequest* r) {
   // The register read is what makes it honest — every candidate is sampled in the SAME
   // instant, so a pin cannot be missed because it was measured during a quiet moment.
   if (op == "scan") {
-    static const uint8_t skip[] = { 11, 12, 13, 14, 15, 16, 17, 18, 19 };  // flash and USB
+    // THE PINS THIS SCAN MUST NOT TOUCH, AND THEY ARE NOT THE SAME PART TO PART. The SPI
+    // flash lives on GPIO6-11 on the classic ESP32 and on GPIO11-17 on the C3, and the C3
+    // puts native USB on 18/19. The first version of this list was written for the C3 and run
+    // on a DevKit, which quietly reconfigured six live flash pins mid-execution; the board
+    // survived and returned an empty reply, which is luckier than it deserved.
+#if defined(CONFIG_IDF_TARGET_ESP32C3) && CONFIG_IDF_TARGET_ESP32C3
+    static const uint8_t skip[] = { 11, 12, 13, 14, 15, 16, 17, 18, 19 };
+#else
+    static const uint8_t skip[] = { 6, 7, 8, 9, 10, 11 };
+#endif
     uint32_t mask = 0;
     for (uint8_t p = 0; p <= 21; ++p) {
       bool bad = (p == static_cast<uint8_t>(kTxPin));
