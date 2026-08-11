@@ -45,8 +45,16 @@
 
 namespace {
 
-constexpr gpio_num_t kRxPin   = GPIO_NUM_5;
-constexpr gpio_num_t kTxPin   = GPIO_NUM_4;
+// FROM THE BUILD, not welded here — see the note in 17_mediascreen: the env flag existed
+// and was read by nothing, so a board wired to other pins failed silently as a dead peer.
+#ifndef AFFA_CAN_RX
+#  define AFFA_CAN_RX 5
+#endif
+#ifndef AFFA_CAN_TX
+#  define AFFA_CAN_TX 4
+#endif
+constexpr gpio_num_t kRxPin   = static_cast<gpio_num_t>(AFFA_CAN_RX);
+constexpr gpio_num_t kTxPin   = static_cast<gpio_num_t>(AFFA_CAN_TX);
 constexpr uint32_t   kBitrate = 500000;
 
 constexpr const char* kApSsid   = "AffaScreen";

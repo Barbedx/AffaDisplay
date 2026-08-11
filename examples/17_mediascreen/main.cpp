@@ -32,8 +32,19 @@
 
 namespace {
 
-constexpr gpio_num_t kRxPin   = GPIO_NUM_5;   // the standard collin80 stack, as 09..16
-constexpr gpio_num_t kTxPin   = GPIO_NUM_4;
+// THE PINS COME FROM THE BUILD, and until 2026-08-11 they did not: platformio.ini had set
+// -D AFFA_CAN_RX in three envs and NOTHING anywhere read it, so every board got GPIO5 no
+// matter what its env said. A C3 SuperMini flashed with rx=3 therefore listened on 5 and
+// heard nothing — with `tx` climbing, zero errors and `rx` flat, which is indistinguishable
+// from a silent panel. CanCommonLink::begin() warns about exactly this in its own comment.
+#ifndef AFFA_CAN_RX
+#  define AFFA_CAN_RX 5                        // the standard collin80 stack, as 09..16
+#endif
+#ifndef AFFA_CAN_TX
+#  define AFFA_CAN_TX 4
+#endif
+constexpr gpio_num_t kRxPin   = static_cast<gpio_num_t>(AFFA_CAN_RX);
+constexpr gpio_num_t kTxPin   = static_cast<gpio_num_t>(AFFA_CAN_TX);
 constexpr uint32_t   kBitrate = 500000;
 
 constexpr const char* kPrefsNamespace = "affamedia";
@@ -1096,6 +1107,11 @@ void routes() {
     j += ",\"tx\":";    j += String((unsigned long)ls.txFrames);
     j += ",\"drop\":";  j += String((unsigned long)ls.txDropped);
     j += ",\"ovf\":";   j += String((unsigned long)ls.ringOverflow);
+    // THE PINS THIS BUILD ACTUALLY USES. `rx: 0` with `tx` climbing and no errors is the
+    // signature of listening on the wrong pin, and it is identical to a silent panel from
+    // every other counter here — so the answer has to be readable, not inferred.
+    j += ",\"rx_pin\":";  j += String(static_cast<int>(kRxPin));
+    j += ",\"tx_pin\":";  j += String(static_cast<int>(kTxPin));
     j += "},\"panel\":{\"phase\":\""; j += affa::phaseName(g_base->phase());
     j += "\",\"registered\":"; j += st.registered ? "true" : "false";
     j += ",\"lost\":";  j += String((unsigned long)st.sessionsLost);
