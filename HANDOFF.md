@@ -19,7 +19,8 @@ node tools/gen_wire_doc.js --check          fails if docs/WIRE.md drifted
 node tools/check_web_ui.js                  fails on broken console JS
 ```
 
-Four envs: `native`, `ex03_hello`, `ex17_mediascreen`, `ex18_aiscreen`.
+Seven envs: `native`, `ex03_hello`, `ex17_mediascreen`, `ex17_mediascreen_c3`, `ex18_aiscreen`,
+`ex19_cantest_c3`, `ex19_cantest_devkit`.
 
 ## The bench rig
 
@@ -45,8 +46,20 @@ timestamp before blaming the board.
 
 ## Start here when something is wrong
 
-`17_mediascreen`, **Health tab**. Two controls and four groups of counters, in the order you
-read them when a panel is dark.
+**IF THE BOARD HEARS NOTHING, LEAVE THE PANEL OUT OF IT.** Flash `19_cantest` — no panel, no
+protocol, no library unless you ask for it. `mode=selftest` runs on one board alone: the
+controller transmits with self-reception and no ACK required, out through the transceiver and
+back, so `matched` climbing proves the controller, the transceiver, both signal wires and this
+node's bus pair, and `matched` at zero is a fault entirely inside that board. Then put the
+second board on and run `pingpong`. Only then bring the panel back.
+
+Every conclusion that had to be retracted on this bench was measured across three moving
+variables at once — panel, bus and library. That is what this example removes, and the switch
+back to `layer=link` at the end is what clears `CanCommonLink` by comparison rather than by
+argument.
+
+Once the wire is not in question: `17_mediascreen`, **Health tab**. Two controls and four
+groups of counters, in the order you read them when a panel is dark.
 
 **RUN SELF-CHECK** — link → power → (1.2 s warm) → text → time, each waiting on **its own
 ticket's completion**. A tick means the *panel answered*, not that a render was queued. That
