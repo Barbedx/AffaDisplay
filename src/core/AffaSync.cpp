@@ -544,6 +544,12 @@ void AffaDisplayBase::pumpSync() {
     // bare `3AF BA` with no B9 in front of it. B9 is the heartbeat of an established
     // session and has no business on a bus where the handshake has not started; sending it
     // here is pure noise during the phase that can least afford it.
+    // `_announceOn` is the bench switch. The profile's interval is const — it lives in
+    // flash next to the family's constants — so silencing the announce used to mean a
+    // rebuild, or gating the whole transmitter and losing every other frame with it. When
+    // the question is "is the panel talking on its own?", our BA is the one thing that has
+    // to stop while everything else stays available.
+    if (!_announceOn) return;
     if (_profile.announceWhenSilentMs == 0 || !expired(now, _nextAnnounceMs)) return;
     _nextAnnounceMs = now + _profile.announceWhenSilentMs;
     (void)sendSyncRequest();

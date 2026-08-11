@@ -153,6 +153,13 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // what make that safe.
   Phase     phase()      const;
 
+  // THE SILENT-BUS ANNOUNCE, ON OR OFF. Off means this node says nothing at all until the
+  // panel speaks first — which is the only way to ask "is it talking on its own?" without
+  // our own BA in the answer. Gating the link would do it too, but that also drops every
+  // reply and render, so a bus watched that way can never complete a handshake.
+  void      setAnnounce(bool on) { _announceOn = on; }
+  bool      announceOn() const   { return _announceOn; }
+
   // HOW OFTEN THE PANEL HAS DROPPED US, and when it last did. Counted on the FuncsReg
   // falling edge, which is exactly where Phase leaves Ready.
   //
@@ -370,6 +377,9 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   ICanLink&          _link;
   IClock&            _clock;
   const SyncProfile& _profile;
+  // The silent-bus BA announce, switchable at run time. See AffaSync.cpp — the profile's
+  // interval is const, and gating the link instead would silence every other frame too.
+  bool               _announceOn = true;
 
  private:
   enum class TxState  : uint8_t { Idle, SendingFrame, WaitAck };

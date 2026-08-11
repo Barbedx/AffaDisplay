@@ -16,6 +16,7 @@
 
 #include <Arduino.h>
 #include <AffaDisplay.h>
+#include <driver/twai.h>   // the controller's OWN counters — see /api/health "twai"
 #include <ESPmDNS.h>       // LDF only scans THIS file for #include, so the framework
 #include <ElegantOTA.h>     // libraries shared/net.h uses have to be named here too, or
 #include <Preferences.h>    // their include paths are never added to the build
@@ -46,6 +47,13 @@ namespace {
 constexpr gpio_num_t kRxPin   = static_cast<gpio_num_t>(AFFA_CAN_RX);
 constexpr gpio_num_t kTxPin   = static_cast<gpio_num_t>(AFFA_CAN_TX);
 constexpr uint32_t   kBitrate = 500000;
+
+// THE BOOT PROBES, all on kRxPin — never a welded pin number. Reported by /api/health; what
+// each one is worth is written where it is taken, in setup().
+uint8_t  g_rxIdleHi = 0, g_rxPullHi = 0;         // CRX at rest, then with the internal pull-up
+uint8_t  g_pdRx = 0, g_pdTx = 0;                 // pull-down probe per pin
+uint8_t  g_holdHi = 0, g_holdLo = 0;             // charge retention on CRX: 50/0 = nothing attached
+uint32_t g_bootHi = 0, g_bootEdges = 0, g_bootN = 0;  // CRX for 1 s BEFORE the CAN driver
 
 constexpr const char* kPrefsNamespace = "affamedia";
 constexpr const char* kApSsid   = "AffaMedia";
@@ -223,7 +231,13 @@ void logmsg(const char* fmt, ...) {
 
 // The wire. A log line prints whether or not the call was accepted; a frame either went out
 // or it did not, so this is the only thing on the page that is evidence.
-constexpr int kFrameRing = 64;
+// 64 held about a second of a busy bus, which is useless for "what happened at boot". At
+// ~20 bytes a record 1024 costs 20 KB of a chip using 19% of its RAM, and /api/frames pages
+// through it rather than building one enormous string. For a log with no ceiling at all,
+// every frame is also mirrored to Serial as it arrives — see g_serialFrames.
+constexpr int kFrameRing = 1024;
+constexpr int kFramePage = 256;              // records per /api/frames request
+bool g_serialFrames = true;                  // the owner confirmed Serial disturbs nothing
 struct FrameRec { uint16_t id; uint8_t len, dir, d[8]; uint16_t count; uint32_t ms; };
 FrameRec g_fr[kFrameRing];
 uint16_t g_frHead = 0;
@@ -301,6 +315,15 @@ void onTap(const affa::Frame& f, affa::Direction dir, void*) {
     if (id == affa::carminat::kIdNav && f.len && (f.data[0] & 0xF0) == 0x20) return;
     if (id == (affa::carminat::kIdNav | 0x400)) return;
   }
+  // SERIAL GETS EVERY FRAME, UNCOALESCED. The ring folds repeats into a count so it can span
+  // a boot; a terminal capture has no such limit and is the only place the full exchange
+  // survives. Printed before the ring so the two never disagree about what arrived.
+  if (g_serialFrames) {
+    Serial.printf("%lu\t%s\t%03X\t", (unsigned long)::millis(), d ? "TX" : "RX", id);
+    for (int k = 0; k < f.len && k < 8; ++k) Serial.printf("%02X ", f.data[k]);
+    Serial.println();
+  }
+
   portENTER_CRITICAL(&g_mux);
   FrameRec& last = g_fr[(g_frHead + kFrameRing - 1) % kFrameRing];
   if (last.count && last.dir == d && last.id == id && last.len == f.len &&
@@ -543,6 +566,12 @@ void stepScene() {
 
 void pushFrame() {
   if (!g_carminat || !g_paneOn) return;
+  // NOTHING IS OFFERED TO A LINK THAT IS NOT UP. The library refuses it correctly — NoSync,
+  // before the transmit queue — but submitting anyway meant this console logged a
+  // "frame FAILED (1)" every eight seconds forever on a dead bus, which is exactly when the
+  // log has to be readable. A render that cannot reach the glass is not worth composing
+  // either: renderScene() below runs a whole animation step to fill a buffer nobody sends.
+  if (g_base->phase() != affa::Phase::Ready) return;
   if (g_navBusy) { ++g_drops; return; }          // skip, never queue: a backlog never drains
   uint8_t* const buf = g_frame[g_drawInto];
   renderScene(buf);
@@ -958,6 +987,61 @@ Cmd dispatch(PsychicRequest* r) {
   // climbing with nothing of ours on the wire, the fault is not ours. It has settled more
   // arguments on this bench than any other single control.
   if (op == "txgate") { g_link.setTxGate(B("on", true)); return kOk; }
+  // op=announce&on=0 — stop OUR BA without gating the transmitter, so the board still
+  // answers the panel and can still complete a handshake. txgate=0 silences everything and
+  // therefore cannot tell you whether the panel would have replied.
+  if (op == "serialframes") { g_serialFrames = B("on", true); return kOk; }
+  if (op == "announce") {
+    if (!g_base) return fail("no panel");
+    g_base->setAnnounce(B("on", true));
+    return Cmd{true, g_base->announceOn() ? "announce on" : "announce off"};
+  }
+  // WHERE IS THE BREAK? Drive CRX as a slow square wave so a multimeter on the module's pad
+  // can be watched by eye: if the pad follows, the wire from the MCU is intact and the break
+  // is inside the module or at the chip's own pin; if it sits still, the wire is open. The
+  // CAN driver is torn down first — it owns the pin through the GPIO matrix, and driving a
+  // pin it holds would read as nothing happening.
+  if (op == "wiggle") {
+    g_link.setTxGate(false);
+    const long secs = constrain(N("s", 10), 1L, 60L);
+    pinMode(kRxPin, OUTPUT);
+    for (long i = 0; i < secs * 2; ++i) {
+      digitalWrite(kRxPin, (i & 1) ? HIGH : LOW);
+      delay(500);
+    }
+    pinMode(kRxPin, INPUT);
+    // GIVE THE PAD BACK. pinMode() rips the pin out of the GPIO matrix and hands it to plain
+    // GPIO; releasing it as INPUT does NOT route it back to the controller's RX signal, so
+    // without this the link is deaf until the next reboot and every `rx` reading afterwards
+    // is a lie. I ran this command once to check it existed and invalidated an hour of
+    // measurements doing it.
+    g_link.recover(true);
+    g_link.setTxGate(true);
+    return kOk;
+  }
+
+  // WHAT THE MCU SEES ON THE PIN, RIGHT NOW, while a scope is on the same pad. digitalRead()
+  // only taps the input path, so nothing is reconfigured and the controller keeps the pin.
+  // Transitions are the number that matters: a static level means we and the scope are not
+  // looking at the same node, while transitions with `rx` at zero moves the fault into the
+  // controller's own configuration.
+  if (op == "sample") {
+    const long ms = constrain(N("ms", 1000), 10L, 5000L);
+    uint32_t highs = 0, edges = 0, n = 0;
+    int last = digitalRead(kRxPin);
+    const uint32_t until = ::millis() + static_cast<uint32_t>(ms);
+    while (static_cast<int32_t>(::millis() - until) < 0) {
+      const int v = digitalRead(kRxPin);
+      if (v) ++highs;
+      if (v != last) { ++edges; last = v; }
+      ++n;
+    }
+    static char msg[96];
+    snprintf(msg, sizeof(msg), "gpio%d: %lu/%lu high, %lu edges in %ld ms",
+             static_cast<int>(kRxPin), static_cast<unsigned long>(highs),
+             static_cast<unsigned long>(n), static_cast<unsigned long>(edges), ms);
+    return Cmd{true, msg};
+  }
 
   if (op == "opening") { g_open.done = false; g_open.step = 0; g_open.nextMs = ::millis();
                          return kOk; }
@@ -1112,6 +1196,32 @@ void routes() {
     // every other counter here — so the answer has to be readable, not inferred.
     j += ",\"rx_pin\":";  j += String(static_cast<int>(kRxPin));
     j += ",\"tx_pin\":";  j += String(static_cast<int>(kTxPin));
+    j += ",\"rx_idle_hi\":"; j += String((unsigned)g_rxIdleHi);   // /100 at boot: 100 = idle bus
+    j += ",\"rx_pull_hi\":"; j += String((unsigned)g_rxPullHi);   // 0 here = actively held low
+    j += ",\"pd_rx\":"; j += String((unsigned)g_pdRx);   // /100; tracks the CRX joint
+    j += ",\"pd_tx\":"; j += String((unsigned)g_pdTx);   // /100; means nothing on its own
+    j += ",\"hold\":\""; j += String((unsigned)g_holdHi); j += "/"; j += String((unsigned)g_holdLo); j += "\"";
+    // EDGES ONLY. `0/N e0` is a dead line; the high/low ratio says nothing now that CRX is
+    // pulled up. This is the first number to read when a board hears nothing.
+    j += ",\"boot\":\""; j += String((unsigned long)g_bootHi); j += "/"; j += String((unsigned long)g_bootN);
+    j += " e"; j += String((unsigned long)g_bootEdges); j += "\"";
+    // THE CONTROLLER'S OWN COUNTERS, and they are the only thing that separates three states
+    // this console otherwise reports identically as `rx 0`: a bus with nobody on it, a peer
+    // that is asleep, and a receive pin that is stuck. `queued` growing while `txErr` stays
+    // flat is a transmit that never left; `txErr` walking to 128 with `rxErr` at 0 is a peer
+    // that stopped acknowledging — which on this bench means the display went to sleep.
+    twai_status_info_t ti;
+    if (twai_get_status_info(&ti) == ESP_OK) {
+      j += ",\"twai\":{\"state\":";  j += String((unsigned)ti.state);
+      j += ",\"txErr\":";   j += String((unsigned long)ti.tx_error_counter);
+      j += ",\"rxErr\":";   j += String((unsigned long)ti.rx_error_counter);
+      j += ",\"txFail\":";  j += String((unsigned long)ti.tx_failed_count);
+      j += ",\"busErr\":";  j += String((unsigned long)ti.bus_error_count);
+      j += ",\"arbLost\":"; j += String((unsigned long)ti.arb_lost_count);
+      j += ",\"rxMissed\":";j += String((unsigned long)ti.rx_missed_count);
+      j += ",\"queued\":";  j += String((unsigned long)ti.msgs_to_tx);
+      j += "}";
+    }
     j += "},\"panel\":{\"phase\":\""; j += affa::phaseName(g_base->phase());
     j += "\",\"registered\":"; j += st.registered ? "true" : "false";
     j += ",\"lost\":";  j += String((unsigned long)st.sessionsLost);
@@ -1229,12 +1339,24 @@ void routes() {
     return res.send();
   });
 
+  // /api/frames?from=0&n=256 — PAGED, oldest first. A 1024-record ring rendered in one
+  // string would be a 60 KB static buffer, so the page is the unit and the header says how
+  // far to keep going. `from` counts from the oldest record held, not from boot.
   g_server.on("/api/frames", HTTP_GET, [](PsychicRequest* r) {
-    static char out[kFrameRing * 60 + 96];
+    long from = 0, n = kFramePage;
+    if (r->hasParam("from")) from = strtol(r->getParam("from")->value().c_str(), nullptr, 0);
+    if (r->hasParam("n"))    n    = strtol(r->getParam("n")->value().c_str(), nullptr, 0);
+    if (from < 0) from = 0;
+    if (n < 1 || n > kFramePage) n = kFramePage;
+
+    static char out[kFramePage * 60 + 128];
     size_t at = 0;
+    at += snprintf(out + at, sizeof(out) - at,
+                   "# from=%ld n=%ld ring=%d  (repeat page with from=%ld)\n",
+                   from, n, kFrameRing, from + n);
     at += snprintf(out + at, sizeof(out) - at, "ms\tdir\tid\tdata\tcount\n");
     portENTER_CRITICAL(&g_mux);
-    for (int i = 0; i < kFrameRing; ++i) {
+    for (long i = from; i < from + n && i < kFrameRing; ++i) {
       const FrameRec& f = g_fr[(g_frHead + i) % kFrameRing];
       if (!f.count || at + 70 >= sizeof(out)) continue;
       at += snprintf(out + at, sizeof(out) - at, "%lu\t%s\t%03X\t", (unsigned long)f.ms,
@@ -1283,11 +1405,104 @@ void startHttp() {
 
 }  // namespace
 
+// PULL THE PIN DOWN AND SEE WHO WINS. A transceiver's R is a push-pull output sitting
+// recessive on an idle bus, so it beats the internal pull-down and reads HIGH; a pin with
+// nothing on it follows the pull-down to LOW. Nothing of ours drives, so there is no
+// contention and no way to stress a pad.
+//
+// WHAT IT IS ACTUALLY WORTH, after a session of arguing with it: on CRX it tracks the
+// connection reliably — 0 when the joint was open, 67 when it was made. On CTX it means
+// nothing about who is driving, because the module holds its own D input up with a
+// protective resistor and that reads 100 either way. It does NOT decide a pinout.
+uint8_t probePulldownHigh(gpio_num_t pin) {
+  uint8_t hi = 0;
+  pinMode(pin, INPUT_PULLDOWN);
+  for (uint8_t i = 0; i < 100; ++i) {
+    if (digitalRead(pin)) ++hi;
+    delayMicroseconds(500);
+  }
+  pinMode(pin, INPUT);
+  return hi;
+}
+
 void setup() {
+  // BEFORE ANYTHING CLAIMS THE PINS.
+  delay(250);                          // let the transceiver's supply settle before probing
+
+  g_pdRx = probePulldownHigh(kRxPin);
+  g_pdTx = probePulldownHigh(kTxPin);
+
+  // IS THIS PIN CONNECTED TO ANYTHING AT ALL? Drive it, let go, and see whether it keeps the
+  // level. Pad capacitance holds a charge for milliseconds on a pin with nothing attached, so
+  // a floating input REMEMBERS what we last drove; anything actually driving it — a
+  // transceiver output, or even a resistor — pulls it back within microseconds. This
+  // separates "the part is not driving" from "the part is not connected", which every other
+  // probe here reports identically.
+  //
+  // Open joint reads 50/0, connected reads 50/50, and a flip between the two is the joint
+  // changing state under your hands. With g_pdRx it is the pair that found the real fault.
+  pinMode(kRxPin, OUTPUT); digitalWrite(kRxPin, HIGH);
+  delayMicroseconds(50);
+  pinMode(kRxPin, INPUT);
+  for (uint8_t i = 0; i < 50; ++i) { if (digitalRead(kRxPin)) ++g_holdHi; delayMicroseconds(20); }
+
+  pinMode(kRxPin, OUTPUT); digitalWrite(kRxPin, LOW);
+  delayMicroseconds(50);
+  pinMode(kRxPin, INPUT);
+  for (uint8_t i = 0; i < 50; ++i) { if (digitalRead(kRxPin)) ++g_holdLo; delayMicroseconds(20); }
+
+  // ONE SECOND OF CRX AS A PLAIN INPUT, BEFORE THE CAN DRIVER EXISTS — and this is the best
+  // instrument on the board. A dead line reads 0 edges; a live 500 kbit/s bus read 70 214,
+  // and `rx` started counting seconds later. EDGES ARE THE READING. Ignore the high/low
+  // ratio: CanCommonLink now pulls CRX up, so a disconnected line reads high, not low.
+  //
+  // Run this FIRST when a board hears nothing. `op=sample` takes the same count live, with
+  // the driver installed, which is the one to loop while someone presses on a joint.
+  pinMode(kRxPin, INPUT);
+  {
+    int last = digitalRead(kRxPin);
+    const uint32_t until = ::millis() + 1000;
+    while (static_cast<int32_t>(::millis() - until) < 0) {
+      const int v = digitalRead(kRxPin);
+      if (v) ++g_bootHi;
+      if (v != last) { ++g_bootEdges; last = v; }
+      ++g_bootN;
+    }
+  }
+
   pinMode(kTxPin, OUTPUT);
   digitalWrite(kTxPin, HIGH);        // release the bus before the driver claims the matrix
+
+  // CRX AT REST, SAMPLED BEFORE THE DRIVER CLAIMS THE PIN. An idle CAN bus is recessive, so
+  // a healthy powered transceiver holds RXD HIGH. This is the one fault the TWAI counters
+  // cannot show: if CRX is held dominant the controller never sees bus-idle, so it never
+  // starts a transmission and EVERY error counter stays at zero while the queue grows. That
+  // reads identically to a silent peer, and it has cost two sessions on this bench.
+  pinMode(kRxPin, INPUT);
+  for (uint8_t i = 0; i < 100; ++i) {
+    if (digitalRead(kRxPin)) ++g_rxIdleHi;
+    delayMicroseconds(500);
+  }
+  // AND AGAIN WITH THE INTERNAL PULL-UP, which splits the two causes of a dominant CRX that
+  // are otherwise identical from software: a pin nothing is driving (pull-up wins, reads
+  // high — an open connection or an unpowered transceiver) versus one actively held low
+  // (stays low — a transceiver really reporting a dominant bus).
+  pinMode(kRxPin, INPUT_PULLUP);
+  for (uint8_t i = 0; i < 100; ++i) {
+    if (digitalRead(kRxPin)) ++g_rxPullHi;
+    delayMicroseconds(500);
+  }
+  pinMode(kRxPin, INPUT);
+
   Serial.begin(115200);
+  // The C3 talks over native USB-CDC: the port disappears on reboot and the host takes about
+  // a second to re-enumerate, so 300 ms swallows the whole boot log. A UART bridge does not
+  // have that problem and does not pay the wait.
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+  delay(1000);
+#else
   delay(300);
+#endif
 
   { Preferences p;
     if (p.begin(kPrefsNamespace, true)) { g_family = static_cast<Family>(p.getUChar("family",0)); p.end(); } }
