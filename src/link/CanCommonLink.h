@@ -24,6 +24,8 @@
 
 #include <esp32_can.h>
 #include <driver/twai.h>
+#include <esp_rom_gpio.h>        // the GPIO matrix, wired by hand in begin() — see there
+#include <soc/gpio_sig_map.h>
 
 #include "../core/AffaTypes.h"
 #include "../core/ICanLink.h"
@@ -44,10 +46,41 @@ class CanCommonLink final : public ICanLink {
     s_self = this;
     _rx.head = _rx.tail = 0;
 
+    // THE PADS COME BACK TO A KNOWN STATE FIRST, because they do NOT survive a reboot as
+    // defaults. A software reset — which is what OTA does — leaves the IO MUX and the GPIO
+    // matrix holding whatever the previous image configured, so a pin some earlier build (or
+    // some diagnostic) left routed elsewhere stays routed elsewhere, and installing the
+    // driver on top of it yields a controller that reports RUNNING, counts no errors and
+    // receives nothing. That cost a full session on the bench: the wire was fine the whole
+    // time and every probe agreed the pin was dead, because the pad genuinely was — it just
+    // was not this peripheral's pad any more.
+    gpio_reset_pin(rx);
+    gpio_reset_pin(tx);
+
     // ORDER IS LOAD-BEARING: pins, begin(), callback, watchFor() LAST. watchFor() with no
     // argument accepts every id; setting it before the callback loses early frames.
     CAN0.setCANPins(rx, tx);
     CAN0.begin(bitrate);
+
+    // AND NOW NAIL THE INPUT ROUTE DOWN BY HAND. Reclaiming the pad above is not enough on
+    // its own: it got us exactly one frame and then silence. The receive path is pad ->
+    // input buffer -> GPIO matrix -> TWAI_RX_IDX, and if anything has repointed that last
+    // hop the controller sits at RUNNING with every counter at zero, hearing nothing, while
+    // a scope on the pin shows perfectly good traffic. Two instruments, one wire, opposite
+    // answers — that is the signature, and this is the line that ends it.
+    gpio_set_direction(rx, GPIO_MODE_INPUT);
+    esp_rom_gpio_connect_in_signal(rx, TWAI_RX_IDX, false);
+
+    // PULL RX UP, so that a receive line which loses its connection reads RECESSIVE — idle —
+    // instead of floating down into a permanent dominant. A transceiver's R is push-pull and
+    // overrides 45 kohm without noticing, so this costs a healthy bus nothing.
+    //
+    // It is not cosmetic. A floating-low RX makes the controller emit error flags at the line
+    // rate — measured here at 64 000/s on a 500 kbit/s bus, which is one per error-flag time,
+    // with rxErr pinned at 129 and the controller error-passive. In that state it is drowning
+    // in its own error frames, and a link whose contact comes and goes may never get a clean
+    // window to receive in. Quiet-when-disconnected is what lets it catch the first good one.
+    gpio_set_pull_mode(rx, GPIO_PULLUP_ONLY);
     CAN0.setGeneralCallback(&CanCommonLink::onFrame);
     CAN0.watchFor();
     _begun = true;
