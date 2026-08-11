@@ -70,8 +70,10 @@
 #include <Arduino.h>
 #include <AffaDisplay.h>
 #include <driver/twai.h>
+#include <driver/rtc_io.h>   // an RTC pad can be latched THROUGH a reboot — see releasePads()
 #include <esp_rom_gpio.h>
 #include <soc/gpio_sig_map.h>
+#include <soc/gpio_reg.h>   // GPIO_IN_REG — op=scan samples every pin in the same instant
 #include <ESPmDNS.h>       // LDF only scans THIS file for #include, so the framework
 #include <ElegantOTA.h>     // libraries shared/net.h uses have to be named here too, or
 #include <Preferences.h>    // their include paths are never added to the build
@@ -293,6 +295,40 @@ bool g_busUp = false;
 // has none, so the gate lives here and covers both — otherwise an OTA on the twai layer would
 // keep transmitting through the write.
 bool g_txGate = true;
+
+// SOMETHING HOLDS THE LINE AT STARTUP — and on these parts something literally can.
+//
+// Both problem pads here are RTC-capable (ESP32-C3 GPIO0..5; classic ESP32 GPIO4 among
+// others), and an RTC pad can be LATCHED. gpio_hold_en() and the deep-sleep hold freeze a
+// pad's level AND its routing, and that latch SURVIVES A SOFTWARE RESET. An OTA is a software
+// reset. A power cycle is not. So a pad held once stays held across every reflash until the
+// board is physically unplugged — which is exactly what "it works sometimes, and today it
+// suddenly worked" looks like from the outside, and exactly what no continuity test can find.
+//
+// Worse: a pad the RTC IO MUX still owns is disconnected from the DIGITAL GPIO matrix
+// altogether. The wire is fine, the pad is fine, and TWAI_RX_IDX is listening to something
+// that was never connected to it.
+//
+// The failing halves on this bench line up with it exactly — C3 receive on GPIO3 (RTC),
+// DevKit transmit on GPIO4 (RTC), and the one half that has never once failed is the DevKit's
+// receive on GPIO5, which is NOT an RTC pin on the classic ESP32.
+//
+// So the latch is broken and the pad handed back to the digital side BEFORE anything reads
+// it — before the boot probes, before any driver, before WiFi.
+void releasePads() {
+  gpio_deep_sleep_hold_dis();
+  const gpio_num_t pins[2] = { kRxPin, kTxPin };
+  for (gpio_num_t p : pins) {
+    // The one that matters on the C3, and the only RTC facility it has for these pads: it
+    // supports the HOLD latch but has no RTC IO mux to take a pin away in the first place.
+    gpio_hold_dis(p);
+#if defined(SOC_RTCIO_INPUT_OUTPUT_SUPPORTED) && SOC_RTCIO_INPUT_OUTPUT_SUPPORTED
+    // The classic ESP32 does have one, and a pad it still owns is invisible to the digital
+    // GPIO matrix — so hand it back explicitly. Absent on the C3, hence the guard.
+    if (rtc_gpio_is_valid_gpio(p)) rtc_gpio_deinit(p);
+#endif
+  }
+}
 
 void preparePads() {
   // Pads do NOT come back as defaults after a software reset, which is what an OTA is. The IO
@@ -580,6 +616,11 @@ void buildState() {
   // edges ~200 and rec 100 is a transceiver echoing D onto R. Zeros mean it drives nothing.
   jf(",\"xloop\":{\"edges\":%lu,\"rec\":%u}", static_cast<unsigned long>(g_xEdges),
      static_cast<unsigned>(g_xRec));
+  // Which pads could have been latched through the last reboot at all. A pin that says false
+  // here cannot be the RTC-hold fault, whatever else it is doing.
+  jf(",\"rtcPad\":{\"rx\":%s,\"tx\":%s}",
+     rtc_gpio_is_valid_gpio(kRxPin) ? "true" : "false",
+     rtc_gpio_is_valid_gpio(kTxPin) ? "true" : "false");
   jf(",\"heap\":%lu,\"uptimeMs\":%lu,\"note\":\"%s\"}",
      static_cast<unsigned long>(ESP.getFreeHeap()), static_cast<unsigned long>(::millis()),
      g_note);
@@ -723,6 +764,53 @@ String cmd(PsychicRequest* r) {
     snprintf(b, sizeof(b), "toggled gpio%d dominant at 10 kHz for %lu ms", static_cast<int>(kTxPin),
              static_cast<unsigned long>(ms));
     return String(b);
+  }
+
+  // WHICH PIN IS REALLY THE RECEIVE LINE? Toggle our own D — the half of this board that is
+  // proven to work — and count edges on EVERY pin at once by reading the whole GPIO input
+  // register each pass. Nothing is assumed about the silkscreen, the wiring diagram or the
+  // build flag: the pin that follows the bus IS the receive line, and if none of them does,
+  // the transceiver's R really is not driving and no pin assignment can rescue it.
+  //
+  // The register read is what makes it honest — every candidate is sampled in the SAME
+  // instant, so a pin cannot be missed because it was measured during a quiet moment.
+  if (op == "scan") {
+    static const uint8_t skip[] = { 11, 12, 13, 14, 15, 16, 17, 18, 19 };  // flash and USB
+    uint32_t mask = 0;
+    for (uint8_t p = 0; p <= 21; ++p) {
+      bool bad = (p == static_cast<uint8_t>(kTxPin));
+      for (uint8_t s : skip) if (p == s) bad = true;
+      if (bad) continue;
+      if (!GPIO_IS_VALID_GPIO(p)) continue;
+      pinMode(p, INPUT_PULLUP);
+      mask |= (1u << p);
+    }
+
+    uint16_t edges[22] = {0};
+    pinMode(kTxPin, OUTPUT);
+    uint32_t prev = REG_READ(GPIO_IN_REG);
+    for (uint16_t i = 0; i < 600; ++i) {
+      digitalWrite(kTxPin, (i & 1) ? HIGH : LOW);
+      delayMicroseconds(50);                       // inside the TXD dominant timeout
+      const uint32_t now = REG_READ(GPIO_IN_REG);
+      uint32_t diff = (now ^ prev) & mask;
+      while (diff) {
+        const uint8_t b = static_cast<uint8_t>(__builtin_ctz(diff));
+        if (b < 22) ++edges[b];
+        diff &= diff - 1;
+      }
+      prev = now;
+    }
+    digitalWrite(kTxPin, HIGH);
+    gpio_set_direction(kTxPin, GPIO_MODE_OUTPUT);
+    esp_rom_gpio_connect_out_signal(kTxPin, TWAI_TX_IDX, false, false);   // give the pad back
+
+    String out = String("toggled gpio") + static_cast<int>(kTxPin) + " 300 times; edges seen:";
+    bool any = false;
+    for (uint8_t p = 0; p < 22; ++p)
+      if (edges[p]) { out += " gpio" + String(p) + "=" + String(edges[p]); any = true; }
+    if (!any) out += " NONE — no pin on this board follows the bus";
+    return out;
   }
 
   if (op == "reboot") { rebootSoon(); return "rebooting"; }
@@ -883,6 +971,10 @@ void setup() {
   // THE PIN, BEFORE ANYTHING OWNS IT. This has to happen ahead of every driver and ahead of
   // WiFi — a blocking join once banked 372 000 bogus bus errors before the CAN driver had
   // even started, and read as a dead controller.
+  // BEFORE ANY PROBE READS A PIN. If a pad is latched from a previous image, every number
+  // below is a measurement of the latch and not of the wire.
+  releasePads();
+
   pinMode(kRxPin, INPUT);
   countEdges(1000, g_bootHi, g_bootEdges, g_bootN);
   probeExternalLoop();
