@@ -10,6 +10,12 @@
 // named in the URL.
 //
 // ── the procedure it was built for ───────────────────────────────────────────
+//   0. mode=loop FIRST, WHEN THE FIRMWARE ITSELF IS IN QUESTION. The controller's receive
+//      input is taken from its own transmit pad through the GPIO matrix, so the frame never
+//      leaves the die and there is nothing external left to blame. `matched` climbing clears
+//      the silicon, the bit timing and every line of the install; `matched` at zero means the
+//      fault is in this file and no amount of probing wires will find it. Added the day two
+//      boards failed step 1 together on a bus measured good at 60 ohm.
 //   1. ONE BOARD AT A TIME, mode=selftest. The controller transmits with self-reception and
 //      no ACK required, so the frame goes controller -> CTX -> transceiver -> CANH/CANL ->
 //      transceiver -> CRX -> controller with nobody else involved. `matched` climbing is a
@@ -42,7 +48,7 @@
 //   GET /api/state                 every counter as JSON
 //   GET /api/cmd?op=…
 //        op=layer&v=twai|link      which stack owns the controller        (NVS, reboots)
-//        op=mode&v=selftest|pingpong|listen                               (NVS, reboots)
+//        op=mode&v=selftest|pingpong|listen|loop                          (NVS, reboots)
 //        op=bitrate&v=125000|250000|500000|1000000                        (NVS, reboots)
 //        op=role&v=a|b             who originates and who echoes          (NVS, live)
 //        op=rate&ms=               ping period                            (NVS, live)
@@ -110,7 +116,9 @@ constexpr uint32_t kIdB = 0x101;   // role B echoes here
 constexpr const char* kNvs = "affacan";
 
 enum class Layer : uint8_t { Twai = 0, Link = 1 };
-enum class Mode  : uint8_t { SelfTest = 0, PingPong = 1, Listen = 2 };
+// `Loop` is `SelfTest` with the outside world removed — see busBegin(). Both send with a
+// self-reception request; only the route back differs.
+enum class Mode  : uint8_t { SelfTest = 0, PingPong = 1, Listen = 2, Loop = 3 };
 enum class Role  : uint8_t { A = 0, B = 1 };
 
 struct Cfg {
@@ -126,8 +134,12 @@ Cfg g_cfg;
 
 const char* layerName(Layer l) { return l == Layer::Link ? "link" : "twai"; }
 const char* modeName(Mode m) {
-  return m == Mode::PingPong ? "pingpong" : m == Mode::Listen ? "listen" : "selftest";
+  return m == Mode::PingPong ? "pingpong" : m == Mode::Listen ? "listen"
+       : m == Mode::Loop     ? "loop"     : "selftest";
 }
+// The two modes where the node talks to itself and the answer must come back on the watched
+// id. They differ only in how far the signal travels to get there.
+bool selfMode(Mode m) { return m == Mode::SelfTest || m == Mode::Loop; }
 const char* roleName(Role r) { return r == Role::B ? "b" : "a"; }
 
 void loadCfg() {
@@ -233,9 +245,9 @@ bool busBegin() {
     return true;
   }
 
-  const twai_mode_t mode = g_cfg.mode == Mode::Listen   ? TWAI_MODE_LISTEN_ONLY
-                         : g_cfg.mode == Mode::SelfTest ? TWAI_MODE_NO_ACK
-                                                        : TWAI_MODE_NORMAL;
+  const twai_mode_t mode = g_cfg.mode == Mode::Listen ? TWAI_MODE_LISTEN_ONLY
+                         : selfMode(g_cfg.mode)       ? TWAI_MODE_NO_ACK
+                                                      : TWAI_MODE_NORMAL;
   // TX FIRST. The IDF macro is (tx, rx, mode) and esp32_can's setCANPins() is (rx, tx) — two
   // stacks in one file with the pair in opposite orders. Swapping them yields a link that
   // never errors and never receives, which reads as a dead peer rather than as miswiring.
@@ -254,6 +266,36 @@ bool busBegin() {
 
   if (twai_driver_install(&gc, &tc, &fc) != ESP_OK) return false;
   if (twai_start() != ESP_OK) return false;
+
+  // THE INTERNAL LOOPBACK, and it is the only test here that can fail for exactly one reason.
+  //
+  // Every other mode routes the answer through the transceiver, two signal wires, the bus pair
+  // and back — so a failure has half a dozen candidates and the argument never ends. This one
+  // takes the controller's RX input from its OWN TX PAD through the GPIO matrix. The frame
+  // never leaves the die. Nothing outside the chip is in the path: not the transceiver, not
+  // CANH/CANL, not a joint, not termination, not the peer.
+  //
+  // So the reading is absolute. `matched` climbing means the TWAI controller, the bit timing,
+  // NO_ACK mode, the self-reception request and every line of the install above are correct,
+  // and any remaining fault is outside the chip. `matched` at zero means the fault is IN HERE
+  // — in this file or in the silicon — and no amount of probing wires will find it.
+  //
+  // The TX pad keeps driving the transceiver's D input while this runs. That input is high-Z
+  // and cannot fight back, so the loop costs the bus nothing and needs no spare pin.
+  if (g_cfg.mode == Mode::Loop) {
+    gpio_set_direction(kTxPin, GPIO_MODE_INPUT_OUTPUT);   // read the pad we are driving
+    // AND PUT THE PERIPHERAL'S OWN ROUTE BACK, because gpio_set_direction() just took it away.
+    // It re-points the pad's OUTPUT at plain GPIO, which parks it at whatever the output
+    // register holds — zero — so the controller reads a permanently dominant line, never sees
+    // bus-idle and never starts a transmission. Measured before this line existed: state
+    // RUNNING, `queuedTx` frozen at 33, and every single error counter at zero. That trio is
+    // worth memorising; it is what "the controller never even tried" looks like, and it is
+    // indistinguishable from a dead peer if you only read the app's own counters.
+    esp_rom_gpio_connect_out_signal(kTxPin, TWAI_TX_IDX, false, false);
+    esp_rom_gpio_connect_in_signal(kTxPin, TWAI_RX_IDX, false);
+    return true;                                          // deliberately NOT settlePads()
+  }
+
   settlePads();
   return true;
 }
@@ -326,7 +368,7 @@ void wr32(uint8_t* d, uint32_t v) {
 // controller hears its own frame, so the "echo" is the transmission itself.
 uint32_t txId()    { return g_cfg.role == Role::A ? kIdA : kIdB; }
 uint32_t watchId() {
-  if (g_cfg.mode == Mode::SelfTest) return txId();
+  if (selfMode(g_cfg.mode)) return txId();
   return g_cfg.role == Role::A ? kIdB : kIdA;
 }
 
@@ -389,7 +431,7 @@ void tick() {
   uint8_t d[8];
   wr32(d, g_nextSeq);
   wr32(d + 4, static_cast<uint32_t>(micros()));
-  if (busSend(txId(), d, 8, g_cfg.mode == Mode::SelfTest)) { ++g_c.sent; ++g_nextSeq; }
+  if (busSend(txId(), d, 8, selfMode(g_cfg.mode))) { ++g_c.sent; ++g_nextSeq; }
   else ++g_c.refused;
 }
 
@@ -478,7 +520,8 @@ String cmd(PsychicRequest* r) {
       if (v == "selftest") g_cfg.mode = Mode::SelfTest;
       else if (v == "pingpong") g_cfg.mode = Mode::PingPong;
       else if (v == "listen") g_cfg.mode = Mode::Listen;
-      else return "mode: selftest|pingpong|listen";
+      else if (v == "loop") g_cfg.mode = Mode::Loop;
+      else return "mode: selftest|pingpong|listen|loop";
     }
     // REFUSE THE IMPOSSIBLE PAIR RATHER THAN BOOTING INTO IT. esp32_can installs NORMAL mode
     // and cannot request self-reception, so selftest and listen have no meaning there. A
@@ -642,6 +685,7 @@ String page() {
        " &nbsp; mode <a href='/api/cmd?op=mode&v=selftest'>selftest</a>"
        "<a href='/api/cmd?op=mode&v=pingpong'>pingpong</a>"
        "<a href='/api/cmd?op=mode&v=listen'>listen</a>"
+       "<a href='/api/cmd?op=mode&v=loop'>loop (internal)</a>"
        " &nbsp; role <a href='/api/cmd?op=role&v=a'>A</a><a href='/api/cmd?op=role&v=b'>B</a></p>";
   h += "<p>bitrate <a href='/api/cmd?op=bitrate&v=125000'>125k</a>"
        "<a href='/api/cmd?op=bitrate&v=250000'>250k</a>"
