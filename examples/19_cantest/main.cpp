@@ -853,9 +853,59 @@ String cmd(PsychicRequest* r) {
     return out;
   }
 
+  // THE RECEIVE PAD'S LEVEL UNDER EACH PULL, TAKEN LIVE — the one reading every other probe
+  // in this file leaves out, and the reason an evening once went to "the module is dead".
+  //
+  // op=sample cannot answer this. settlePads() leaves CRX under a PULL-UP for the whole
+  // session, so sample only ever asks the line to prove itself against a pull that AGREES
+  // with a recessive bus. "All high" is then two different boards:
+  //
+  //   a healthy transceiver driving recessive   -> all high
+  //   a wire connected to nothing at all        -> all high
+  //
+  // THE PULL-DOWN IS THE HALF THAT DECIDES, because R is push-pull and beats 45 kohm without
+  // noticing, while an open line loses to it every time:
+  //
+  //   dn ~200 -> something drives R high. The transceiver is powered and its receiver works.
+  //   dn 0    -> nothing drives R at all. The line is open, whatever the pull-up said.
+  //
+  // probeExternalLoop() already asks exactly this — ONCE, at boot, before any driver exists.
+  // That is no use against an intermittent joint, which is the fault this bench keeps
+  // producing and the one a continuity test is worst at finding. This runs on demand, so it
+  // can be looped at 500 ms while somebody presses on a joint and the number is watched.
+  //
+  // TX is deliberately not touched. In listen mode the controller already holds it recessive,
+  // and a probe that borrows the transmit pad has one more way to leave the bus broken behind
+  // it — see the pad hand-back in op=hold.
+  if (op == "level") {
+    uint16_t up = 0, dn = 0;
+    gpio_set_direction(kRxPin, GPIO_MODE_INPUT);
+
+    gpio_set_pull_mode(kRxPin, GPIO_PULLUP_ONLY);
+    delayMicroseconds(500);
+    for (uint16_t i = 0; i < 200; ++i) { if (digitalRead(kRxPin)) ++up; delayMicroseconds(20); }
+
+    gpio_set_pull_mode(kRxPin, GPIO_PULLDOWN_ONLY);
+    delayMicroseconds(500);
+    for (uint16_t i = 0; i < 200; ++i) { if (digitalRead(kRxPin)) ++dn; delayMicroseconds(20); }
+
+    // AND HAND THE PAD BACK — route, direction and pull, all three. A probe that leaves any
+    // of them changed makes every reading after it a lie, which op=hold learned the hard way.
+    settlePads();
+
+    const char* verdict = (dn >= 190) ? "R IS DRIVEN - transceiver powered, receiver alive"
+                        : (up >= 190) ? "OPEN - the pad follows its own pull, nothing drives it"
+                                      : "HELD LOW - something beats the pull-up";
+    char b[176];
+    snprintf(b, sizeof(b), "gpio%d: pullup %u/200 high, pulldown %u/200 high - %s",
+             static_cast<int>(kRxPin), static_cast<unsigned>(up),
+             static_cast<unsigned>(dn), verdict);
+    return String(b);
+  }
+
   if (op == "reboot") { rebootSoon(); return "rebooting"; }
 
-  return "op: layer|mode|bitrate|role|rate|reset|sample|wifi|reboot";
+  return "op: layer|mode|bitrate|role|rate|reset|sample|level|scan|hold|swap|wifi|reboot";
 }
 
 // One row of the page: label, value, and the note that says what the value MEANS. The notes
@@ -959,6 +1009,8 @@ String page() {
        "<a href='/api/cmd?op=swap&on=0'>unswap</a>"
        "<a href='/api/cmd?op=reset'>reset counters</a>"
        "<a href='/api/cmd?op=sample&ms=1000'>sample the pin</a>"
+       "<a href='/api/cmd?op=level'>level (both pulls)</a>"
+       "<a href='/api/cmd?op=scan'>scan every pin</a>"
        "<a href='/api/cmd?op=reboot'>reboot</a>"
        "<a href='/api/state'>json</a><a href='/update'>OTA</a></p>";
   h += "<p style='color:#666;font-size:12px'>Layer, mode and bitrate reboot the board: "
