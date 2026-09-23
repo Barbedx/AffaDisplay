@@ -538,7 +538,28 @@ void AffaDisplayBase::pumpSync() {
   // luck, and on a panel that is slow to open its channel it is simply wrong.
   // `openingReleased()` is the whole of what `_authRequestObserved && !_authHelloPending`
   // used to say here, and saying it once is the point of the phase.
-  if (_profile.registerAfterHello && _peerChannelSeen && !_helloPending &&
+  // BENCH PROBE, 2026-09-23 — `_peerChannelSeen` REMOVED FROM THIS CONDITION ON PURPOSE.
+  // Not a fix and not to be merged as one: it answers a single question that no counter
+  // could, and the answer decides what the real fix is.
+  //
+  // MEASURED ON THE MegaOpen BENCH, with a per-id observation table fed from the library's
+  // own frame tap: the whole bus carries EXACTLY ONE id. 0x3CF, `61 11 01`, 20256 frames
+  // and climbing at 1570/s, with `rxMissed` at +0 over five seconds — nothing is being
+  // dropped. There is no `1C1` on this wire. Ever.
+  //
+  // So on this panel the "measured 4/4" ordering above does not hold, `_peerChannelSeen`
+  // can never latch, and the three gates close a ring that nothing opens: no registration
+  // without the latch (here), no `B9` without FuncsReg (below), and the peer-timeout that
+  // could reset the session sits after that return, unreachable. `phase` stays
+  // AwaitPeerChannel for ever and `twaiTxOk` freezes at 4 — the boot `BA` plus three hello
+  // frames. The panel asked 20256 times and was answered once.
+  //
+  // The question this probe asks: does the panel ACK our function probes — `551 74` and
+  // `5F1 74` — when we simply send them without waiting for a channel it never opens? If it
+  // does, the gate is the whole fault and the real fix is a bounded wait here rather than an
+  // unconditional one. If it does not, the panel wants something else entirely and this
+  // ordering was never the problem.
+  if (_profile.registerAfterHello && !_helloPending &&
       openingReleased() &&
       !hasFlag(_sync, SyncState::FuncsReg) && !registrationQueued()) {
     (void)queueRegistrations();
