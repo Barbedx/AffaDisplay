@@ -61,6 +61,9 @@ bool AffaDisplayBase::begin() {
   // to boot the chance to speak first, exactly as it does in the captures.
   _nextAnnounceMs         = now + _profile.announceWhenSilentMs;
   _peerChannelSeen        = false;
+  // ZERO, NOT A DEADLINE. An armed-and-expired value here would grant the probes permission
+  // before the hello burst had gone out — peerChannelReady() treats 0 as "not waiting yet".
+  _awaitPeerUntilMs       = 0;
   _genericAckPending      = false;
   _genericAckId           = 0;
   _genericAckBusyRetries  = 0;
@@ -357,6 +360,7 @@ void AffaDisplayBase::pumpLink() {
   _unauthControlSpent   = false;
   _nextUnauthControlMs  = now;
   _peerChannelSeen      = false;   // a new session means the display re-opens its channel
+  _awaitPeerUntilMs     = 0;       // and re-arms its fail-open from the next hello burst
   _genericAckPending    = false;
   _genericAckBusyRetries = 0;
   _peerDeadlineMs = now + AFFA_PEER_TIMEOUT_MS;

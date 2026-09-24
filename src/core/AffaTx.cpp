@@ -107,7 +107,11 @@ bool AffaDisplayBase::queueRegistrations() {
   // build that renders would otherwise register without ever having seen the display's own
   // `1C1 70`, which is exactly the application-driven ordering this rule exists to remove.
   // [CAP] 4/4: the display's 1C1 precedes our 151 by 60.69-61.34 ms, every time.
-  if (_profile.registerAfterHello && !_peerChannelSeen) return false;
+  // BOUNDED. This is the authority — the pumpSync() call site asks the same question first,
+  // but the three LAZY callers reach here directly, so relaxing that one alone changes
+  // nothing. It reading `!_peerChannelSeen` while the call site read something else is
+  // exactly how a single dropped frame looked like a panel that never sends one at all.
+  if (!peerChannelReady(_clock.millis())) return false;
   if (_qCount + _funcCount > AFFA_TX_QUEUE_DEPTH) return false;
 
   static const uint8_t kReg[1] = { kRegisterByte };

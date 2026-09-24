@@ -480,6 +480,11 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // panel's request on the wire? THE question the transmit gates ask, asked once. A family
   // with no authorization gate has nothing to wait for and answers true throughout.
   bool openingReleased() const;
+  // MAY WE PUT OUR 0x70 PROBES ON THE WIRE YET? One answer for the two places that ask, and
+  // the duplication it replaces is why a lost frame took a whole bench session to find: the
+  // condition lived at the pumpSync() call site AND again inside queueRegistrations(), so
+  // relaxing one of them changed nothing and looked like it had.
+  bool peerChannelReady(uint32_t now) const;
   void queueHello(uint32_t now);         // arms one profile-paced hello sequence
   void pumpHello(uint32_t now);           // submits at most the profile-permitted prefix
   uint32_t syncIntervalMs() const;        // profile override or AFFA_SYNC_INTERVAL_MS
@@ -608,9 +613,15 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // render.  A locally full controller must not lose it behind the next B0; retain exactly
   // one pending reply and retry it once when the link was merely Busy.  A hard Rejected
   // offer belongs to the normal transport recovery/session reset path instead.
-  // The display has registered its OWN channel (its 1C1). We do not put our 0x70 probes on
-  // the wire until it has: measured 4/4, its 1C1 precedes our 151 by ~61 ms.
+  // The display has registered its OWN channel (its 1C1). We prefer not to put our 0x70
+  // probes on the wire until it has: measured 4/4, its 1C1 precedes our 151 by ~61 ms.
+  // PREFER, not require — see peerChannelReady() and AFFA_AWAIT_PEER_MS. That one frame
+  // arrives once, inside the panel's own line-rate storm, and a consumer that drops it used
+  // to be wedged for the rest of the power cycle.
   bool      _peerChannelSeen = false;
+  // When the wait above stops being a precondition. Armed on entering AwaitPeerChannel, and
+  // zero means "not waiting" — so it can never expire into permission before the burst.
+  uint32_t  _awaitPeerUntilMs = 0;
   bool      _genericAckPending = false;
   uint16_t  _genericAckId = 0;
   uint8_t   _genericAckBusyRetries = 0;

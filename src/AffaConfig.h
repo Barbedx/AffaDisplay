@@ -467,6 +467,33 @@
 #  define AFFA_SYNC_INTERVAL_MS 1000
 #endif
 
+// HOW LONG TO WAIT FOR THE DISPLAY'S OWN `1C1 70` BEFORE REGISTERING ANYWAY, and it exists
+// because waiting for ever is a permanent wedge off a SINGLE lost frame.
+//
+// The ordering it bounds is real and measured 4/4: the display opens its own channel between
+// B0#1 and B0#2, we answer `5C1 74`, and our `151 70` follows ~61 ms later. Nothing about
+// that is in doubt. What was wrong was treating it as a precondition instead of a preference.
+//
+// MEASURED ON THE MegaOpen BENCH, 2026-09-23, and it took a per-id observation table to see.
+// That `1C1 70` arrives exactly ONCE, in the middle of the panel's own line-rate `61 11`
+// storm — 1570 frames/s, because helloRequiresAnnounce means only the SECOND request draws
+// the burst and the panel has long since gone to line rate by then. On a consumer whose RX
+// queue overflows in that window the frame is simply gone: two boots of identical firmware,
+// one with `rxMissed 0` that registered and lit the glass, one with `rxMissed 19652` where
+// 0x1C1 never appeared in the table at all. Same hardware, same panel, same second.
+//
+// And a wedge it was, not a delay: no registration without the latch, no B9 without FuncsReg,
+// and the peer-timeout that would reset the session sits after that `return` — unreachable.
+// `phase` stays AwaitPeerChannel and the transmit counters freeze at the boot burst, for ever,
+// until somebody power-cycles and wins the same coin toss again.
+//
+// 400 ms is far outside the ~1.5 ms the captured display needs and still well inside the
+// panel's own ~1 s patience, so a display that opens its channel keeps the measured order on
+// every boot and only one that never managed to gets registered without it.
+#ifndef AFFA_AWAIT_PEER_MS
+#  define AFFA_AWAIT_PEER_MS 400
+#endif
+
 // FLOOR BETWEEN TWO HELLO BURSTS, AND IT IS THE DIFFERENCE BETWEEN A HANDSHAKE AND A DEAD
 // BUS. The sync request is answered with SyncProfile::helloCount frames — three for
 // Carminat — and the answer used to go out once per REQUEST FRAME. That is correct only

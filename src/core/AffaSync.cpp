@@ -122,6 +122,33 @@ bool AffaDisplayBase::handleSyncFrame(const Frame& f) {
         // exactly one BA, never a new retry stream.
         _nextSyncMs = now + syncIntervalMs();
         queueHello(now);
+      } else if (!hasFlag(_sync, SyncState::FuncsReg)) {
+        // ANSWER THE REPEAT. A display that considers itself registered stops sending
+        // `61 11` ENTIRELY — this file says so thirty lines up, and the OEM captures are
+        // where it comes from. So one arriving while FuncsReg is clear is not chatter: it
+        // is the panel saying it did not accept the opening and wants the burst again.
+        //
+        // It used to be swallowed. `needsHelloBeforeAuth` goes false the moment pumpHello
+        // reaches AwaitPeerChannel and clears Failed, and from then on every further request
+        // fell out of this function having changed nothing at all. MEASURED ON THE MegaOpen
+        // BENCH 2026-09-24: 149717 requests, answered once. Our `151 70` probes went out and
+        // were never acknowledged, because from the panel's side no session had opened.
+        //
+        // The capture the radio is modelled on does the opposite — "the radio answers it
+        // with the ordinary B0 announce burst 30.75 ms later and the session completes".
+        //
+        // NO PACING NEEDED HERE, and that is deliberate rather than an omission: queueHello()
+        // early-returns while a burst is staged and otherwise starts from the _nextHelloMs
+        // floor, which pumpHello() sets to helloMinMs after every completed burst. A request
+        // storm at line rate therefore costs at most one burst per 200 ms, which is the rule
+        // AFFA_HELLO_MIN_MS already exists to enforce.
+        //
+        // The phase is left alone on purpose. Dropping back to HelloPending would shut
+        // openingReleased() and stall the registration this is trying to make possible, and
+        // it would re-arm the AwaitPeerChannel fail-open on every burst — a storm would then
+        // hold the deadline permanently in the future, which is the wedge again wearing a
+        // different hat.
+        queueHello(now);
       }
       return true;
     }
@@ -384,6 +411,21 @@ bool AffaDisplayBase::openingReleased() const {
   return !_profile.requireAuthRequest || atLeast(_phase, Phase::AwaitPeerChannel);
 }
 
+// MAY THE 0x70 PROBES GO OUT? Asked in exactly two places and answered here, which is the
+// point: this condition used to be written twice — at the pumpSync() call site and again as
+// the authority inside queueRegistrations() — and a bench session was spent relaxing one of
+// them and concluding from the unchanged result that the panel never sends the frame at all.
+//
+// A family that does not register off the hello never waited for anything.
+// Otherwise the latch wins immediately, and the deadline is the fail-open: the display's own
+// `1C1 70` comes once, inside its line-rate storm, and dropping that single frame must cost a
+// late registration rather than the whole power cycle. See AFFA_AWAIT_PEER_MS.
+bool AffaDisplayBase::peerChannelReady(uint32_t now) const {
+  if (!_profile.registerAfterHello) return true;
+  if (_peerChannelSeen) return true;
+  return _awaitPeerUntilMs != 0 && expired(now, _awaitPeerUntilMs);
+}
+
 // The display's first `61 11 xx` (or its first bare `69`) earns exactly ONE announce.
 // Arming is idempotent: a panel repeating its request at 104 ms — or at line rate — must not
 // turn the one-shot into a BA stream. What makes it one-shot is `_unauthControlSpent`,
@@ -501,6 +543,16 @@ void AffaDisplayBase::pumpHello(uint32_t now) {
     // never answered, because it never got our announce.
     if (_phase == Phase::HelloPending) {
       enterPhase(_peerChannelSeen ? Phase::Registering : Phase::AwaitPeerChannel);
+      // ARM THE FAIL-OPEN FROM HERE, not from begin(): the wait only means anything once our
+      // burst is actually on the wire, and this is the edge that put it there. Arming earlier
+      // would let the deadline expire during the opening and register before the hello.
+      //
+      // ONCE PER SESSION, hence the zero test. A panel repeating `61 11` draws a fresh burst
+      // every AFFA_HELLO_MIN_MS (see handleSyncFrame), and re-arming a 400 ms deadline every
+      // 200 ms would push it into the future for as long as the storm lasts — the wait would
+      // never expire and the wedge would be back. The session reset is what clears it.
+      if (_phase == Phase::AwaitPeerChannel && _awaitPeerUntilMs == 0)
+        _awaitPeerUntilMs = now + AFFA_AWAIT_PEER_MS;
       setSync((_sync & ~SyncState::Failed & ~SyncState::Start), EventKind::SyncChanged);
     }
 
@@ -538,28 +590,11 @@ void AffaDisplayBase::pumpSync() {
   // luck, and on a panel that is slow to open its channel it is simply wrong.
   // `openingReleased()` is the whole of what `_authRequestObserved && !_authHelloPending`
   // used to say here, and saying it once is the point of the phase.
-  // BENCH PROBE, 2026-09-23 — `_peerChannelSeen` REMOVED FROM THIS CONDITION ON PURPOSE.
-  // Not a fix and not to be merged as one: it answers a single question that no counter
-  // could, and the answer decides what the real fix is.
-  //
-  // MEASURED ON THE MegaOpen BENCH, with a per-id observation table fed from the library's
-  // own frame tap: the whole bus carries EXACTLY ONE id. 0x3CF, `61 11 01`, 20256 frames
-  // and climbing at 1570/s, with `rxMissed` at +0 over five seconds — nothing is being
-  // dropped. There is no `1C1` on this wire. Ever.
-  //
-  // So on this panel the "measured 4/4" ordering above does not hold, `_peerChannelSeen`
-  // can never latch, and the three gates close a ring that nothing opens: no registration
-  // without the latch (here), no `B9` without FuncsReg (below), and the peer-timeout that
-  // could reset the session sits after that return, unreachable. `phase` stays
-  // AwaitPeerChannel for ever and `twaiTxOk` freezes at 4 — the boot `BA` plus three hello
-  // frames. The panel asked 20256 times and was answered once.
-  //
-  // The question this probe asks: does the panel ACK our function probes — `551 74` and
-  // `5F1 74` — when we simply send them without waiting for a channel it never opens? If it
-  // does, the gate is the whole fault and the real fix is a bounded wait here rather than an
-  // unconditional one. If it does not, the panel wants something else entirely and this
-  // ordering was never the problem.
-  if (_profile.registerAfterHello && !_helloPending &&
+  // BOUNDED, NOT UNCONDITIONAL, and peerChannelReady() is where both halves of that live.
+  // The ordering below is kept exactly as measured; what changed is that a display which
+  // never managed to open its channel — or whose single `1C1 70` we dropped — costs a late
+  // registration instead of the whole power cycle. See AFFA_AWAIT_PEER_MS.
+  if (_profile.registerAfterHello && peerChannelReady(now) && !_helloPending &&
       openingReleased() &&
       !hasFlag(_sync, SyncState::FuncsReg) && !registrationQueued()) {
     (void)queueRegistrations();
@@ -649,6 +684,7 @@ void AffaDisplayBase::pumpSync() {
     enterPhase(Phase::Silent);
     _syncRequestObserved  = false;
     _peerChannelSeen      = false;   // the display re-opens its 1C1 in the new session
+    _awaitPeerUntilMs     = 0;       // and the fail-open re-arms from the next burst, not now
     _helloPending         = false;
     _helloIndex           = 0;
     _nextHelloMs          = now;
