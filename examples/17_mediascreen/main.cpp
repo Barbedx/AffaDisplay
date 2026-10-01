@@ -987,10 +987,13 @@ Cmd dispatch(PsychicRequest* r) {
   // climbing with nothing of ours on the wire, the fault is not ours. It has settled more
   // arguments on this bench than any other single control.
   if (op == "txgate") { g_link.setTxGate(B("on", true)); return kOk; }
+  if (op == "serialframes") { g_serialFrames = B("on", true); return kOk; }
   // op=announce&on=0 — stop OUR BA without gating the transmitter, so the board still
   // answers the panel and can still complete a handshake. txgate=0 silences everything and
   // therefore cannot tell you whether the panel would have replied.
-  if (op == "serialframes") { g_serialFrames = B("on", true); return kOk; }
+  //
+  // THIS IMAGE BOOTS WITH THE ANNOUNCE OFF (see setup()), so `on=1` is the one that changes
+  // anything here, and it lasts until the next reboot.
   if (op == "announce") {
     if (!g_base) return fail("no panel");
     g_base->setAnnounce(B("on", true));
@@ -1227,6 +1230,10 @@ void routes() {
     j += ",\"lost\":";  j += String((unsigned long)st.sessionsLost);
     j += ",\"why\":\"";  j += affa::lossReasonName(g_base->lastLossReason()); j += "\"";
     j += ",\"opened\":"; j += g_open.done ? "true" : "false";
+    // OUR BA, ON OR OFF — and it boots OFF here. A silent bus reads identically to a board
+    // that is choosing to say nothing, so without this field the next session re-derives
+    // the whole thing from an empty frame ring.
+    j += ",\"announce\":"; j += g_base->announceOn() ? "true" : "false";
     j += "},\"task\":{\"late\":"; j += String((unsigned long)st.pollLateMaxUs);
     j += ",\"cb\":\"";   j += affa::cbName(st.slowestCb); j += "\"";
     j += ",\"cbms\":";  j += String((unsigned long)st.slowestCbMs);
@@ -1531,6 +1538,16 @@ void setup() {
   g_base->onComplete(&onDone, nullptr);
   g_base->onSync(&onSyncChanged, nullptr);
   if (!g_base->begin()) Serial.println("[media] display begin FAILED");
+
+  // THE BA ANNOUNCE STARTS OFF ON THIS IMAGE. Nothing of ours reaches the wire until the
+  // panel speaks first, which is the only way to read "is the panel talking on its own?"
+  // without our own announce in the answer — and unlike txgate it leaves every reply and
+  // render available, so a panel that DOES speak can still complete the whole handshake.
+  //
+  // DELIBERATELY NOT PERSISTED. `op=announce&on=1` turns it back on for this boot and
+  // nothing more: a diagnostic default that survives a reboot is one nobody remembers
+  // setting, and this one is invisible on the wire by design. Every boot starts silent.
+  g_base->setAnnounce(false);
 
   // THE LIBRARY POLLS ITSELF FROM HERE. Callbacks first, begin(), then start() — that order
   // is the contract, and start() refuses a display that was never begun.
