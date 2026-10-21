@@ -380,8 +380,7 @@ esp_err_t state(PsychicRequest* r) {
      static_cast<unsigned long>(g_renders), static_cast<unsigned long>(g_renderFail));
   jf(",\"pane\":%lu", static_cast<unsigned long>(g_paneFrames));
   jf(",\"scene\":\"%s\"", g_scene < 0 ? "" : kScenes[g_scene].name);
-  // The library's own diagnostics — see CHANGELOG.md for why the callback is
-  // named rather than merely counted.
+  // The library's own diagnostics; the slowest callback is named, not only counted.
   jf(",\"lost\":%lu,\"foreign\":%lu,\"posted\":%u,\"postDropped\":%lu",
      static_cast<unsigned long>(st.sessionsLost), static_cast<unsigned long>(st.foreignPolls),
      st.posted, static_cast<unsigned long>(st.postDropped));

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // changelog_section.js — print one version's section of CHANGELOG.md (the release notes).
 //
-//   node tools/changelog_section.js 2.0.0
+//   node tools/changelog_section.js 1.0.0
 //
 // The section is everything between `## <version> ` and the next `## ` heading, without the
 // heading itself and the trailing `---`. Exit 1 if there is no such section, so a tag whose

@@ -8,7 +8,7 @@ in the headers, which are commented; when this file and a header disagree about 
 declaration, the header is right.
 
 Related: [`WIRE.md`](WIRE.md) (frame bytes), [`NOTES.md`](NOTES.md) (open questions),
-[`../CHANGELOG.md`](../CHANGELOG.md) (changes and migration), [`../src/AffaConfig.h`](../src/AffaConfig.h)
+[`../CHANGELOG.md`](../CHANGELOG.md) (release notes), [`../src/AffaConfig.h`](../src/AffaConfig.h)
 (every knob).
 
 ---

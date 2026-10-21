@@ -53,21 +53,21 @@ each screen. It has no menus, scrolling or key gestures. Keys arrive through `on
   registration).
 - **Cluster:** has never run on hardware. It comes from a single capture, and its opening
   cannot complete.
-- **2.0.0 on glass:** this release's link (`TwaiLink`, which is MegaOpen's TWAI link moved in)
+- **1.0.0 on glass:** this release's link (`TwaiLink`, which is MegaOpen's TWAI link moved in)
   has been built and host-tested but has not yet driven a panel from this tree.
 
 ## Install
 
 ```ini
 lib_deps =
-  https://github.com/Barbedx/AffaDisplay.git#v2.0.0
+  https://github.com/Barbedx/AffaDisplay.git#v1.0.0
 build_flags =
   -std=gnu++17
   -D AFFA_PANEL_CARMINAT=1          ; at least one panel, or the build stops with #error
 build_unflags = -std=gnu++11
 ```
 
-Once it is in the PlatformIO registry: `lib_deps = AffaDisplay@^2.0.0`.
+Once it is in the PlatformIO registry: `lib_deps = AffaDisplay@^1.0.0`.
 
 ## Minimal example
 
@@ -123,7 +123,7 @@ without a panel (a sniffer), include `<AffaTwai.h>` instead; see `examples/04_sn
 - [`docs/WIRE.md`](docs/WIRE.md): every frame the tests assert, generated from them.
 - [`docs/NOTES.md`](docs/NOTES.md): what is still unknown about the protocol.
 - [`src/AffaConfig.h`](src/AffaConfig.h): every build knob.
-- [`CHANGELOG.md`](CHANGELOG.md): changes and migration notes.
+- [`CHANGELOG.md`](CHANGELOG.md): release notes.
 
 ```
 pio test -e native      # host tests
@@ -153,7 +153,7 @@ MIT · Arduino + PlatformIO · C++17 · неблокуючий · без куп�
 - 68 тестів на хості, залізо не потрібне.
 
 Панелі, виклики, встановлення й приклад коду ті самі, що в англійській частині вище.
-Встановлення: `lib_deps = https://github.com/Barbedx/AffaDisplay.git#v2.0.0` і хоча б один
+Встановлення: `lib_deps = https://github.com/Barbedx/AffaDisplay.git#v1.0.0` і хоча б один
 `-D AFFA_PANEL_*=1`.
 
 **Стан.**
@@ -162,7 +162,7 @@ MIT · Arduino + PlatformIO · C++17 · неблокуючий · без куп�
 - **UpdateList:** бачено відкриття, `setPower`, меню й біжучий текст. Годинник не ставиться.
   Відкриття досі старе.
 - **Приборка:** на залізі не запускалася.
-- **2.0.0 на склі:** `TwaiLink` цього релізу зібрано й протестовано на хості, але панель саме з
+- **1.0.0 на склі:** `TwaiLink` цього релізу зібрано й протестовано на хості, але панель саме з
   цього дерева ще не вела.
 
 Документи: [`docs/API.md`](docs/API.md), [`docs/WIRE.md`](docs/WIRE.md),
