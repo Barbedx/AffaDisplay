@@ -111,6 +111,7 @@ bool UpdateListBase::onFrame(const Frame& f) {
     }
     AFFA_LOGD(kTag, "radio text on 0x%03X, isAux=%d", static_cast<unsigned>(kIdSetText),
               static_cast<int>(isAux));
+    (void)isAux;  // only the debug line reads it, and that compiles out below level 4
     return true;
   }
 

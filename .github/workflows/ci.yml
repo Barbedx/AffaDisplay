@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    name: host tests and checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-native-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-native-
+      - run: pip install platformio
+      - name: docs/WIRE.md matches the test vectors
+        run: node tools/gen_wire_doc.js --check
+      - name: example web pages parse
+        run: node tools/check_web_ui.js
+      - name: no side effects inside AFFA_LOG arguments
+        run: node tools/check_log_args.js
+      - name: host tests
+        run: pio test -e native
+
+  build:
+    name: build ${{ matrix.env }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [ex03_hello, ex04_sniffer, ex17_mediascreen, ex17_mediascreen_c3, ex18_aiscreen]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ matrix.env }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ matrix.env }}-
+      - run: pip install platformio
+      - name: build
+        run: |
+          set -o pipefail
+          pio run -e ${{ matrix.env }} 2>&1 | tee build.log
+      # The SDK headers are not -Wundef clean, so the build prints hundreds of warnings that
+      # are not ours. Only a warning whose location is in this repository's src/ or
+      # examples/ fails the job.
+      - name: no warnings from the library or the examples
+        run: |
+          if grep -E '^(src|examples)/[^:]+:[0-9]+:[0-9]+: warning:' build.log; then
+            echo "::error::warnings in src/ or examples/ (listed above)"
+            exit 1
+          fi

@@ -172,7 +172,13 @@ struct Scroller {
   // TWO SPACES OF GAP at the wrap: without them the loop reads as a jump cut.
   void window(char* out, uint8_t w) {
     const size_t len = strlen(text);
-    if (!on || len <= w) { snprintf(out, w + 1u, "%-*s", w, text); return; }
+    if (!on || len <= w) {                       // left-aligned, space-padded, cut at w
+      const size_t n = len < w ? len : w;
+      memcpy(out, text, n);
+      memset(out + n, ' ', w - n);
+      out[w] = 0;
+      return;
+    }
     const size_t span = len + 2;
     for (uint8_t i = 0; i < w; ++i) {
       const size_t k = (at + i) % span;
@@ -217,10 +223,13 @@ char     g_log[kLogLines][88];
 uint16_t g_logHead = 0;
 
 void logmsg(const char* fmt, ...) {
-  char line[88];
-  va_list ap; va_start(ap, fmt); vsnprintf(line, sizeof(line), fmt, ap); va_end(ap);
+  // Stamp first, message into what is left: one buffer, cut at the end, never overrun.
+  char line[sizeof(g_log[0])];
+  int n = snprintf(line, sizeof(line), "%8lu ", (unsigned long)::millis());
+  if (n < 0 || n >= static_cast<int>(sizeof(line))) n = 0;
+  va_list ap; va_start(ap, fmt); vsnprintf(line + n, sizeof(line) - n, fmt, ap); va_end(ap);
   portENTER_CRITICAL(&g_mux);
-  snprintf(g_log[g_logHead], sizeof(g_log[0]), "%8lu %s", (unsigned long)::millis(), line);
+  memcpy(g_log[g_logHead], line, sizeof(line));
   g_logHead = (g_logHead + 1) % kLogLines;
   portEXIT_CRITICAL(&g_mux);
 }

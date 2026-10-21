@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      PLATFORMIO_AUTH_TOKEN: ${{ secrets.PLATFORMIO_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tag matches library.json and library.properties
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          json=$(node -p "require('./library.json').version")
+          props=$(sed -n 's/^version=//p' library.properties | tr -d '\r')
+          echo "tag $tag, library.json $json, library.properties $props"
+          if [ "$tag" != "$json" ] || [ "$tag" != "$props" ]; then
+            echo "::error::tag v$tag does not match library.json ($json) and library.properties ($props)"
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: release notes from CHANGELOG.md
+        run: node tools/changelog_section.js "${{ steps.version.outputs.version }}" > notes.md
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-native-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-native-
+      - run: pip install platformio
+      - run: node tools/gen_wire_doc.js --check
+      - name: host tests
+        run: pio test -e native
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "AffaDisplay ${{ steps.version.outputs.version }}" \
+            --notes-file notes.md
+
+      # Only when the repository has a PLATFORMIO_AUTH_TOKEN secret; otherwise skipped.
+      - name: publish to the PlatformIO registry
+        if: env.PLATFORMIO_AUTH_TOKEN != ''
+        run: pio pkg publish --type library --no-interactive
