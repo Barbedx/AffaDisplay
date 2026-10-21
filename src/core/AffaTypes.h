@@ -226,17 +226,9 @@ inline constexpr TxTicket kNoTicket = 0;
 
 // WHAT EVERY RENDER CALL RETURNS: the handle and the reason, together, in four bytes.
 //
-// It replaces three spellings of the same answer. Before 2.0 a render returned a bare
-// `Result` and the caller had to fetch the handle separately from `lastEnqueued()`, whose
-// contract was "READ IT IMMEDIATELY: the next enqueue overwrites it, including a render the
-// menu makes for you" — a documented footgun that existed only because the ticket was not
-// returned. Meanwhile the owned task issued a THIRD handle (`TxRequest`) and kept a
-// translation table, because a posted render could not return a ticket that had not been
-// minted yet.
-//
-// 2.0 mints the ticket at SUBMIT time, from an atomic counter, on whichever task called.
-// So the handle is always available to return, the same value reaches `onComplete()` in
-// both threading modes, and `lastEnqueued()` and `TxRequest` are both gone.
+// The ticket is minted at SUBMIT time, from an atomic counter, on whichever task called.
+// So the handle is always available to return, and the same value reaches `onComplete()`
+// in both threading modes.
 //
 // `ticket` is the authority. A non-zero ticket means ACCEPTED, and `result` is Ok; zero
 // means refused, and `result` says why. It is never "accepted but untracked".
@@ -313,7 +305,7 @@ struct Stats {
 };
 
 // ---------------------------------------------------------------------------
-// The observation seam — ONE LAYER, as of 2.0.
+// The observation seam — ONE LAYER.
 // ---------------------------------------------------------------------------
 // There were three. Layer 1 was a filtered subscription table (`subscribe()` /
 // `FrameMatch` / `SubHandle`) and Layer 2 was a decoded event sink (`onEvent()` /
@@ -353,8 +345,8 @@ using FrameTap = void (*)(const Frame& f, Direction d, void* ctx);
 // task, by design, because that is what bounds key latency by the poll period alone. It
 // cannot be prevented. What it CAN be is attributable.
 //
-// Until 2.0 the only evidence was `Status::pollLateMaxUs`: "an iteration took 340 ms". That
-// says something is wrong and nothing about where. The three incidents in
+// `Status::pollLateMaxUs` alone says "an iteration took 340 ms": something is wrong, and
+// nothing about where. The three incidents in
 // docs/NOTES.md §3 all presented as "the panel is frozen" with every error
 // counter at zero, and the search each time was the whole application. This is the missing
 // word in that sentence.

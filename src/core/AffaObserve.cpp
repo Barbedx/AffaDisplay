@@ -1,7 +1,6 @@
 // AffaObserve — the observation seam, and the choke point every frame passes through.
 //
-// Split out of a 2156-line AffaDisplayBase.cpp in 2.0. One
-// class, four translation units: AffaDisplayBase.cpp (lifecycle, poll() orchestration,
+// One class, four translation units: AffaDisplayBase.cpp (lifecycle, poll() orchestration,
 // receive drain, keys, public surface), AffaSync.cpp (the opening FSM), AffaTx.cpp (queue,
 // ISO-TP segmentation, flow control, retries) and this one.
 //

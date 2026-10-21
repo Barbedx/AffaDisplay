@@ -137,8 +137,7 @@ class AffaMpsc {
 // The handful of calls that are NOT byte-builders. Everything else — every render in every
 // panel, present and future — crosses as a payload and needs no entry here, which is the
 // whole point of putting the boundary at enqueue() instead of over a hand-written table of
-// operations. The pre-2.0 command queue had fourteen render ops and had to be edited for
-// every new screen; twelve were added and none were mirrored.
+// operations, which would have to be edited for every new screen.
 //
 // This list is closed and short because it is exactly the calls that mutate library state
 // rather than build bytes.
@@ -157,8 +156,8 @@ enum class DispatchOp : uint8_t {
 // render truncates exactly where the wire does.
 struct DispatchItem {
   // The ticket was minted by the calling task before this was posted, so the caller already
-  // holds it. The drain must NOT mint a second one — that is the two-handle-space bug 2.0
-  // deleted (see Submitted in AffaTypes.h).
+  // holds it. The drain must NOT mint a second one: there is one handle space (see
+  // Submitted in AffaTypes.h).
   TxTicket   ticket = kNoTicket;
 
   DispatchOp op     = DispatchOp::None;   // None == this is a payload

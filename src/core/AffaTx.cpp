@@ -1,7 +1,6 @@
 // AffaTx — the transmit queue, ISO-TP segmentation, flow control and retries.
 //
-// Split out of AffaDisplayBase.cpp in 2.0; see AffaObserve.cpp
-// for the four-way division. handleAckFrame() is here rather than in AffaSync.cpp because
+// One of AffaDisplayBase's four translation units; see AffaObserve.cpp for the division. handleAckFrame() is here rather than in AffaSync.cpp because
 // an `0x74` or a `30 01 00` is ISO-TP flow control addressed to the job at the head of this
 // queue — it belongs to the transfer, not to the handshake.
 //
@@ -59,9 +58,8 @@ bool AffaDisplayBase::handleAckFrame(const Frame& f) {
 // THE ONE PLACE AN ARBITRARY TASK TOUCHES THIS OBJECT, so it is the one place that needs an
 // atomic. Every other field is written by the poll owner alone.
 //
-// Post-increment semantics, so the value returned is the one that was there — the same
-// numbering the pre-2.0 non-atomic version produced, which is what keeps the golden tests
-// comparing against literal ticket numbers valid.
+// Post-increment semantics, so the value returned is the one that was there; the tests
+// compare against literal ticket numbers.
 //
 // The wrap is folded into the modulo rather than branched on, because a compare-and-branch
 // between the fetch and the store is exactly the race this exists to avoid: two callers could
@@ -140,8 +138,8 @@ void AffaDisplayBase::pumpDispatch() {
     if (!_dispatch.pop(it)) return;
 
     if (it.isPayload()) {
-      // The ticket was minted by the CALLING task and the caller already holds it. Minting
-      // another here is the two-handle-space bug 2.0 deleted.
+      // The ticket was minted by the CALLING task and the caller already holds it. Never
+      // mint another here: there is one handle space.
       const Submitted s = admit(it.ticket, it.funcId, it.ext ? nullptr : it.data,
                                 it.len, it.opt, it.ext);
       // A posted render that the queue refuses NOW reports through onComplete with its
@@ -346,7 +344,7 @@ Submitted AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t
   if (!knownFunc(funcId))     { _lastResult = Result::UnknownFunc; return Submitted::refused(Result::UnknownFunc); }
 
   // MINTED HERE, ABOVE EVERY STATE-DEPENDENT CHECK, and that placement is the whole point
-  // of 2.0's handle model: the caller must be able to be handed its ticket without waiting
+  // of the handle model: the caller must be able to be handed its ticket without waiting
   // for the task that owns the queue to do anything. A ticket burned on a refusal below
   // costs nothing — the counter wraps at 0xFFFF and no refusal returns one.
   const TxTicket t = nextTicket();
@@ -375,12 +373,12 @@ Submitted AffaDisplayBase::admit(TxTicket t, uint16_t funcId, const uint8_t* dat
   if (opt.reassertAfterSession && opt.slot == RenderSlot::Control)
     (void)dropUnstartedReasserts();
 
-  // A LINK THAT IS MERELY NOT READY IS NOT A REJECTION ANY MORE.
+  // A LINK THAT IS MERELY NOT READY IS NOT A REJECTION.
   //
-  // Before 0.3.0 this returned NoSync or LinkDown here and the application owned the
-  // recovery: notice the failure, keep the value, watch for sync, re-issue. Every consumer
-  // wrote that loop and at least one wrote it without a backoff, which on a two-node bus
-  // spins at loop rate and drives our own controller toward BUS_OFF (docs/API.md §3.1).
+  // Refusing here would hand the recovery to the application: notice the failure, keep the
+  // value, watch for sync, re-issue. A consumer loop like that without a backoff spins at
+  // loop rate on a two-node bus and drives our own controller toward BUS_OFF
+  // (docs/API.md §3.1).
   //
   // So the job is ACCEPTED and HELD instead, for up to AFFA_TX_HOLD_MS, and pumpTx() starts
   // it when the link is usable. Latest-value-wins coalescing means the held job is always
@@ -785,8 +783,7 @@ void AffaDisplayBase::finishJob(Result r, bool allowRetry) {
   // ---- retry, before anything is torn down --------------------------------
   // THE APPLICATION NEVER SEES A TRANSIENT FAILURE IT COULD HAVE RETRIED ITSELF. It sees
   // one verdict per ticket: the value that finally landed, or the failure that survived
-  // AFFA_TX_MAX_RETRIES attempts. Before 0.3.0 every one of these reached onComplete and
-  // the consumer owned the loop — see docs/API.md §3.1 for what that cost.
+  // AFFA_TX_MAX_RETRIES attempts (docs/API.md §3.1).
   // A LINK FAULT DOES NOT SPEND AN ATTEMPT. LinkDown means the controller was not usable at
   // that instant — bus-off, mid-recovery, TX gated for an OTA — and the job never got a
   // hearing. Counting it as a try lets a flapping bus exhaust the budget in seconds and

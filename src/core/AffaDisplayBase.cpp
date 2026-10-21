@@ -1,11 +1,9 @@
 // AffaDisplayBase — lifecycle, the poll() contract, the receive drain, keys, and the
 // public surface.
 //
-// ONE CLASS, FOUR TRANSLATION UNITS, as of 2.0. This file was
-// 2156 lines spanning four unrelated jobs; the other three are AffaSync.cpp (the opening
-// FSM), AffaTx.cpp (queue, ISO-TP, retries) and AffaObserve.cpp (the frame tap and the
-// choke point every frame passes through). Nothing moved but line numbers — the split
-// commit changes no behaviour, deliberately, so that the next one can be read.
+// ONE CLASS, FOUR TRANSLATION UNITS. The other three are AffaSync.cpp (the opening FSM),
+// AffaTx.cpp (queue, ISO-TP, retries) and AffaObserve.cpp (the frame tap and the choke point
+// every frame passes through).
 //
 // WHY pumpRx() IS HERE AND NOT IN AffaObserve.cpp: it is poll() orchestration. It decides
 // which of the three FSMs a frame belongs to, and the ORDER it does that in — echo drop,

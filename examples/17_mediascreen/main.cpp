@@ -1542,7 +1542,7 @@ void setup() {
   // WHY THIS CONSOLE IS THE ONE THAT HAD TO CHANGE. Every /api/cmd handler below calls the
   // display from the HTTP server's task while loop() used to call poll() from the Arduino
   // task, and both mutate the transmit queue. It was an unguarded data race that happened
-  // not to have bitten yet. Since 2.0 a render from any task builds its bytes on that task's
+  // not to have bitten yet. A render from any task builds its bytes on that task's
   // stack and crosses into the poll task as data, so the handlers are correct as written.
   if (!g_task.start(*g_base))
     Serial.println("[media] AffaTask::start() FAILED — nothing will be polled");

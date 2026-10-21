@@ -24,7 +24,7 @@ inline uint32_t nowMs() { return static_cast<uint32_t>(esp_timer_get_time() / 10
 // handle is ever 1, so every poll() is refused until the owned task claims ownership as
 // its first action.
 //
-// It has a second effect since 2.0 and it is the safe one: renders called during that
+// It has a second effect, and it is the safe one: renders called during that
 // window are POSTED to the dispatch ring rather than applied, because AffaDisplayBase sees
 // an owner it is not. They drain on the owned task's first iteration.
 void* const kOwnerClaiming = reinterpret_cast<void*>(1);
@@ -69,9 +69,8 @@ bool AffaTask::start(AffaDisplayBase& d, const TaskOptions& opt) {
   _pollLateMaxUs = 0;
   _pollLateAtMs  = 0;
 
-  // NO onComplete TAKEOVER. The pre-2.0 version installed its own here so it could map
-  // TxTicket onto a second handle space; there is one handle space now, so the
-  // application's completion callback is the application's and start() does not touch it.
+  // NO onComplete TAKEOVER. There is one handle space, so the application's completion
+  // callback is the application's and start() does not touch it.
   d.setPollOwner(kOwnerClaiming, &AffaTask::currentTaskId);
 
   // PinnedToCore unconditionally: ESP-IDF provides it on unicore targets too, where

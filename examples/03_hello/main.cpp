@@ -70,10 +70,8 @@ volatile uint8_t  g_ackRes = 0;
 volatile uint32_t g_ackSeq = 0;
 uint32_t          g_seen   = 0;
 
-// ONE HANDLE SPACE SINCE 2.0. This used to take an affa::rtos::TxRequest — a second handle
-// the owned task minted because a posted render could not return the real ticket. Renders
-// go through the display now and hand back the ticket directly, so there is one type here
-// and no translation table behind it.
+// ONE HANDLE SPACE: the ticket a render returns is the one that arrives here, whichever task
+// made the call.
 void onDone(affa::TxTicket req, affa::Result r, void*) {
   g_ackReq = req;
   g_ackRes = static_cast<uint8_t>(r);

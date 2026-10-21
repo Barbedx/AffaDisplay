@@ -1,7 +1,6 @@
 // AffaSync — the opening, and nothing else.
 //
-// Split out of AffaDisplayBase.cpp in 2.0; see AffaObserve.cpp
-// for the four-way division. What lives here is the Phase table and the frames that drive
+// One of AffaDisplayBase's four translation units; see AffaObserve.cpp for the division. What lives here is the Phase table and the frames that drive
 // it: the announce, the hello burst, the panel's channel reflex, the heartbeat, and the
 // watchdog that ends a session.
 //
@@ -694,7 +693,7 @@ void AffaDisplayBase::pumpSync() {
     // THE QUEUE SURVIVES THE PEER NOW. This used to be dropUnstarted(Cancelled) — the panel
     // has forgotten us, so everything addressed to it was destroyed and the application had
     // to notice the sync event, keep its own copy of what was on screen, and re-issue it.
-    // That is precisely the recovery work 0.3.0 moves into the library.
+    // That recovery work belongs in the library.
     //
     // What actually became invalid is the REGISTRATION, so that is what is dropped; the
     // renders are held, re-registered by pumpTx() when the panel comes back, and given up

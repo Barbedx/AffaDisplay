@@ -121,20 +121,11 @@
 // src/rtos/ — the library creates and owns a FreeRTOS task that calls poll(), and the
 // application never calls poll() at all.
 //
-// ON BY DEFAULT FOR ESP32 SINCE 2.0, and the reversal is the whole point of the refactor.
-//
-// It defaulted to 0 through 1.x on an argument that was correct at the time: turning it on
-// changes WHICH TASK a consumer's callbacks run on, which is observable behaviour, so it
-// should be asked for rather than imposed (docs/NOTES.md §3 deferred the
-// decision explicitly — "revisit for 1.0"). What that produced is countable: THIRTEEN OF
-// NINETEEN shipped examples turned it off and pumped poll() from loop(), including the one
-// whose HTTP handlers then raced the queue.
-//
-// The reason they turned it off is gone. Until 2.0 the owned task published its own render
-// surface covering ten of twenty-two calls, so anything richer forced the application back
-// onto the raw display — at which point the task was an extra object with a second
-// vocabulary. The display is the thread-safe surface now, whichever task calls it, so the
-// task costs a consumer nothing but the two lines that start it.
+// ON BY DEFAULT FOR ESP32. It changes WHICH TASK a consumer's callbacks run on (the
+// library's, not the caller's), and in exchange every render is safe from any task: an
+// application that pumps poll() from loop() and renders from an HTTP handler races the
+// transmit queue, and this mode removes that whole class. The display itself is the
+// thread-safe surface, so the task costs a consumer nothing but the two lines that start it.
 //
 // A build that genuinely wants to own poll() itself still says so: -D AFFA_ENABLE_TASK=0,
 // and the contract reverts to the original one — poll() from exactly one task, render from
@@ -229,7 +220,7 @@
 // LinkDown. A permanent one (NotSupported, BadArgument, TooLong, UnknownFunc) is never
 // retried, and neither is a deliberate one (Aborted, Cancelled): the application asked.
 //
-// 0 restores the pre-0.3.0 behaviour exactly: one attempt, then the failure is reported.
+// 0 means one attempt, then the failure is reported.
 #ifndef AFFA_TX_MAX_RETRIES
 #  define AFFA_TX_MAX_RETRIES 3
 #endif
@@ -265,7 +256,7 @@
 // It is bounded on purpose. A screen that appears ninety seconds late is worse than one
 // that never appeared, and latest-value-wins coalescing means the held job is always the
 // newest value for its slot anyway. 0 disables holding: enqueue() then rejects with NoSync
-// or LinkDown immediately, which is the pre-0.3.0 contract.
+// or LinkDown immediately and the application owns the recovery.
 #ifndef AFFA_TX_HOLD_MS
 #  define AFFA_TX_HOLD_MS 8000
 #endif
@@ -296,8 +287,7 @@
 // free: it stops the RX task, reinstalls the controller, and then starts the task again.
 // Retrying that at 3 s for ever against a dead bus is its own kind of storm.
 //
-// 0 disables link recovery entirely, which is the pre-0.3.1 contract: isLive() goes false
-// and stays false.
+// 0 disables link recovery entirely: isLive() goes false and stays false.
 #ifndef AFFA_LINK_RECOVER_MAX_MS
 #  define AFFA_LINK_RECOVER_MAX_MS 30000
 #endif
@@ -306,7 +296,7 @@
 #  error "AFFA_LINK_RECOVER_MAX_MS is the backoff CEILING; it cannot be below the first delay."
 #endif
 
-// A controller can be RUNNING and stone deaf, and until 0.4.0 that state was NOBODY'S JOB.
+// A controller can be RUNNING and stone deaf, and that state needs an owner.
 // Measured on the bench, 2026-07-29: state 1 (RUNNING), txErr 0, never bus-off — and rxErr
 // pinned at 129, bus errors at exactly the panel's frame rate, rxFrames frozen. healthy()
 // is "state == RUNNING", so pumpLink() saw nothing wrong, the driver's watchdog reacts to
@@ -487,11 +477,11 @@
 // Callbacks fire inside poll(), on the poll task, and that is deliberate: it is what bounds
 // key latency by the poll period ALONE rather than by a queue. The price is that a callback
 // which blocks blocks the protocol, and no amount of design prevents an application from
-// writing one. So it is measured, and — since 2.0 — ATTRIBUTED.
+// writing one. So it is measured, and ATTRIBUTED.
 //
 // The number matters less than the attribution. 16 ms is AFFA_TASK_LATE_FACTOR periods at
-// the default 2 ms, i.e. the same threshold the owned task already used to call an iteration
-// late; what is new is that the log line says WHICH callback rather than "a callback".
+// the default 2 ms, the same threshold the owned task uses to call an iteration late; the
+// log line says WHICH callback rather than "a callback".
 //
 // 0 compiles the timing out entirely — no clock reads on the callback path, no fields.
 #ifndef AFFA_CALLBACK_BUDGET_MS

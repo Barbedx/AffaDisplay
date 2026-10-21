@@ -210,9 +210,8 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   bool      registered() const;   //  hasFlag(state, FuncsReg)
   bool      busy()       const;   // a job is in flight or queued, or a render is posted
   Result    lastResult() const;   // Result of the most recently COMPLETED ticket. DIAGNOSTIC
-                                  // ONLY since 2.0 — a rejection now travels back in
-                                  // Submitted::result, on the calling task, instead of being
-                                  // left here for the caller to race another task for.
+                                  // ONLY — a rejection travels back in Submitted::result,
+                                  // on the calling task.
   TxTicket  lastTicket() const;   // that ticket
   uint8_t   queued()     const;   // jobs waiting behind the active one
   Stats     stats()      const;   // forwarded from the link
@@ -504,10 +503,7 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   //
   // THE FOUR PLACES A REGISTRATION IS VOIDED MUST AGE THE QUEUE IDENTICALLY — the panel
   // voiding us, the peer timeout, the generic-profile Start path, and a link recovery — and
-  // this was four hand-written copies of the same loop until 2.0. It had already failed once
-  // by omission: the copy lived only in a branch that was later deleted, which is to say it
-  // was missing from the one path the bench actually exercises. A rule that must hold in
-  // four places is one function.
+  // a rule that must hold in four places is one function.
   void reholdQueuedPayloads(uint32_t now);
 
   // Drops every job in the queue, started or not, reporting `r` for each payload ticket.
@@ -573,8 +569,7 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // Drain what other tasks posted. Owner only; called from poll().
   void pumpDispatch();
   // Stores the new state and fires SyncCb + EventKind::SyncChanged, but only on an actual
-  // change. It took an `extra` EventKind until 2.0, whose only job was to fire a second
-  // Layer 2 event beside the first; with that sink gone the parameter had no readers.
+  // change.
   void setSync(SyncState s);
   TxTicket nextTicket();
 
@@ -704,8 +699,8 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // Bumped at every panel-session boundary. A job is stamped only once it starts, so a
   // late ACK from a previous registration/control transfer cannot mutate the new session.
   uint32_t  _sessionEpoch = 1;
-  // ATOMIC SINCE 2.0, and it is the one field that had to become so. A ticket is minted at
-  // SUBMIT time now — on whichever task called the render — so two tasks can be inside
+  // ATOMIC, the one field that has to be. A ticket is minted at SUBMIT time, on whichever
+  // task called the render, so two tasks can be inside
   // nextTicket() at once. Everything else in this class is still written by the poll owner
   // alone; this counter is the single point where an arbitrary caller touches the object,
   // which is exactly why the crossing is cheap.

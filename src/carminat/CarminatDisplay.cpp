@@ -45,10 +45,8 @@ bool CarminatDisplay::supports(Feature f) const {
     case Feature::Text:        return true;
     case Feature::Time:        return true;
     case Feature::Power:       return true;
-    // UNCONDITIONALLY TRUE since 2.0. showMenu / showMenuN / highlightItem /
-    // selectMenuItem are protocol, not widget, and no gate removes them. This line used to
-    // read `AFFA_ENABLE_MENU != 0` — a macro deleted with src/widget/, which made the whole
-    // file compile only because every env in this repo still passed -D AFFA_ENABLE_MENU.
+    // UNCONDITIONALLY TRUE. showMenu / showMenuN / highlightItem / selectMenuItem are
+    // protocol, not widget, and no gate removes them.
     // A consumer that did not would have hit a hard error here.
     case Feature::Menu:        return true;
     case Feature::Popup:       return AFFA_ENABLE_POPUP != 0;
@@ -69,10 +67,8 @@ Submitted CarminatDisplay::submit(uint16_t funcId, const uint8_t* data, uint8_t 
   opt.coalesce = coalesce;
   opt.priority = priority;
   opt.reassertAfterSession = reassertAfterSession;
-  // Straight through since 2.0. This used to be a three-way translation — call enqueue(),
-  // notice kNoTicket, go back and fetch the reason out of lastResult() — because a render
-  // returned a bare Result and had nowhere to carry the handle. Submitted carries both, so
-  // the wrapper has nothing left to do but name the options.
+  // Straight through: Submitted carries both the ticket and the reason, so the wrapper has
+  // nothing to do but name the options.
   return enqueue(funcId, data, len, opt);
 }
 

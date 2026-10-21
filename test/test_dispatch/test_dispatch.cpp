@@ -1,6 +1,6 @@
 // The task boundary and the long-payload pool.
 //
-// "Render from any task" is the 2.0 contract: a call off the poll owner's task mints its
+// "Render from any task" is the contract: a call off the poll owner's task mints its
 // ticket on the spot, copies the finished bytes into the dispatch ring, and the owner admits
 // them inside its next poll(). Nothing else may touch the queue, and a long payload must not
 // lend the caller's memory to that other task. These tests pin both halves with a fake task

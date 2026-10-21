@@ -222,9 +222,8 @@ inline void pumpUntilIdle(D& d, int maxPolls = 400) {
 
 // ASSERT_RESULT takes either spelling of an acceptance verdict.
 //
-// Renders return `Submitted{ticket, result}` since 2.0; the handful of calls that enqueue
-// nothing — pressKey, nav, transmitKey — still return a bare Result, because there is no
-// ticket to hand back. Both are acceptance verdicts and every assertion below is about the
+// Renders and pressKey return `Submitted{ticket, result}`; the handful of calls that enqueue
+// nothing (nav, transmitKey) return a bare Result, because there is no ticket to hand back. Both are acceptance verdicts and every assertion below is about the
 // verdict, so the macro takes the Result out of whichever it was given rather than making
 // three hundred call sites say `.result`.
 inline affa::Result resultOf(affa::Result r) { return r; }

@@ -10,19 +10,8 @@
 //   // …and from ANY task, at any time, through the DISPLAY:
 //   display.setTextStyled("HELLO", icon, src, fmt);
 //
-// THAT LAST LINE IS WHAT CHANGED IN 2.0, and it is the whole reason this class shrank.
-//
-// Until 2.0 AffaTask published its own render surface — setText, setTime, showMenu and
-// eleven more — copied into a command queue with its own handle space (TxRequest) and its
-// own translation table back to TxTicket. It covered ten of CarminatDisplay's twenty-two
-// calls. Twelve renders were added to the panels over the following releases and NONE were
-// mirrored, because mirroring one meant editing four places nobody was looking at. So an
-// application that wanted a styled main line or the nav pane had to take the display
-// directly — and then the owned task looked like an extra object with a second vocabulary,
-// which is why thirteen of nineteen shipped examples turned it off.
-//
-// The boundary moved into AffaDisplayBase::enqueue() instead, where every render in every
-// panel already funnels. So the display IS the thread-safe surface, for calls that exist now
+// THAT LAST LINE is why this class has no render calls of its own. The task boundary is in
+// AffaDisplayBase::enqueue(), where every render in every panel funnels. So the display IS the thread-safe surface, for calls that exist now
 // and calls written later, and this class is left with the one job its name claims: run
 // poll() on a task of its own.
 //
@@ -119,10 +108,9 @@ class AffaTask {
   // creation failed. NEVER a silent success that never polls — that is the exact failure
   // the old unconditional #error existed to prevent.
   //
-  // IT DOES NOT TOUCH YOUR CALLBACKS. The pre-2.0 version took over
-  // AffaDisplayBase::onComplete so it could translate TxTicket into its own TxRequest
-  // handle. There is one handle space now, so there is nothing to translate and nothing to
-  // take over: install onComplete on the display, before or after start(), and it is yours.
+  // IT DOES NOT TOUCH YOUR CALLBACKS. There is one handle space, so there is nothing to
+  // translate and nothing to take over: install onComplete on the display, before or after
+  // start(), and it is yours.
   bool start(AffaDisplayBase& d, const TaskOptions& opt = TaskOptions{});
 
   // Stops and joins. Pending-and-unstarted renders complete Cancelled; a message already on

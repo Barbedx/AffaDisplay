@@ -53,8 +53,8 @@ Submitted UpdateListBase::enqueueRender(uint16_t funcId, const uint8_t* data, ui
                                      RenderSlot slot) {
   TxOptions opt;
   opt.slot = slot;
-  // Straight through since 2.0 — see CarminatDisplay::submit() for why this stopped being a
-  // three-way translation. Submitted is an ACCEPTANCE verdict; the delivery verdict arrives
+  // Straight through, as in CarminatDisplay::submit(). Submitted is an ACCEPTANCE verdict;
+  // the delivery verdict arrives
   // later through onComplete(), keyed by the ticket this returns.
   return enqueue(funcId, data, len, opt);
 }
