@@ -67,7 +67,7 @@ class CarminatDisplay final : public AffaDisplayBase {
     g.listMaxItems  = carminat::kMenuMaxItems;    // 10; the OEM corpus shows 2, 4 and 6
     g.listItemChars = 26;
     g.fullRows      = 3;
-    g.fullRowChars  = 26;
+    g.fullRowChars  = carminat::kFullscreenCols;  // 22, camera-measured
     g.imageWidth    = static_cast<uint8_t>(carminat::kNavWidth);
     g.imageHeight   = static_cast<uint8_t>(carminat::kNavHeight);
     return g;

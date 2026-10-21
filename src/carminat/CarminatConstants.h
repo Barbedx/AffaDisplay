@@ -289,6 +289,11 @@ inline constexpr uint8_t kBoxHeaderByte5  = 0x49;  // constant in all five captu
 inline constexpr uint8_t kBoxLabelOffset  = 32;    // content offset of label 0
 inline constexpr uint8_t kBoxBodyBytes    = 73;    // 105 - 32, whatever the button count
 inline constexpr uint8_t kBoxBaseLength   = 105;   // declared length with no buttons
+// showFullscreenText is the zero-button box: same declared length, text from the same
+// offset (the first label cell, since there are no labels), header byte 5 = 0x49.
+inline constexpr uint8_t kFullscreenLength = kBoxBaseLength;   // 0x69
+inline constexpr uint8_t kFullscreenTextAt = kBoxLabelOffset;  // 32
+inline constexpr uint8_t kFullscreenCols   = 22;   // wide characters per row, camera-measured
 // Selection inside a message box moves with `03 29 05 <index>` — a THREE-BYTE SINGLE FRAME,
 // mode 0x05, not the 0x01 the list screen uses and not the 7-byte `29 01 <rowtag> 80` form.
 // [OEM] `CONFIRM SCREEN SWITCH TO YES.csv`, answered with a bare 0x74.

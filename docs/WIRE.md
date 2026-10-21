@@ -214,24 +214,81 @@ asserted by `test_showMenu_matches_the_capture_verbatim_vector`
 
 ### `kFullscreenNavCd`
 
+> showFullscreenText: the OEM geometry, byte for byte what MegaOpen's sendFullscreen()
+> (src/display/PanelOps.cpp) puts on the car's panel. Declared 0x69, byte 5 = 0x49, rows
+> from content byte 32, 0x0D after each, the body space-filled. 107 bytes, 16 frames, last
+> PCI 0x2F.
+
 ```
-151  10 60 21 05 FF 00 00 40
+151  10 69 21 05 FF 00 00 49
 151  21 00 00 00 00 00 00 00
 151  22 00 00 00 00 00 00 00
 151  23 00 00 00 00 00 00 00
-151  24 00 00 00 00 00 20 20
-151  25 50 4C 45 41 53 45 20
-151  26 49 4E 53 45 52 54 0D
-151  27 4E 41 56 49 47 41 54
-151  28 49 4F 4E 20 43 44 0D
+151  24 00 00 00 00 00 50 4C
+151  25 45 41 53 45 20 49 4E
+151  26 53 45 52 54 0D 4E 41
+151  27 56 49 47 41 54 49 4F
+151  28 4E 20 43 44 0D 20 20
 151  29 20 20 20 20 20 20 20
 151  2A 20 20 20 20 20 20 20
 151  2B 20 20 20 20 20 20 20
 151  2C 20 20 20 20 20 20 20
-151  2D 20 20 20 20 20 20 00
+151  2D 20 20 20 20 20 20 20
+151  2E 20 20 20 20 20 20 20
+151  2F 20 00 00 00 00 00 00
 ```
 
-asserted by `test_showFullscreenText_is_14_frames`
+asserted by `test_showFullscreenText_uses_the_oem_geometry`
+
+### `kFullscreenThreeRows`
+
+> Three rows, mixed case.
+
+```
+151  10 69 21 05 FF 00 00 49
+151  21 00 00 00 00 00 00 00
+151  22 00 00 00 00 00 00 00
+151  23 00 00 00 00 00 00 00
+151  24 00 00 00 00 00 4D 65
+151  25 73 73 61 67 65 73 0D
+151  26 41 6E 6E 61 3A 20 6F
+151  27 6E 20 6D 79 20 77 61
+151  28 79 0D 48 6F 6D 65 20
+151  29 62 79 20 73 69 78 0D
+151  2A 20 20 20 20 20 20 20
+151  2B 20 20 20 20 20 20 20
+151  2C 20 20 20 20 20 20 20
+151  2D 20 20 20 20 20 20 20
+151  2E 20 20 20 20 20 20 20
+151  2F 20 00 00 00 00 00 00
+```
+
+asserted by `test_showFullscreenText_three_rows_match_megaopen`
+
+### `kFullscreenFull`
+
+> Three long rows: the body runs out during row 3, and the last byte is still its 0x0D.
+
+```
+151  10 69 21 05 FF 00 00 49
+151  21 00 00 00 00 00 00 00
+151  22 00 00 00 00 00 00 00
+151  23 00 00 00 00 00 00 00
+151  24 00 00 00 00 00 41 42
+151  25 43 44 45 46 47 48 49
+151  26 4A 4B 4C 4D 4E 4F 50
+151  27 51 52 53 54 55 56 57
+151  28 58 59 5A 30 31 32 33
+151  29 0D 61 62 63 64 65 66
+151  2A 67 68 69 6A 6B 6C 6D
+151  2B 6E 6F 70 71 72 73 74
+151  2C 75 76 77 78 79 7A 34
+151  2D 35 36 37 0D 54 48 49
+151  2E 52 44 20 52 4F 57 20
+151  2F 0D 00 00 00 00 00 00
+```
+
+asserted by `test_showFullscreenText_cuts_at_the_end_of_the_body`
 
 ### `kPopupVol28`
 
@@ -391,4 +448,4 @@ asserted by `test_key_ack_id_is_computed_not_tabulated`, `test_registration_walk
 
 ---
 
-103 frames across 32 vectors.
+137 frames across 34 vectors.

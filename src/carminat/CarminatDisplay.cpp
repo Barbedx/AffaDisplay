@@ -459,49 +459,38 @@ Submitted CarminatDisplay::navTick(bool phase) {
 
 #if AFFA_ENABLE_FULLSCREEN
 
-// The most heavily EXERCISED builder in the library — 09_golden has put 24 912 of these on
-// the glass with `failed 0` — and it is a zero-button message box in everything but name:
-// `21 05 FF 00 00 <b5>`, body at content 32, 0x0D-separated, exactly showMessageBox(0).
-//
-// TWO BYTES DISAGREE WITH THE OEM AND THEY ARE DELIBERATELY LEFT ALONE, 2026-08-06:
-//
-//   * byte [5] is 0x40 here; ALL FIVE captured OEM mode-0x05 frames carry 0x49.
-//   * the declared length is 0x60 = 96; the OEM's zero-button screens declare 0x69 = 105.
-//
-// So this is NOT the "matching header" the previous comment claimed — that claim did not
-// survive the corpus. What is true is that these bytes render, animate and soak on the
-// bench panel, and the OEM's do not have that record HERE. Changing the most-exercised path
-// in the library on the strength of a byte diff, without putting the result on glass, is
-// the trade this project keeps losing. It is a bench question, not an edit:
-// archive/bench-notes:docs/captures/some more logs from origin/ has it queued.
-//
-// It is also worth knowing that a fullscreen needs no teardown — see below — and that the
-// report of "fullscreen is broken" on 2026-08-06 turned out to be 17_mediascreen's repaint
-// gate swallowing the setText that was meant to replace it, not this builder.
+// The OEM geometry: a zero-button message box in everything but name. Declared 0x69 (105),
+// header `21 05 FF 00 00 49` (byte 5 = declared - 0x20, as in all five OEM mode-0x05
+// captures), rows from content byte 32, each ended by 0x0D, the 73-byte body space-filled.
+// Measured with a camera on the car's panel through MegaOpen, which drew it this way for
+// notifications and the track splash: text placed before byte 32 is lost, and a row shows
+// about 22 wide characters (fullRowChars). The earlier 0x60 / 0x40 header with two leading
+// spaces indented row 1 and left row 3 short of room.
 Submitted CarminatDisplay::showFullscreenText(const char* l1, const char* l2, const char* l3) {
   const Ascii a(l1);
   const Ascii b(l2);
   const Ascii c(l3);
 
-  uint8_t p[2 + 96];
+  uint8_t p[2 + kFullscreenLength];
   std::memset(p, 0x00, sizeof(p));
   p[0] = kPciFirstFrame;
-  p[1] = 0x60;                 // 96 content bytes follow — correct
+  p[1] = kFullscreenLength;    // 0x69
   p[2] = kCmdScreen;           // 0x21
   p[3] = kScreenFullscreen;    // 0x05
-  p[4] = 0xFF;
+  p[4] = kBoxNoSelection;      // 0xFF
   p[5] = 0x00;
   p[6] = 0x00;
-  p[7] = 0x40;
+  p[7] = kBoxHeaderByte5;      // 0x49
   // SPACE-filled so unused cells render blank rather than as garbage.
-  for (size_t k = 2 + 32; k < sizeof(p); ++k) p[k] = 0x20;
+  for (size_t k = 2 + kFullscreenTextAt; k < sizeof(p); ++k) p[k] = 0x20;
 
-  size_t q = 2 + 34;             // two leading spaces at content 32..33 — as captured
+  size_t q = 2 + kFullscreenTextAt;
+  const size_t end = sizeof(p);
 
   const auto putLine = [&](const Ascii& s) {
     if (s.len == 0) return;    // an empty line is skipped ENTIRELY: no separator either
-    for (size_t i = 0; i < s.len && q < 2 + 95; ++i) p[q++] = static_cast<uint8_t>(s.buf[i]);
-    if (q < 2 + 96) p[q++] = kLineSeparator;
+    for (size_t i = 0; i < s.len && q < end - 1; ++i) p[q++] = static_cast<uint8_t>(s.buf[i]);
+    if (q < end) p[q++] = kLineSeparator;
   };
   putLine(a);
   putLine(b);

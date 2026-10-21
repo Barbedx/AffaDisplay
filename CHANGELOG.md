@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.1.0 — 2026-10-21
+
+### `showFullscreenText` uses the OEM geometry
+
+The fullscreen now matches the bytes MegaOpen sends to the car's panel (its `sendFullscreen`,
+camera-measured):
+- declared length 0x69, header `21 05 FF 00 00 49` (byte 5 = declared - 0x20);
+- rows start at content byte 32 with no leading spaces, each ended by 0x0D;
+- the 73-byte body is space-filled.
+
+Before this, the header was 0x60 / 0x40 with two leading spaces: row 1 was indented and row 3
+ran out of room. The API is unchanged.
+
+- `panelGeometry().fullRowChars` is 22 on Carminat (was 26), the measured width in wide
+  characters.
+- Three new host tests pin the bytes against MegaOpen's builder (two rows, three rows, a full
+  body), and one pins the geometry. 71 host tests in all.
+- UpdateList and the cluster have no fullscreen; nothing changes there.
+
+### Not changed
+
+- Info rows (`showInfoMenu`) stay 8 cells (`kInfoCells`, declared 0x0B). The glass box looks
+  wider, but no wider width has been measured; that needs a bench sweep of the declared length
+  and offsets first.
+
 ## 1.0.0 — 2026-10-21
 
 First public release.
