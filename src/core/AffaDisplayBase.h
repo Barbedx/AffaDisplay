@@ -1,0 +1,774 @@
+#pragma once
+#include "../AffaConfig.h"
+#include "AffaTypes.h"
+#include "AffaConstants.h"
+#include "AffaSyncProfile.h"
+#include "ICanLink.h"
+#include "IClock.h"
+#include "IDisplay.h"
+#include "IPanel.h"
+#include "../util/AffaLog.h"
+#include "AffaDispatch.h"
+
+namespace affa {
+
+// The four IPanel primitives are declared with SIGNATURES IDENTICAL to IDisplay's, so one
+// override in a panel satisfies both bases with no ambiguity. Do not "tidy" either.
+class AffaDisplayBase : public IDisplay, public IPanel {
+ public:
+  // C function pointers, not std::function: no allocation, and a plain pointer compares.
+  using KeyCb      = void (*)(Key k, KeyEdge e, void* ctx);
+  using CompleteCb = void (*)(TxTicket t, Result r, void* ctx);
+  using SyncCb     = void (*)(SyncState s, void* ctx);
+
+  // None of these may change after begin(). `funcIds` must outlive this object and its
+  // ORDER IS ON THE WIRE — the order the lazy 0x70 registration probes go out in.
+  AffaDisplayBase(ICanLink& link, IClock& clock, const SyncProfile& profile,
+                  const uint16_t* funcIds, uint8_t funcCount);
+  ~AffaDisplayBase() override = default;
+
+  AffaDisplayBase(const AffaDisplayBase&)            = delete;
+  AffaDisplayBase& operator=(const AffaDisplayBase&) = delete;
+
+  // ---- lifecycle ----------------------------------------------------------
+  // Resets the FSMs, clears the queue (queued tickets complete Cancelled), arms the peer
+  // deadline and the heartbeat. Transmits NOTHING by itself — the first frame leaves on the
+  // first poll(). From a task that is not the poll owner it is posted, runs inside the
+  // owner's next poll(), and returns whether the post succeeded.
+  bool begin() override;
+
+  // The single pump: RX ring -> sync FSM -> TX FSM -> onPoll(). THAT ORDER, EVERY CALL.
+  // RX strictly precedes TX so key latency is bounded by the poll period ALONE, not by
+  // queue depth or a message in flight; reordering breaks the headline guarantee.
+  // FREQUENCY-INDEPENDENT: nothing counts calls. docs/API.md §4.
+  //
+  // A call from a task that is not the registered poll owner (see setPollOwner) does
+  // NOTHING and is counted in foreignPolls(). Two tasks pumping the same instance corrupts
+  // the transmit FSM, and it does it silently.
+  void poll() override;
+
+  // ---- poll ownership (used by src/rtos/, optional everywhere else) -------
+  // Identity of the calling task, as an opaque token. A FUNCTION POINTER, not a FreeRTOS
+  // call: core/ compiles on the host against nothing but C++17, and it stays that way.
+  using TaskIdFn = void* (*)();
+
+  // Declare which task owns poll(). `fn` returns the current task's token; poll() is a
+  // no-op unless fn() == owner. Both null (the default) disables the check entirely, which
+  // is the caller-owned mode: one task, by contract, unchecked.
+  void setPollOwner(void* owner, TaskIdFn fn);
+  uint32_t foreignPolls() const;   // poll() calls refused because they were off-task
+
+  // The owner's sleep between polls: ICanLink::waitRx() on this display's link. Owner only.
+  RxWait waitRx(uint32_t ms) { return _link.waitRx(ms); }
+
+  // ---- cross-task dispatch -------------------------------------------------
+  // ONCE AN OWNER IS REGISTERED, EVERY RENDER IS CALLABLE FROM EVERY TASK. A call from any
+  // other task builds its bytes on its own stack — every render in this library is a pure
+  // function of its arguments — and then crosses into the owner as data. It never blocks and
+  // it never fails for being on the wrong task.
+  //
+  // THE ONE HONEST CONSEQUENCE, and it is the whole cost: a refusal the direct path reports
+  // in Submitted::result (NoSync, QueueFull, LinkDown) is reported through onComplete()
+  // instead, because at the moment of return nothing has been enqueued yet. The three that
+  // ARE still synchronous are the caller's own mistakes — BadArgument, TooLong, UnknownFunc
+  // — because those need no library state to detect.
+  //
+  // Renders refused because the ring itself was full. Counted, never sampled: a burst that
+  // filled it once is still visible later, which is what makes it debuggable at all.
+  uint32_t dispatchDropped() const;
+  uint8_t  dispatchQueued() const;   // posted and not yet drained
+
+  // ---- which callback blocked ----------------------------------------------
+  // A callback runs inside poll(), so one that blocks blocks the protocol. That cannot be
+  // prevented — it is the same property that bounds key latency by the poll period — so it
+  // is attributed instead: the WORST one seen, by name, with how long and when.
+  //
+  // WHY THE TIMESTAMP IS NOT OPTIONAL. A peak at t=0 is WiFi associating inside a SyncCb and
+  // is nothing to fix; a peak whose timestamp keeps moving is a callback that blocks every
+  // time. Without `slowestCallbackAtMs()` the two are the same number.
+  //
+  // Zeroed by AFFA_CALLBACK_BUDGET_MS = 0, which compiles the measurement out.
+  CbKind   slowestCallback()     const;
+  uint32_t slowestCallbackMs()   const;
+  uint32_t slowestCallbackAtMs() const;
+  uint32_t callbackOverruns()    const;   // times ANY callback exceeded the budget
+  void     resetCallbackPeak();
+
+  // Has begin() run? AffaTask::start() refuses on false — a task that starts polling a
+  // display that was never begun transmits nothing and reports no reason.
+  bool begun() const;
+
+  // ---- ports and options --------------------------------------------------
+  void setLogSink(ILogSink* s);
+  void onKey(KeyCb cb, void* ctx);
+  void onComplete(CompleteCb cb, void* ctx);
+  void onSync(SyncCb cb, void* ctx);        // fires only on an actual state change
+
+  // ---- observation seam ----------------------------------------------------
+  // EVERY frame in and out, unfiltered, in wire order. One tap; a second call replaces it.
+  // On the path of EVERY frame — keep it to a ring push, never render from it.
+  //
+  // This is the whole seam now. See the comment above Direction in AffaTypes.h for what
+  // the other two layers were and why nineteen examples never called either.
+  void onFrame(FrameTap cb, void* ctx);
+
+  // Passive mode: a real radio owns the handshake, so we send no sync frames, no hello and
+  // no 0x74 ACK, and never latch FUNCSREG — we only inject data. On a vehicle bus, set it.
+  void setPassive(bool on);
+  bool passive() const;
+
+  // THE LIBRARY LIGHTS THE GLASS. At the end of the opening — after registration and after
+  // the family's measured quiet interval — it sends the panel's power-on command itself and
+  // waits for the ACK before reporting Phase::Ready.
+  //
+  // WHY IT IS THE LIBRARY'S JOB. A panel that is not on ACKs a screen it never lights. Every
+  // counter says success, `failed 0`, and the glass stays black; there is no symptom to
+  // notice and nothing to debug against. It is exactly the kind of rule an application
+  // forgets, and this one did.
+  //
+  // IT NEVER OVERRIDES THE APPLICATION. If a desired power state has already been expressed
+  // — queued, or cached from an earlier ACK, including a deliberate `setPower(false)` — the
+  // library leaves it alone and goes straight to Ready. So this fills a gap; it does not
+  // compete. A panel whose family has no power command is likewise untouched.
+  //
+  // Turn it off for a build that must decide for itself when the glass lights. `Ready` then
+  // means "registered", which is what it meant before 2026-08-04.
+  void setAutoPower(bool on);
+  bool autoPower() const;
+
+  // Bench self-ACK: the TX FSM acknowledges its own frames, so a multi-frame message goes
+  // out in full with no panel attached. Wire bytes are identical to a real send.
+  //
+  // PINNING A GOLDEN VECTOR AGAINST THIS: a real panel terminates at the declared FF_DL, so
+  // showMenu is 13 frames on hardware and 14 here. Easy to misattribute to the driver.
+  void setSelfAck(bool on);
+
+  // ---- observation --------------------------------------------------------
+  // WHERE THE OPENING HAS GOT TO. One ordered value, derived from the sync state; see the
+  // Phase comment in AffaTypes.h for why it exists and what each value means.
+  //
+  // PUT IT ON EVERY DIAGNOSTIC SURFACE. `synced()` and `registered()` answer an
+  // application's question; this answers a person's — "why is nothing rendering?" — and
+  // every protocol bug of 2026-07/08 was found, eventually, by learning to read the nine
+  // booleans it replaces in the right order.
+  //
+  // STORED, and the source of truth: every transition is an enterPhase() call, and the
+  // phase tests pin the sequence against the wire.
+  Phase     phase()      const;
+
+  // THE SILENT-BUS ANNOUNCE, ON OR OFF. Off means this node says nothing at all until the
+  // panel speaks first — which is the only way to ask "is it talking on its own?" without
+  // our own BA in the answer. Gating the link would do it too, but that also drops every
+  // reply and render, so a bus watched that way can never complete a handshake.
+  void      setAnnounce(bool on) { _announceOn = on; }
+  bool      announceOn() const   { return _announceOn; }
+
+  // HOW OFTEN THE PANEL HAS DROPPED US, and when it last did. Counted on the FuncsReg
+  // falling edge, which is exactly where Phase leaves Ready.
+  //
+  // COUNTED, NEVER SAMPLED, for the same reason LinkHealth is: a session that is lost and
+  // re-opened in 300 ms looks, in any single sample, exactly like one that was never lost.
+  // A 1 h 36 m soak on 2026-08-04 reported `failed 0` and every driver counter at zero while
+  // the panel deauthorized us FOURTEEN times, because nothing counted it.
+  uint32_t sessionsLost() const;
+
+  // ---- what is on the glass ------------------------------------------------
+  // The RenderSlot of the last SCREEN the panel ACKED, and when. Reset to None on a lost
+  // session, because a panel that has taken the session away has forgotten the screen.
+  //
+  // WHY THIS IS A FACT AND NOT A POLICY. Every render call already carries its slot, so the
+  // library knows which screen was drawn most recently; reporting that costs one byte and
+  // commits to nothing. DECIDING whether a periodic repaint may draw over it is a different
+  // question — one only the application can answer — and this deliberately does not answer
+  // it. It removes the bookkeeping, not the decision.
+  //
+  // The bug it exists to prevent: an application with both a scrolling now-playing line and
+  // a menu will repaint over the menu a fraction of a second after the user opens it, unless
+  // something suppresses the repaint. Tracking that by hand means marking ownership at every
+  // call site and the one that gets forgotten is the bug. This cannot drift, because it is
+  // set by the transmit path itself.
+  //
+  //   if (display.lastRendered() == RenderSlot::Text) marquee.tick();
+  //
+  // RenderSlot::Control never appears here: setPower is a payload with a slot but it draws
+  // nothing, and reporting it would tell an application its text had been replaced by the
+  // backlight command.
+  //
+  // OVERLAYS DO NOT REPLACE THE SCREEN UNDERNEATH. RenderSlot::Popup and
+  // RenderSlot::InfoPopup are overlays — the screen below keeps its content and reappears
+  // when they are hidden — so an application that cares about both layers must track the
+  // overlay separately. This reports the last thing drawn, not a stack.
+  RenderSlot lastRendered()   const;
+  uint32_t   lastRenderedMs() const;   // 0 if nothing has been drawn this session
+  uint32_t lastSessionLossMs() const;   // 0 if none since begin()
+  // WHICH of the four ways it went. The counters cannot tell a deauthorizing panel from a
+  // silent one, and that is exactly the distinction the open ~7-minute drop needs.
+  LossReason lastLossReason() const;
+
+  SyncState syncState() const override;
+  bool      synced()     const;   // !hasFlag(state, Failed)
+  bool      registered() const;   //  hasFlag(state, FuncsReg)
+  bool      busy()       const;   // a job is in flight or queued, or a render is posted
+  Result    lastResult() const;   // Result of the most recently COMPLETED ticket. DIAGNOSTIC
+                                  // ONLY since 2.0 — a rejection now travels back in
+                                  // Submitted::result, on the calling task, instead of being
+                                  // left here for the caller to race another task for.
+  TxTicket  lastTicket() const;   // that ticket
+  uint8_t   queued()     const;   // jobs waiting behind the active one
+  Stats     stats()      const;   // forwarded from the link
+
+  // ---- link recovery ------------------------------------------------------
+  // COUNTED, NEVER SAMPLED. A controller that goes bus-off and comes back looks, in any
+  // single sample, exactly like one that is dead — and exactly like one that is healthy,
+  // depending on when you looked. Neither snapshot is the truth. What matters is how often
+  // it leaves RUNNING and how long it stays out, so those are the numbers kept.
+  struct LinkHealth {
+    uint32_t recoveries = 0;   // ICanLink::recover() calls that ended with the link up
+    uint32_t failures   = 0;   // ...and that did not
+    uint32_t flaps      = 0;   // times the link has left the live state since begin()
+    uint32_t downMs     = 0;   // total time not live, summed over completed outages
+    uint32_t downSince  = 0;   // start of the outage in progress; 0 when live
+    uint32_t nextTryMs  = 0;   // when the next recover() is due; 0 when live
+  };
+  LinkHealth linkHealth() const;
+
+  // ---- capability ---------------------------------------------------------
+  bool supports(Feature f) const override = 0;   // each panel answers for itself
+
+  // ---- transmit -----------------------------------------------------------
+  // Copies the bytes and returns immediately; they need not outlive the call. `opt` carries
+  // the coalescing slot, priority and per-message opt-out — docs/API.md §3b.4.
+  //
+  // THE CHOKE POINT. Every render in every panel, present and future, funnels through here —
+  // CarminatDisplay::submit() and UpdateListBase::enqueueRender() are two-line wrappers — so
+  // this is the one place the cross-task boundary has to live, and putting it here is what
+  // makes a render added later thread-safe on the day it is written. docs/API.md §4.7
+  Submitted enqueue(uint16_t funcId, const uint8_t* data, uint8_t len,
+                    TxOptions opt = TxOptions{});
+
+  // FOR PAYLOADS THAT DO NOT FIT AFFA_MAX_PAYLOAD, up to AFFA_MAX_EXTERNAL_PAYLOAD. The
+  // bytes are COPIED into the long-payload pool, so `data` is the caller's again the moment
+  // this returns, on any task. Everything else — segmentation, flow control, retries,
+  // abort — is the ordinary transmit path.
+  //
+  // A pool, not a wider queue: the 0x1F1 nav screen is 304 bytes, and holding it inline
+  // would widen every one of AFFA_TX_QUEUE_DEPTH slots for one message.
+  //
+  // QueueFull when every pool slot is in use. A RenderSlot or reassertAfterSession is
+  // refused with BadArgument: a long payload never coalesces and is never replayed.
+  Submitted enqueueExternal(uint16_t funcId, const uint8_t* data, uint16_t len,
+                            TxOptions opt = TxOptions{});
+
+  // enqueueExternal() for a message assembled from two pieces — a short header the caller
+  // built, then a long body such as an image in flash. Both are copied, so neither has to
+  // outlive the call. Same ceiling and refusals.
+  Submitted enqueueSplit(uint16_t funcId, const uint8_t* prefix, uint8_t prefixLen,
+                         const uint8_t* body, uint16_t bodyLen,
+                         TxOptions opt = TxOptions{});
+
+  // ---- preemption ----------------------------------------------------------
+  // Drop every job QUEUED AND NOT YET STARTED. The job on the wire is untouched, and so are
+  // pending Registration jobs — a payload arriving before its function is registered is
+  // rejected, and the SendFailed looks exactly like a wire-format bug. Dropped tickets
+  // report Aborted; returns how many. docs/API.md §3b.5. From another task it is posted
+  // and returns 0: the drops are reported through onComplete when the owner applies it.
+  uint8_t abortPending();
+
+  // abortPending() plus abandoning the message on the wire at the next FRAME BOUNDARY, never
+  // mid-frame, with the continuation counter reset. From another task: posted, returns false.
+  //
+  // The panel is left holding a partial transfer and WHETHER IT RECOVERS CLEANLY IS NOT
+  // VERIFIED ON HARDWARE. Routine preemption is coalescing + abortPending() + Urgent.
+  bool abortAll();
+
+  // Is a not-yet-started job for this slot sitting in the queue? Cheap, exact, and the
+  // thing to assert in a test rather than counting frames.
+  bool pending(RenderSlot s) const;
+
+  // ---- input seam ----------------------------------------------------------
+  // Emulate a key press; the Local half takes the IDENTICAL path to a key off the wire.
+  //
+  // BOTH DEFAULT TO Local: in the radio role we RECEIVE key frames. KeySource::Wire is for
+  // impersonating the panel at a REAL radio and PUTS PHANTOM PRESSES ON THE BUS — harmless
+  // on a bench, input other modules may act on in a vehicle.
+  //
+  // A ticket, like a render. On the owner: a refusal (NotSupported, NoSync, LinkDown,
+  // SendFailed) is the result, and an accepted press completes Ok through onComplete before
+  // the call returns. From another task it is posted (QueueFull if the ring is full) and
+  // applied inside the owner's next poll() — KeyCb included — and the owner's verdict,
+  // whatever it is, arrives through onComplete under the returned ticket.
+  Submitted pressKey(Key k, KeyEdge e, KeySource src = KeySource::Local);
+
+  // ---- rendering: default bodies refuse with NotSupported -------------------
+  Submitted setText(const char*, uint8_t digit = 255) override;
+  Submitted setTime(const char*) override;
+  Submitted setPower(bool) override;
+  Submitted showMenu(const char*, const char*, const char*,
+                     uint8_t = 0x0B) override;
+  Submitted highlightItem(uint8_t) override;
+  Submitted showPopupText(const char*, uint8_t = 0x09, uint8_t = 0xFF,
+                          uint8_t = 0x60) override;
+  Submitted hidePopup() override;
+  Submitted showFullscreenText(const char*, const char*, const char*) override;
+  Submitted showConfirmBox(const char*, const char*, const char*) override;
+  Submitted showInfoPopup(const char*, const char*, const char*) override;
+
+ protected:
+  // ---- panel hooks ---------------------------------------------------------
+  // Every frame we build pads with this. Carminat 0x00, UpdateList 0x81.
+  virtual uint8_t packetFiller() const = 0;
+
+  // Carminat 0x1C1, UpdateList 0x0A9; 0 means the family has none and pressKey(..., Wire)
+  // returns NotSupported. Deliberately NOT excluded from the auto-ACK — the capture shows
+  // RX 1C1 70 .. answered with TX 5C1 74 .., and the panel expects it.
+  virtual uint16_t keyTxId() const { return 0; }
+
+  // Each received frame the base did not consume itself. Return true if consumed.
+  //
+  // Runs AFTER the auto-ACK for that frame, which is the legacy order — Carminat
+  // acknowledged 0x1C1 before it validated the key bytes.
+  virtual bool onFrame(const Frame& f) { (void)f; return false; }
+
+  // Veto the generic 0x74 auto-ACK for one frame. The base already suppresses it in passive
+  // mode, for the sync ids, for reply-flagged ids and for every id in the function table.
+  // Panels override only for a family quirk — UpdateList does not acknowledge a malformed
+  // key frame.
+  virtual bool shouldAutoAck(const Frame& f) const { (void)f; return true; }
+
+  // Deliver a decoded key to the application. Panels override to ADD routing (UpdateList
+  // intercepts the AMS gesture), NEVER to replace the fall-through to KeyCb.
+  virtual void routeKey(Key k, KeyEdge e);
+
+  // The Wire half of pressKey(): `03 89 <hi> <lo|hold>` then LITERAL ZERO, not
+  // packetFiller() — that is what the capture shows. NotSupported for a Hold edge on a
+  // wheel code, because 0x0101|0xC0 and 0x0141|0xC0 are both 0x01C1 and the click form
+  // would step fine where the caller asked coarse. NOT QUEUED: behind the ISO-TP queue it
+  // would have exactly the latency preemption exists to remove. docs/WIRE.md
+  [[nodiscard]] Result transmitKey(Key k, KeyEdge e);
+
+  // Once per poll(), after the sync and TX FSMs, for a panel's own time-driven work. MUST
+  // be deadline-driven against _clock, never a call counter.
+  virtual void onPoll() {}
+
+  // The wheel codes 0x0101/0x0141 are EXEMPT from the mask: masking 0x0141 rewrites it to
+  // 0x0101, i.e. every wheel-DOWN detent is reported as a wheel-up.
+  static void decodeKey(uint16_t raw, Key& out, KeyEdge& edge);
+
+  // The `03 89` guard plus decodeKey(). THE GUARD IS LOAD-BEARING: the key id also carries
+  // `70 A3..`, `02 64 0F A3..` and `05 63 "0037"`, out of which a decoder without it
+  // invents keys 0x640F and 0x3030.
+  static bool decodeKeyFrame(const Frame& f, Key& out, KeyEdge& edge);
+
+  // ---- the long-payload pool (AFFA_BULK_SLOTS) ------------------------------
+  // A slot is claimed by whichever task renders, filled in place, and handed to
+  // submitBulk(), which owns it from then on: it is released when the job leaves the queue,
+  // or at once if the render is refused. nullptr when every slot is in use.
+  uint8_t*  acquireBulk();
+  void      releaseBulk(const uint8_t* p);
+  // Ticket, task boundary and admission for a filled slot. Refusals release the slot.
+  // `opt` must already carry RenderSlot::None and no reassertAfterSession.
+  Submitted submitBulk(uint16_t funcId, uint8_t* slot, uint16_t len, TxOptions opt);
+
+  ICanLink&          _link;
+  IClock&            _clock;
+  const SyncProfile& _profile;
+  // The silent-bus BA announce, switchable at run time. See AffaSync.cpp — the profile's
+  // interval is const, and gating the link instead would silence every other frame too.
+  bool               _announceOn = true;
+
+ private:
+  enum class TxState  : uint8_t { Idle, SendingFrame, WaitAck };
+  enum class JobKind  : uint8_t { Payload, Registration, Reassert };
+  enum class SelfAck  : uint8_t { None, Partial, Done };
+
+  struct TxJob {
+    uint16_t   funcId     = 0;
+    TxTicket   ticket     = kNoTicket;  // kNoTicket for Registration jobs — they are
+                                        // invisible to onComplete
+    JobKind    kind       = JobKind::Payload;
+    RenderSlot slot       = RenderSlot::None;   // coalescing key, together with funcId
+    Priority   prio       = Priority::Normal;
+    bool       coalesce   = false;      // false = this message is never replaced
+    bool       reassertAfterSession = false; // cache this ACKed desired control state
+    bool       started    = false;      // one byte was accepted by ICanLink::trySend(). THE
+                                        // SINGLE AUTHORITY for "not yet started" — never infer it
+                                        // from queue position, TxState or frameIndex.
+    uint32_t   sessionEpoch = 0;        // stamped when the first frame is accepted
+    bool       abandon    = false;      // abortAll() asked; honoured at a frame boundary
+    // A LONG PAYLOAD, and the reason `len` is 16-bit: non-null is the long-payload pool slot
+    // holding all `len` bytes (AFFA_BULK_SLOTS), released by removeJob(). `data` is then
+    // unused, so a 304-byte 0x1F1 screen does not widen every queue slot.
+    const uint8_t* ext    = nullptr;
+    uint16_t   len        = 0;
+    uint16_t   sent       = 0;          // bytes already accepted by the link
+    uint8_t    frameIndex = 0;          // ISO-TP continuation counter `num`
+    uint8_t    tries      = 0;          // transmit attempts already made and failed
+    uint32_t   readyAtMs  = 0;          // not startable before this: retry backoff, or the
+                                        // quiet period a torn transfer owes the panel
+    uint32_t   holdUntilMs = 0;         // give up waiting for a usable link at this point
+    uint8_t    data[AFFA_MAX_PAYLOAD]   = {0};
+  };
+
+
+  // ALWAYS first in poll(), ahead even of pumpRx(): a controller that is down delivers no
+  // frames, so there is nothing for pumpRx() to lose by being second, and every millisecond
+  // spent polling a dead controller before asking it to come back is wasted.
+  //
+  // NEVER GIVES UP AND NEVER REBOOTS. See AffaConfig.h "Link recovery" for why the backoff
+  // caps instead.
+  void pumpLink();
+  void pumpRx();            // delivers keys; second only to pumpLink()
+  void pumpSync();
+  void pumpTx();            // ALWAYS last; never reached before pumpRx() has returned
+
+  // The choke point every frame passes through in BOTH directions, so a sniffer sees the
+  // whole bus in order.
+  void observe(const Frame& f, Direction d);
+  // `observeAccepted` is normally true. pumpTx() turns it off so it can commit the head
+  // job's byte count immediately AFTER the link accepted the frame but BEFORE callbacks
+  // observe it; that preserves Tx callback re-entrancy without committing bytes when a
+  // locally busy controller declined the offer.
+  TxDisposition txFrame(Frame f, bool observeAccepted = true);
+
+  bool handleSyncFrame(const Frame& f);
+  bool handleAckFrame(const Frame& f);
+  void sendGenericAck(uint16_t id);      // the 0x74 reply on id|replyFlag
+  void pumpGenericAck(uint32_t now);     // one bounded Busy retry, ahead of hello work
+  TxDisposition sendAlive();             // the B9/79 heartbeat frame — ONE builder, so the
+                                         // paced tick and the reply-to-ping path cannot
+                                         // drift apart byte-wise
+  TxDisposition sendSyncRequest();       // the BA/7A frame, shared by normal and one-shot
+                                         // recovery so their bytes cannot drift either
+  void armUnauthControl(uint32_t now);   // one bounded `BA` announce, never a stream
+  void pumpUnauthControl(uint32_t now);  // offers it once, with a bounded Busy retry
+
+  // THE ONLY PLACE `_phase` IS ASSIGNED. Nine callers, one per named edge. Having a single
+  // writer is what makes "freeze the ring when the session dies" a hook rather than a hunt,
+  // and it is why the transition can be logged without a line at every site.
+  void enterPhase(Phase p);
+
+  // Has the opening released application traffic — i.e. is the burst that answers the
+  // panel's request on the wire? THE question the transmit gates ask, asked once. A family
+  // with no authorization gate has nothing to wait for and answers true throughout.
+  bool openingReleased() const;
+  // MAY WE PUT OUR 0x70 PROBES ON THE WIRE YET? One answer for the two places that ask, and
+  // the duplication it replaces is why a lost frame took a whole bench session to find: the
+  // condition lived at the pumpSync() call site AND again inside queueRegistrations(), so
+  // relaxing one of them changed nothing and looked like it had.
+  bool peerChannelReady(uint32_t now) const;
+  void queueHello(uint32_t now);         // arms one profile-paced hello sequence
+  void pumpHello(uint32_t now);           // submits at most the profile-permitted prefix
+  uint32_t syncIntervalMs() const;        // profile override or AFFA_SYNC_INTERVAL_MS
+  bool isOurTxId(uint16_t id) const;
+  bool knownFunc(uint16_t id) const;
+
+  int  findCoalescable(uint16_t funcId, RenderSlot s) const;  // -1 if none
+  uint8_t insertIndexFor(Priority p) const;   // after started + Registration jobs
+  bool registrationQueued() const;
+  bool queueRegistrations();              // inserts one ordered 70 burst if capacity allows
+  bool hasQueuedControl() const;          // newer app control wins over a cached reassert
+  bool reassertQueued() const;
+  // A queued internal restore is always older than a new application control request.  It
+  // has no ticket and has not touched the bus yet, so remove it before admitting the newer
+  // desired state; otherwise an old ON replay could follow a newly queued OFF and undo it.
+  uint8_t dropUnstartedReasserts();
+  // `ext` non-null is a long-payload pool slot holding all `len` bytes; nothing is copied.
+  void pushJob(uint16_t funcId, const uint8_t* d, uint16_t len, JobKind kind, TxTicket t,
+               const TxOptions& opt, uint8_t at, const uint8_t* ext = nullptr);
+  void removeJob(uint8_t index);
+  void creditAck(bool done);
+  // Ends the head job: retries it if the failure was transient and it has attempts left,
+  // otherwise removes it and reports. THE ONLY PLACE a job leaves the queue on completion.
+  //
+  // `allowRetry = false` is the give-up path and it is load-bearing: the hold window's own
+  // expiry reports LinkDown, and LinkDown is exactly the result the retry branch treats as
+  // "not the render's fault, do not spend an attempt". Routing the give-up through the
+  // normal path therefore re-armed the job for ever — the hold that could never end.
+  void finishJob(Result r, bool allowRetry = true);
+  // true if `r` is worth another attempt at all — transient, not permanent, not deliberate.
+  static bool retryable(Result r);
+  // Re-arm the head job for another attempt. Backoff doubles per try; a job whose bytes had
+  // already started going out additionally owes the panel AFFA_TX_DIRTY_QUIET_MS of silence.
+  // `extendHold` is false for a link fault, which spends no attempt and must therefore stay
+  // bounded by the hold window it started with.
+  void armRetry(TxJob& job, uint32_t now, bool torn, bool extendHold = true);
+  // Is the link in a state where the head job may be started at all?
+  bool linkReady() const;
+  // GIVE EVERY HELD RENDER A FRESH HOLD WINDOW, because the session it was waiting for has
+  // just been voided and the re-registration that replaces it takes time the render was
+  // never budgeted for.
+  //
+  // Without it, a payload that aged politely while REGISTERED is given up as NoSync by
+  // pumpTx()'s hold check before the re-registration it now depends on has even been
+  // spliced.
+  //
+  // THE FOUR PLACES A REGISTRATION IS VOIDED MUST AGE THE QUEUE IDENTICALLY — the panel
+  // voiding us, the peer timeout, the generic-profile Start path, and a link recovery — and
+  // this was four hand-written copies of the same loop until 2.0. It had already failed once
+  // by omission: the copy lived only in a branch that was later deleted, which is to say it
+  // was missing from the one path the bench actually exercises. A rule that must hold in
+  // four places is one function.
+  void reholdQueuedPayloads(uint32_t now);
+
+  // Drops every job in the queue, started or not, reporting `r` for each payload ticket.
+  // begin() and a failed registration are its only callers.
+  void failAllQueued(Result r);
+  // Drops every NOT-YET-STARTED Payload job — the shared body of abortPending() (with
+  // Aborted) and of the sync-loss teardown (with Cancelled). Registration jobs survive.
+  uint8_t dropUnstarted(Result r);
+  // The mirror image: drops queued, not-yet-started REGISTRATION probes and leaves payloads
+  // alone. Used when registration failed or the panel forgot us — the probes are void, the
+  // renders behind them are still what the application wants on the glass.
+  uint8_t dropRegistrations();
+  // A new panel session invalidates the protocol ACK currently awaited by the head job.
+  // Registrations are discarded; app payloads are reset and held for the new registration;
+  // stale internal reasserts are recreated from CachedControl in the new session.
+  void invalidateInFlightForSession(uint32_t now);
+  void advanceSessionEpoch();
+  void completeTicket(TxTicket t, Result r);
+
+  // ---- the task boundary ---------------------------------------------------
+  // The shared tail of enqueue/enqueueExternal/enqueueSplit: every state-dependent decision,
+  // against a ticket that has ALREADY been minted. Called directly on the poll owner's task
+  // and from pumpDispatch() for a render posted by another — ONE implementation, so a posted
+  // render and a direct one cannot disagree.
+  Submitted admit(TxTicket t, uint16_t funcId, const uint8_t* data, uint16_t len,
+                  const TxOptions& opt, const uint8_t* ext);
+
+  // Same arguments, other side of the boundary: copy the finished render into the ring for
+  // the owner to admit. Never blocks; refuses QueueFull when the ring is full.
+  Submitted post(TxTicket t, uint16_t funcId, const uint8_t* data, uint16_t len,
+                 const TxOptions& opt, const uint8_t* ext);
+  // The same for the calls that are not renders — pressKey, the aborts, a re-begin(). False
+  // when the ring is full.
+  bool postOp(DispatchOp op, uint8_t a = 0, uint8_t b = 0, uint8_t c = 0, uint8_t d = 0,
+              TxTicket t = kNoTicket);
+  // pressKey() without the ticket: the Wire half, then the Local half. Owner only.
+  Result applyKey(Key k, KeyEdge e, KeySource src);
+
+  // True on the owning task, and true for everyone when no owner is registered.
+  bool onPollOwner() const;
+
+  // ---- callback attribution -------------------------------------------------
+  // Record one callback's duration. Called by CbTimer; not otherwise interesting.
+  void noteCallback(CbKind k, uint32_t ms);
+
+  // SCOPED, so that a callback which returns early — or through any path at all — is still
+  // measured. Compiles to nothing when AFFA_CALLBACK_BUDGET_MS is 0: no clock read on the
+  // callback path, no members, no code.
+  class CbTimer {
+   public:
+#if AFFA_CALLBACK_BUDGET_MS > 0
+    CbTimer(AffaDisplayBase& d, CbKind k) : _d(d), _k(k), _t0(d._clock.millis()) {}
+    ~CbTimer() { _d.noteCallback(_k, _d._clock.millis() - _t0); }
+   private:
+    AffaDisplayBase& _d;
+    CbKind           _k;
+    uint32_t         _t0;
+#else
+    CbTimer(AffaDisplayBase&, CbKind) {}
+#endif
+  };
+
+  // Drain what other tasks posted. Owner only; called from poll().
+  void pumpDispatch();
+  // Stores the new state and fires SyncCb + EventKind::SyncChanged, but only on an actual
+  // change. It took an `extra` EventKind until 2.0, whose only job was to fire a second
+  // Layer 2 event beside the first; with that sink gone the parameter had no readers.
+  void setSync(SyncState s);
+  TxTicket nextTicket();
+
+  // Linear, not circular: insertIndexFor() splices into the middle for Priority::Urgent,
+  // and at AFFA_TX_QUEUE_DEPTH a memmove inside poll() is cheaper to write correctly than
+  // modular arithmetic is to review.
+  TxJob     _queue[AFFA_TX_QUEUE_DEPTH];
+  uint8_t   _qCount = 0;
+#if AFFA_BULK_SLOTS > 0
+  // Claimed by CAS from any task, released by the owner (or by the claimant on a refusal).
+  std::atomic<uint8_t> _bulkUsed[AFFA_BULK_SLOTS] = {};
+  uint8_t              _bulk[AFFA_BULK_SLOTS][AFFA_MAX_EXTERNAL_PAYLOAD];
+#endif
+#if AFFA_DISPATCH_DEPTH > 0
+  // WHAT OTHER TASKS POSTED. The only field in this class written by a task that is not the
+  // poll owner — everything else below is the owner's alone, which is exactly what the
+  // boundary buys.
+  AffaMpsc<DispatchItem, AFFA_DISPATCH_DEPTH> _dispatch;
+#endif
+  TxState   _tx = TxState::Idle;
+  SelfAck   _selfAckPending = SelfAck::None;
+  uint32_t  _ackDeadlineMs  = 0;
+  uint32_t  _nextSyncMs     = 0;
+  uint32_t  _peerDeadlineMs = 0;
+  // Earliest millisecond at which another hello burst may go out. Paces the ANSWER to the
+  // sync request, which the panel can ask for 1500 times a second. See AFFA_HELLO_MIN_MS.
+  uint32_t  _nextHelloMs    = 0;
+  uint8_t   _helloIndex     = 0;          // next profile hello frame to offer
+  // Final registration ACK -> first application/control payload. It implements the
+  // captured Carminat 400 ms quiet interval without blocking poll().
+  uint32_t  _nextPayloadMs  = 0;
+  // Earliest millisecond at which another reply-to-ping heartbeat may go out — same shape,
+  // same reason: the storm repeats `69` at line rate too. See AFFA_PING_REPLY_MIN_MS.
+  uint32_t  _nextPongMs     = 0;
+  SyncState _sync = SyncState::Failed;
+  // Carminat is panel-initiated.  This stays false from begin() until valid panel traffic
+  // reaches us, preventing the legacy FAILED -> BA-per-second startup storm.
+  bool      _panelObserved = false;
+  // A complete `61 11 xx` was received. This is deliberately not the same as a `69`:
+  // a panel may ping after the announce, but a bare ping never opens the bus.
+  bool      _syncRequestObserved = false;
+  // WHERE THE OPENING HAS GOT TO. THE SOURCE OF TRUTH, not a reading of anything else.
+  //
+  // It replaced `_authRequestObserved` ("a complete request has been answered"),
+  // `_authHelloPending` ("…but its burst has not landed yet") and `_unauthControlIssued`
+  // ("our BA is physically out"). Those three were read in seven places between them, in
+  // four different combinations, and every one of those combinations was really asking the
+  // same ordered question: has the opening got at least as far as X. See atLeast().
+  //
+  // Transitions are named edges and there are exactly nine of them; grep `enterPhase(`.
+  Phase     _phase = Phase::Silent;
+  // A request repeated without CAN ACK is not permission to enqueue another full hello
+  // burst. One deferred reply preserves the latest protocol state without a TX storm.
+  //
+  // NOT a phase, and it survives the collapse for that reason: it is a TRANSMIT cursor —
+  // "frames of the burst still to be offered" — and on a family without the authorization
+  // gate a burst is in flight without the opening being blocked on it.
+  bool      _helloPending = false;
+  // The display's first `61 11 xx` (or its first bare 69) gets exactly one `BA` announce.
+  // `Spent` is consumed on arm even if the local controller refuses it, so line-rate
+  // duplicate panel frames cannot recreate a BA stream.
+  //
+  // Also not a phase: this is the one-shot BUDGET and the pending offer, i.e. transmit
+  // bookkeeping. `Phase::Announced` is the protocol fact the budget exists to produce.
+  bool      _unauthControlPending = false;
+  // The one-shot BUDGET, consumed on arm. Separate from `Phase::Announced` on purpose: an
+  // announce that the controller refused outright has spent its turn without ever putting
+  // BA on the wire — budget gone, phase still Silent — and a panel repeating its request at
+  // line rate must not buy another. Only a session teardown clears it, and the fail-open
+  // clause in handleSyncFrame() is what stops "spent but never sent" becoming a wedge.
+  bool      _unauthControlSpent = false;
+  uint8_t   _unauthControlBusyRetries = 0;
+  // Separate from _nextSyncMs: a first request followed by another in the same RX drain
+  // still emits its BA immediately, but never as a periodic local retry.
+  uint32_t  _nextUnauthControlMs = 0;
+  // Next slow announce while no panel has ever been heard. See announceWhenSilentMs.
+  uint32_t  _nextAnnounceMs = 0;
+
+  // A panel's 1C1 -> 5C1 registration ACK is control-plane traffic, not an application
+  // render.  A locally full controller must not lose it behind the next B0; retain exactly
+  // one pending reply and retry it once when the link was merely Busy.  A hard Rejected
+  // offer belongs to the normal transport recovery/session reset path instead.
+  // Consecutive registration bursts that failed TERMINALLY — after the transmit layer has
+  // already exhausted AFFA_TX_MAX_RETRIES on them.
+  //
+  // ONE, AND THE ARITHMETIC IS WHY. A single burst costs
+  //
+  //     4 x AFFA_ACK_TIMEOUT_MS + 250 + 500 + 1000  =  9 750 ms
+  //
+  // because armRetry() doubles the backoff under a 2 s ACK deadline. So the peer has already
+  // ignored four `70` probes over ten seconds by the time we get here; a second burst buys
+  // another ten seconds and no information.
+  //
+  // It was 3 first, and measured on the bench: 33 s to fall back. The cost of falling back
+  // ONE burst too early is ~300 ms of redone handshake, which is the thing the panel is
+  // asking for anyway. The cost of falling back too late is the eight minutes that started
+  // this. Asymmetric, so it goes to the cheap side.
+  static constexpr uint8_t kRegMaxFails = 1;
+  uint8_t   _regFails = 0;
+  // The display has registered its OWN channel (its 1C1). We prefer not to put our 0x70
+  // probes on the wire until it has: measured 4/4, its 1C1 precedes our 151 by ~61 ms.
+  // PREFER, not require — see peerChannelReady() and AFFA_AWAIT_PEER_MS. That one frame
+  // arrives once, inside the panel's own line-rate storm, and a consumer that drops it used
+  // to be wedged for the rest of the power cycle.
+  bool      _peerChannelSeen = false;
+  // When the wait above stops being a precondition. Armed on entering AwaitPeerChannel, and
+  // zero means "not waiting" — so it can never expire into permission before the burst.
+  uint32_t  _awaitPeerUntilMs = 0;
+  bool      _genericAckPending = false;
+  uint16_t  _genericAckId = 0;
+  uint8_t   _genericAckBusyRetries = 0;
+  // How many 0x74 replies we still owe for `_genericAckId`. The panel acknowledges every
+  // frame individually, so a second arrival while the first is stuck owes a second reply.
+  uint8_t   _genericAckOwed = 0;
+  uint32_t  _nextGenericAckMs = 0;
+
+  // One opt-in durable control payload (currently Carminat setPower). It is cached only
+  // after a real terminal ACK, and replayed internally/no-ticket after a later re-register.
+  struct CachedControl {
+    bool     valid   = false;
+    bool     pending = false;
+    uint16_t funcId  = 0;
+    uint8_t  len     = 0;
+    uint8_t  data[AFFA_MAX_PAYLOAD] = {0};
+  };
+  CachedControl _cachedControl;
+  // Bumped at every panel-session boundary. A job is stamped only once it starts, so a
+  // late ACK from a previous registration/control transfer cannot mutate the new session.
+  uint32_t  _sessionEpoch = 1;
+  // ATOMIC SINCE 2.0, and it is the one field that had to become so. A ticket is minted at
+  // SUBMIT time now — on whichever task called the render — so two tasks can be inside
+  // nextTicket() at once. Everything else in this class is still written by the poll owner
+  // alone; this counter is the single point where an arbitrary caller touches the object,
+  // which is exactly why the crossing is cheap.
+  volatile uint32_t _nextTicket = 1;
+  TxTicket  _lastCompleted = kNoTicket;
+  Result    _lastResult    = Result::Ok;
+  const uint16_t* _funcIds;
+  uint8_t   _funcCount;
+  bool      _passive = false;
+  bool      _selfAck = false;
+  // See setAutoPower(). On by default: the failure it prevents has no symptom, so opting IN
+  // would mean every build that never heard of it keeps the bug.
+  bool      _autoPower = true;
+  // The ticket of the power-on the library issued itself, so its completion — and only its
+  // completion — is what promotes Powering to Ready. kNoTicket when none is in flight.
+  TxTicket  _autoPowerTicket = kNoTicket;
+  bool      _inPoll  = false;   // re-entrancy guard, not a feature
+  bool      _begun   = false;   // begin() has run at least once
+  void*     _pollOwner   = nullptr;   // null = unchecked (caller-owned mode)
+  TaskIdFn  _pollOwnerFn = nullptr;
+  uint32_t  _foreignPolls = 0;  // poll() calls from a task that is not the owner
+#if AFFA_CALLBACK_BUDGET_MS > 0
+  // The WORST callback seen, not the last: a slow one that happened once at boot must not be
+  // scrolled away by a hundred fast ones. Reset deliberately, never sampled-and-cleared.
+  CbKind    _slowestCb     = CbKind::None;
+  uint32_t  _slowestCbMs   = 0;
+  uint32_t  _slowestCbAtMs = 0;
+  uint32_t  _cbOverruns    = 0;
+  uint32_t  _cbLogMs       = 0;   // rate limit: one line per second, or the storm hides it
+#endif
+  // Sessions the panel has taken away since begin(). See sessionsLost().
+  RenderSlot _lastRendered     = RenderSlot::None;
+  uint32_t   _lastRenderedMs   = 0;
+  uint32_t  _sessionsLost      = 0;
+  uint32_t  _lastSessionLossMs = 0;
+  LossReason _lastLossReason   = LossReason::None;
+  // Armed immediately before the setSync() that drops FuncsReg, and consumed by setSync()
+  // on that falling edge. A separate field rather than a setSync() parameter because most
+  // setSync() calls are not losses and should not have to name a reason they do not have.
+  LossReason _lossReasonNext   = LossReason::None;
+  uint32_t  _lastOverflow = 0;  // last ICanLink ringOverflow we reported
+  uint32_t  _txDropCount  = 0;  // frames ICanLink::trySend() hard-refused, counted here so the
+                                // LinkError event does not need a driver status read
+
+  // Link recovery. `_linkDownSince` is 0 when the link is live, which is what makes it both
+  // the outage stamp and the "were we live last time we looked" flag — one variable, so the
+  // two can never disagree.
+  LinkHealth _health{};
+  uint32_t   _recoverBackoffMs = 0;   // 0 = not yet armed; doubles per attempt
+
+  // The RUNNING-but-deaf watchdog (AFFA_RX_STALL_MS). `_rxHeard` arms it — set by every
+  // frame that came off the wire, cleared when the stall latches, so a silence fires it
+  // exactly once. `_rxStalled` is the latch pumpLink() treats as "down"; a real frame or a
+  // completed recovery attempt clears it.
+  uint32_t _lastRxMs = 0;
+  bool     _rxHeard  = false;
+  bool     _rxStalled = false;
+  bool     _wasLive   = false;   // last pass's isLive(): a rising edge re-baselines _lastRxMs
+
+  KeyCb      _keyCb  = nullptr;   void* _keyCtx  = nullptr;
+  CompleteCb _cplCb  = nullptr;   void* _cplCtx  = nullptr;
+  SyncCb     _syncCb = nullptr;   void* _syncCtx = nullptr;
+  FrameTap   _tap    = nullptr;   void* _tapCtx  = nullptr;
+};
+
+} // namespace affa

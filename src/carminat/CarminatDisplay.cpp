@@ -1,0 +1,728 @@
+#include "CarminatDisplay.h"
+
+// The ENTIRE body is inside the panel gate, so a build that did not select Carminat
+// compiles this translation unit to an empty object file — that, plus -ffunction-sections
+// and --gc-sections, is what makes the flash cost of an unselected panel actually zero.
+#if AFFA_PANEL_CARMINAT
+
+#include "../util/AffaText.h"
+#include "../util/AffaLog.h"
+#include <cstring>
+
+namespace affa {
+namespace {
+
+constexpr const char* kTag = "CARM";
+
+// Transliterate into a stack buffer. NO Arduino String anywhere on the send path: the
+// panel charset cannot render UTF-8, losing this looks like garbage on the glass rather
+// than a compile error, and it is applied at the single choke point of every builder.
+// `in == nullptr` yields an empty string.
+struct Ascii {
+  char buf[AFFA_TEXT_MAX];
+  size_t len;
+  explicit Ascii(const char* in) { len = toAscii(in, buf, sizeof(buf)); }
+  const char* c() const { return buf; }
+};
+
+}  // namespace
+
+// File-local, and only in this .cpp: the builders below are dense with wire constants and
+// spelling `carminat::` on every one of them buries the bytes that matter.
+using namespace carminat;
+
+// ---------------------------------------------------------------------------
+// Construction
+// ---------------------------------------------------------------------------
+
+CarminatDisplay::CarminatDisplay(ICanLink& link, IClock& clock,
+                                 carminat::CarminatHelloProfile hello)
+    : AffaDisplayBase(link, clock, carminat::syncProfile(hello), carminat::kFuncIds,
+                       carminat::kFuncCount) {}
+
+bool CarminatDisplay::supports(Feature f) const {
+  switch (f) {
+    case Feature::Text:        return true;
+    case Feature::Time:        return true;
+    case Feature::Power:       return true;
+    // UNCONDITIONALLY TRUE since 2.0. showMenu / showMenuN / highlightItem /
+    // selectMenuItem are protocol, not widget, and no gate removes them. This line used to
+    // read `AFFA_ENABLE_MENU != 0` — a macro deleted with src/widget/, which made the whole
+    // file compile only because every env in this repo still passed -D AFFA_ENABLE_MENU.
+    // A consumer that did not would have hit a hard error here.
+    case Feature::Menu:        return true;
+    case Feature::Popup:       return AFFA_ENABLE_POPUP != 0;
+    case Feature::Fullscreen:  return AFFA_ENABLE_FULLSCREEN != 0;
+    case Feature::ConfirmBox:  return AFFA_ENABLE_CONFIRMBOX != 0;
+    case Feature::InfoPopup:   return AFFA_ENABLE_INFOPOPUP != 0;
+    case Feature::NavBitmap:   return AFFA_ENABLE_NAV != 0;
+    case Feature::KeyTx:       return true;                        // 0x1C1
+  }
+  return false;
+}
+
+Submitted CarminatDisplay::submit(uint16_t funcId, const uint8_t* data, uint8_t len,
+                               RenderSlot slot, bool coalesce, Priority priority,
+                               bool reassertAfterSession) {
+  TxOptions opt;
+  opt.slot     = slot;
+  opt.coalesce = coalesce;
+  opt.priority = priority;
+  opt.reassertAfterSession = reassertAfterSession;
+  // Straight through since 2.0. This used to be a three-way translation — call enqueue(),
+  // notice kNoTicket, go back and fetch the reason out of lastResult() — because a render
+  // returned a bare Result and had nowhere to carry the handle. Submitted carries both, so
+  // the wrapper has nothing left to do but name the options.
+  return enqueue(funcId, data, len, opt);
+}
+
+// ---------------------------------------------------------------------------
+// Receive
+// ---------------------------------------------------------------------------
+
+// Called for frames the base did not consume — never for a sync frame, never for an ACK,
+// and never for our own echo (fromSelf is dropped before this, before the ACK matcher and
+// before the auto-ACK). The generic 0x74 auto-ACK for this frame has ALREADY gone out;
+// that is the legacy order, and the panel expects `RX 1C1 .. -> TX 5C1 74 ..`.
+bool CarminatDisplay::onFrame(const Frame& f) {
+  if (f.id != carminat::kIdKeyPressed) return false;
+
+  Key     k;
+  KeyEdge e;
+  // decodeKeyFrame carries the `03 89` guard, and it is load-bearing: 0x1C1 also carries
+  // `70 A3..`, `02 64 0F A3..` and `05 63 "0037"` from the panel, out of which a decoder
+  // without the guard invents keys 0x640F and 0x3030.
+  if (!decodeKeyFrame(f, k, e)) return false;
+
+  AFFA_LOGD(kTag, "key 0x%04X %s", static_cast<unsigned>(k),
+            e == KeyEdge::Hold ? "hold" : "click");
+  routeKey(k, e);
+  return true;
+}
+
+
+// setText — 0x151, docs/WIRE.md
+//
+// DO NOT "FIX" THE DECLARED LENGTH. 0x0E says 14 content bytes; we transmit 20. The panel
+// consumes only the declared 14 — header plus the first EIGHT text bytes, hence "max 7
+// characters shown". Observed working behaviour; shortening it is an untested change.
+Submitted CarminatDisplay::setText(const char* text, uint8_t digit) {
+  (void)digit;                      // no digit addressing here; it is UpdateList's signature
+  return setTextStyled(text, kIconsNone, kSrcIconNone, kFormatPlain);
+}
+
+// setText with the four documented header bytes exposed. See the declaration for what each
+// one selects; the plain override above is this with the values it always used.
+Submitted CarminatDisplay::setTextStyled(const char* text, uint8_t icon, uint8_t srcIcon,
+                                      uint8_t fmt, uint8_t iconBank2) {
+  const Ascii t(text);
+
+  uint8_t d[8 + kTextCells];
+  uint8_t n  = 0;
+  d[n++] = kPciFirstFrame;
+  d[n++] = 0x0E;                    // declared content length = 14 (see above)
+  d[n++] = kCmdText;                // 0x77 windowed. 0x74 is the full-window overlay, and
+                                    // sending 0x77 while no window is applied has been
+                                    // observed to leave the main screen frozen.
+  d[n++] = icon;                    // RDS icon bank: kIconsNone / kIconsAfRds / 0x09
+  d[n++] = iconBank2;               // second icon bank; 0x55 captured, meaning unknown
+  d[n++] = srcIcon;                 // source label: none / MANU / PRESET
+  d[n++] = fmt;                     // radio style (point between digits) or plain ASCII
+  d[n++] = kControlByte;            // always 0x01
+
+  for (uint8_t i = 0; i < kTextCells; ++i)   // NUL-padded, truncated at 14
+    d[n++] = (i < t.len) ? static_cast<uint8_t>(t.buf[i]) : 0x00;
+
+  return submit(kIdSetText, d, n, RenderSlot::Text);
+}
+
+// ---------------------------------------------------------------------------
+// setTime — 0x151, §8.2.  05 56 <h> <h> <m> <m> 00 00
+// ---------------------------------------------------------------------------
+Submitted CarminatDisplay::setTime(const char* hhmm) {
+  char t[16];
+  const size_t n = toAscii(hhmm, t, sizeof(t));
+  // The legacy builder indexed clock[0..3] unconditionally and would read past a short
+  // string. Four ASCII digits, "HHMM", or nothing.
+  if (n < kClockDigits) return Submitted::refused(Result::BadArgument);
+
+  const uint8_t d[8] = {0x05,                             // single frame, SF_DL = 5
+                        kCmdClock,                        // 'V'
+                        static_cast<uint8_t>(t[0]), static_cast<uint8_t>(t[1]),
+                        static_cast<uint8_t>(t[2]), static_cast<uint8_t>(t[3]),
+                        0x00, 0x00};
+  return submit(kIdSetText, d, sizeof(d), RenderSlot::Clock);
+}
+
+// setPower — 0x151, docs/WIRE.md.  03 52 <09|00> 00 00 00 00 00
+//
+// DO NOT UNIFY THIS WITH UpdateList: Carminat's captured control byte is 0x03, whereas
+// UpdateList uses 0x04 for its distinct control payload.
+Submitted CarminatDisplay::setPower(bool on) {
+  // The monitor-proven AFFA3 form is a complete zero-padded 8-byte frame. The historical
+  // source used FF FF in bytes 3/4; keep that variant documented, but do not inject it
+  // into this captured profile.
+  const uint8_t d[8] = {0x03, kCmdCtrl, on ? kDisplayCtrlOn : kDisplayCtrlOff,
+                        0x00, 0x00, 0x00, 0x00, 0x00};
+  return submit(kIdDisplayCtrl, d, sizeof(d), RenderSlot::Control,
+                /*coalesce=*/true, Priority::Urgent, /*reassertAfterSession=*/true);
+}
+
+// highlightItem — 0x151, docs/WIRE.md.  07 29 01 <7E|7F> 80 00 00 00
+//
+// Its OWN RenderSlot, not Menu's: a highlight must not replace a pending full redraw, and
+// a full redraw must not replace a pending highlight.
+Submitted CarminatDisplay::highlightItem(uint8_t row) {
+  if (row > 1) return Submitted::refused(Result::BadArgument);   // the panel renders exactly two rows
+  const uint8_t d[8] = {0x07, kCmdHilite, 0x01,
+                        row == 0 ? kRowTagTop : kRowTagBottom,
+                        0x80, 0x00, 0x00, 0x00};
+  return submit(kIdSetText, d, sizeof(d), RenderSlot::Highlight);
+}
+
+// showMenu — 0x151, docs/WIRE.md. The 96-byte two-row window, always exactly 96.
+//
+// DECLARED LENGTH 0x5A = 90, BUILT 94 — AND THAT IS CORRECT. The panel stops as soon as it
+// holds the declared count (6 + 12*7 = 90), so hardware DONEs after PCI 0x2C at 13 frames
+// while the self-ACK emulator runs to 14. row1 therefore has 26 usable characters even
+// though the builder accepts 30. Change neither number without panel testing.
+//
+// [3] AND [4] ARE PARAMETERS NOW — the gutter glyph and the scrollbar thumb, two unrelated
+// fields. They were two literals here, `0x80, 0x00`, which is "glyph 0, suppressed" and "no
+// scrollbar": blank twice over, and the reason this panel was thought to have neither. The
+// override keeps sending exactly those bytes so no existing caller moves; showMenuIcon() is
+// the spelling that can ask for a glyph.
+Submitted CarminatDisplay::showMenu(const char* header, const char* row0, const char* row1,
+                                 uint8_t scrollIndicator) {
+  return showMenuIcon(header, row0, row1, scrollIndicator, kMenuIconOemBlank, kMenuThumbNone);
+}
+
+Submitted CarminatDisplay::showMenuIcon(const char* header, const char* row0, const char* row1,
+                                     uint8_t scrollIndicator,
+                                     uint8_t icon, uint8_t thumb) {
+  const Ascii h(header);
+  const Ascii r0(row0);
+  const Ascii r1(row1);
+
+  uint8_t p[96];
+  std::memset(p, 0x00, sizeof(p));
+  uint8_t idx = 0;
+
+  p[idx++] = kPciFirstFrame;    // 0x10
+  p[idx++] = 0x5A;              // declared content length = 90 (see above)
+  p[idx++] = kCmdScreen;        // 0x21
+  p[idx++] = kScreenWindowed;   // 0x01 windowed (0x05 = fullscreen)
+  p[idx++] = kRowTagTop;        // 0x7E
+  p[idx++] = icon;              // payload [3] — gutter glyph index
+  p[idx++] = thumb;             // payload [4] — scrollbar thumb position
+  p[idx++] = 0x00;
+
+  p[idx++] = 0x82;
+  p[idx++] = 0xFF;
+  // 0x00 none, 0x07 up, 0x0B down, 0x03 both. A TWO-ITEM WINDOW DRAWS NO ARROWS whatever
+  // this says — there is nothing to scroll to, and every OEM capture with an arrow is a
+  // 4- or 6-item list. showMenuN() is where this byte is visible.
+  p[idx++] = scrollIndicator;
+
+  for (uint8_t i = 0; i < kMenuHeaderMax && h.buf[i]; ++i)
+    p[idx++] = static_cast<uint8_t>(h.buf[i]);
+  while (idx < 37) p[idx++] = 0x00;
+
+  p[idx++] = 0x00;              // row-0 index
+  p[idx++] = kRowTagTop;        // row-0 tag — the same byte highlightItem(0) sends
+  for (const char* s = r0.c(); *s && idx < 64; ++s) p[idx++] = static_cast<uint8_t>(*s);
+  while (idx < 64) p[idx++] = 0x00;
+
+  p[idx++] = 0x01;              // row-1 index
+  p[idx++] = kRowTagBottom;     // row-1 tag
+  for (const char* s = r1.c(); *s && idx < 96; ++s) p[idx++] = static_cast<uint8_t>(*s);
+  while (idx < 96) p[idx++] = 0x00;
+
+  AFFA_LOGT(kTag, "showMenu %u bytes, scroll 0x%02X", static_cast<unsigned>(idx),
+            static_cast<unsigned>(scrollIndicator));
+  return submit(kIdSetText, p, idx, RenderSlot::Menu);
+}
+
+// ---------------------------------------------------------------------------
+// showPopupText / hidePopup — 0x151, §8.7 / §8.8
+// ---------------------------------------------------------------------------
+#if AFFA_ENABLE_POPUP
+
+// The transient overlay ("VOL 28"): setText's wire family with mode 0x74, and here the
+// declared length IS correct.
+//
+// THE POPUP IS THE ONE TRUE OVERLAY ON THIS PANEL, and its lifetime belongs to the
+// APPLICATION. Measured 2026-07-28 on a real Carminat: with a popup up, the screen
+// underneath was redrawn (BASE-A -> BASE-B, visible at the line ends the overlay does not
+// cover) and the popup stayed on top. No auto-revert was observed — hidePopup() is what
+// clears it, so an application that shows one owns a deadline to close it.
+//
+// Hence RenderSlot::Popup never coalescing against RenderSlot::Text: they are two
+// independent layers, not two versions of one screen.
+Submitted CarminatDisplay::showPopupText(const char* text, uint8_t icon, uint8_t srcIcon,
+                                      uint8_t fmt) {
+  const Ascii t(text);
+
+  // 8 cells minimum keeps the captured "VOL 28" byte-identical (declared 0x0E).
+  uint8_t cells = static_cast<uint8_t>(t.len);
+  if (cells < kPopupCellsMin) cells = kPopupCellsMin;
+  if (cells > kPopupCellsMax) cells = kPopupCellsMax;
+
+  uint8_t d[8 + kPopupCellsMax];
+  uint8_t n = 0;
+  d[n++] = kPciFirstFrame;
+  d[n++] = static_cast<uint8_t>(6 + cells);   // declared content length: header + cells
+  d[n++] = kCmdPopup;                         // 0x74 full-window overlay
+  d[n++] = icon;                              // left icon set (capture: 0x09)
+  d[n++] = kIconBank2;                        // 0x55 fixed
+  d[n++] = srcIcon;                           // source/right icon (capture: 0xFF none)
+  d[n++] = fmt;                               // text format (capture: 0x60 plain)
+  d[n++] = kControlByte;
+  // SPACE-padded here, unlike setText, which is NUL-padded. Both are as captured.
+  for (uint8_t i = 0; i < cells; ++i)
+    d[n++] = (i < t.len) ? static_cast<uint8_t>(t.buf[i]) : ' ';
+
+  return submit(kIdSetText, d, n, RenderSlot::Popup);
+}
+
+// 02 54 03 — the close-window command, independently observed FROM the OEM head unit.
+Submitted CarminatDisplay::hidePopup() {
+  const uint8_t d[3] = {0x02, kCmdClose, 0x03};
+  return submit(kIdSetText, d, sizeof(d), RenderSlot::Popup);
+}
+
+#else
+
+Submitted CarminatDisplay::showPopupText(const char* text, uint8_t icon, uint8_t srcIcon,
+                                      uint8_t fmt) {
+  (void)text; (void)icon; (void)srcIcon; (void)fmt;
+  return Submitted::refused(Result::NotSupported);
+}
+Submitted CarminatDisplay::hidePopup() { return Submitted::refused(Result::NotSupported); }
+
+#endif  // AFFA_ENABLE_POPUP
+
+// ---------------------------------------------------------------------------
+// showFullscreenText / hideFullscreenText — 0x151, §8.6 / §8.8
+// ---------------------------------------------------------------------------
+// The same 0x21 screen command as showMenu with mode 0x05: three equal lines on the whole
+// glass, no row tags.
+//
+// IT IS NOT AN OVERLAY AND IT NEEDS NO TEARDOWN. Measured on a real Carminat, 2026-07-28:
+// a plain setText() over a live fullscreen REPLACED it, with no hideFullscreenText() sent.
+// Every full-screen-class render — showMenu, showFullscreenText, setText — simply replaces
+// the last one, so a fullscreen can be animated at the rate the wire sustains (~190 ms per
+// screen, 14 frames, every one acknowledged) with no close in between.
+//
+// The POPUP is the true overlay: it survives a redraw of the screen underneath, the redraw
+// still lands, and only hidePopup() clears it. docs/WIRE.md had these two the wrong
+// way round until that bench session; if you are holding a comment that says a fullscreen
+// owns the glass until closed, it is the old one.
+//
+// THE FULLSCREEN GUARD CLOSES HERE and reopens after the nav block. It used to stay open
+// across both, so -D AFFA_ENABLE_FULLSCREEN=0 silently removed the DEFINITIONS of
+// selectMenuItem, showMenuN, showNavBitmap, showNavBitmapWithHeader and navTick while the
+// header went on declaring them: five undefined references, and a gate that removed four
+// features nobody asked it to touch. Found by the footprint harness, 2026-08-08.
+//
+// So the guard now wraps ONLY showFullscreenText, further down — this comment is the
+// section header for it and is deliberately outside every gate.
+
+// ---------------------------------------------------------------------------
+// showMenuN / selectMenuItem — the N-item list screen
+// ---------------------------------------------------------------------------
+#if AFFA_ENABLE_BIGMENU
+// Move the selection inside an N-item list WITHOUT resending the list.
+//
+// highlightItem() refuses anything past row 1 and sends the two-row tags 0x7E/0x7F. In an
+// N-item screen the tag is the ITEM INDEX — the tag bytes read 00 01 02 03 04 05 — so the
+// same 0x29 command carries 0..N-1 and costs eight bytes instead of two hundred.
+Submitted CarminatDisplay::selectMenuItem(uint8_t index) {
+  if (index >= kMenuMaxItems) return Submitted::refused(Result::BadArgument);
+  const uint8_t d[8] = {0x07, kCmdHilite, 0x01, index, 0x80, 0x00, 0x00, 0x00};
+  return submit(kIdSetText, d, sizeof(d), RenderSlot::Highlight);
+}
+
+// THE PANEL TRACKS SIX ITEMS AND DRAWS TWO OF THEM.
+//
+// CORRECTION, bench 2026-08-05: an earlier version of this comment said "the panel takes at
+// least six rows". It does not. The glass is a TWO-ROW VIEWPORT and that is a property of
+// the panel, not of the payload — a six-item screen still shows two rows plus the header.
+//
+// What the six items actually buy is that the panel now TRACKS the whole list and scrolls
+// the viewport ITSELF: send the list once, then move the selection with selectMenuItem(),
+// and selecting item 5 brings item 5 into view without another render. That replaces the
+// sliding window an application used to have to maintain by hand, which is worth having —
+// but it is not more rows on screen.
+//
+// showMenu() above hard-codes `0x82` and a 90-byte
+// payload and can therefore only ever draw two — which is a limit of this library, not of
+// the panel. From the 24-file OEM corpus (archive/bench-notes:docs/captures/some more logs from origin/):
+//
+//   [6] = 0x80 | itemCount, three-for-three:  0x82 / 2 items / 90 B
+//                                             0x84 / 4 items / 144 B
+//                                             0x86 / 6 items / 198 B
+//   total length = 36 + 27 * itemCount, exactly, in all three
+//
+// and in the six-item Navigation menu the tag bytes land at 36, 63, 90, 117, 144, 171
+// reading `00 01 02 03 04 05` — a measured stride of 27 with a 26-byte text cell, not an
+// inferred one.
+//
+// THE LAYOUT HERE DIFFERS FROM showMenu() BY ONE BYTE, deliberately. showMenu writes a
+// "row-1 index" at payload offset 62; the corpus shows offset 62 is the LAST BYTE OF ITEM
+// 0's TEXT CELL and that item 1's tag is at 63. The two-row builder gets away with it
+// because the stray byte lands on NUL padding at the end of a short label. Do not copy that
+// shape into this one.
+//
+// kMenuMaxItems is 10, not 6, ON PURPOSE: six is the most ever CAPTURED, not a known
+// ceiling, and finding the real one needs a builder that can exceed it. Anything above six
+// is unverified.
+Submitted CarminatDisplay::showMenuN(const char* title, const char* const* items,
+                                     uint8_t count, uint8_t firstVisible, uint8_t selected,
+                                     uint8_t scrollMask, uint8_t icon, uint8_t thumb) {
+  if (!items || count == 0)              return Submitted::refused(Result::BadArgument);
+  if (count > kMenuMaxItems)             return Submitted::refused(Result::BadArgument);
+  const uint16_t need = menuScreenBytes(count);
+  if (need > AFFA_MAX_EXTERNAL_PAYLOAD)  return Submitted::refused(Result::TooLong);
+
+  // BUILT IN PLACE, in a pool slot: no scratch buffer for the caller, no second copy.
+  uint8_t* const scratch = acquireBulk();
+  if (!scratch)                          return Submitted::refused(Result::QueueFull);
+  std::memset(scratch, 0x00, need);
+  const uint16_t payload = static_cast<uint16_t>(need - 2);      // 36 + 27N
+  scratch[0] = static_cast<uint8_t>(kPciFirstFrame | (payload >> 8));
+  scratch[1] = static_cast<uint8_t>(payload & 0xFF);
+
+  uint8_t* const p = scratch + 2;        // payload offsets below are the corpus's own
+  p[0] = kCmdScreen;                     // 0x21
+  p[1] = kScreenWindowed;                // 0x01
+  p[2] = selected;                       // row tag of the selection
+  p[3] = icon;                           // gutter glyph index — carminat::kMenuIcon*
+  p[4] = thumb;                          // scrollbar thumb — kMenuThumbNone/Min/Max
+  p[5] = 0x00;
+  p[6] = static_cast<uint8_t>(0x80 | count);
+  p[7] = 0xFF;
+  p[8] = scrollMask;                     // 0x00 none / 0x07 up / 0x0B down / 0x03 both
+  {
+    const Ascii t(title);
+    for (uint8_t i = 0; i < kMenuHeaderMax && t.buf[i]; ++i)
+      p[9 + i] = static_cast<uint8_t>(t.buf[i]);
+  }
+  p[35] = firstVisible;                  // index of the first visible item
+
+  for (uint8_t n = 0; n < count; ++n) {
+    uint8_t* const cell = p + 36 + 27u * n;
+    cell[0] = n;                         // 00 01 02 ... exactly as captured
+    const Ascii s(items[n]);
+    for (uint8_t i = 0; i < 26 && s.buf[i]; ++i)
+      cell[1 + i] = static_cast<uint8_t>(s.buf[i]);
+  }
+
+  AFFA_LOGT(kTag, "showMenuN %u items, %u bytes", static_cast<unsigned>(count),
+            static_cast<unsigned>(need));
+  return submitBulk(kIdSetText, scratch, need, TxOptions{});
+}
+#endif  // AFFA_ENABLE_BIGMENU
+
+#if AFFA_ENABLE_NAV
+// The navigation pane. `21 0B` is kCmdScreen with its own screen type, on kIdNav instead of
+// kIdSetText — the same command family as the menu and the fullscreen screen, which is why
+// the header opens the way it does.
+//
+// Header and image are both copied into the long-payload pool by enqueueSplit(), so the
+// caller may change or free the bitmap as soon as this returns.
+Submitted CarminatDisplay::showNavBitmap(const uint8_t* bitmap) {
+  return showNavBitmapWithHeader(kNavHeader, bitmap);
+}
+
+Submitted CarminatDisplay::showNavBitmapWithHeader(const uint8_t* header,
+                                                   const uint8_t* bitmap) {
+  if (!header || !bitmap) return Submitted::refused(Result::BadArgument);
+
+  uint8_t prefix[2 + sizeof(kNavHeader)];
+  constexpr uint16_t kDeclared = sizeof(kNavHeader) + kNavBitmapBytes;   // 302
+  static_assert(kDeclared == 302, "the OEM declares 302 bytes on 0x1F1");
+  prefix[0] = static_cast<uint8_t>(kPciFirstFrame | (kDeclared >> 8));   // 0x11
+  prefix[1] = static_cast<uint8_t>(kDeclared & 0xFF);                    // 0x2E
+  std::memcpy(prefix + 2, header, sizeof(kNavHeader));
+
+  TxOptions opt;                    // RenderSlot::None: enqueueSplit refuses anything else
+  return enqueueSplit(kIdNav, prefix, static_cast<uint8_t>(sizeof(prefix)),
+                      bitmap, kNavBitmapBytes, opt);
+}
+
+// `25 00 00 00` / `25 00 03 00`. The OEM alternates these at 820 ms while the nav screen is
+// up — `nav still.csv` is twenty of them and nothing else on the bus — which reads as the
+// blink of a flashing element. Four bytes, verbatim. NOT CONFIRMED ON GLASS: what it
+// actually does is still a guess, and on this panel an ACK proves nothing.
+Submitted CarminatDisplay::navTick(bool phase) {
+  const uint8_t p[5] = { 0x04, 0x25, 0x00, static_cast<uint8_t>(phase ? 0x03 : 0x00), 0x00 };
+  return submit(kIdSetText, p, sizeof(p), RenderSlot::None, /*coalesce=*/false);
+}
+#endif  // AFFA_ENABLE_NAV
+
+#if AFFA_ENABLE_FULLSCREEN
+
+// The most heavily EXERCISED builder in the library — 09_golden has put 24 912 of these on
+// the glass with `failed 0` — and it is a zero-button message box in everything but name:
+// `21 05 FF 00 00 <b5>`, body at content 32, 0x0D-separated, exactly showMessageBox(0).
+//
+// TWO BYTES DISAGREE WITH THE OEM AND THEY ARE DELIBERATELY LEFT ALONE, 2026-08-06:
+//
+//   * byte [5] is 0x40 here; ALL FIVE captured OEM mode-0x05 frames carry 0x49.
+//   * the declared length is 0x60 = 96; the OEM's zero-button screens declare 0x69 = 105.
+//
+// So this is NOT the "matching header" the previous comment claimed — that claim did not
+// survive the corpus. What is true is that these bytes render, animate and soak on the
+// bench panel, and the OEM's do not have that record HERE. Changing the most-exercised path
+// in the library on the strength of a byte diff, without putting the result on glass, is
+// the trade this project keeps losing. It is a bench question, not an edit:
+// archive/bench-notes:docs/captures/some more logs from origin/ has it queued.
+//
+// It is also worth knowing that a fullscreen needs no teardown — see below — and that the
+// report of "fullscreen is broken" on 2026-08-06 turned out to be 17_mediascreen's repaint
+// gate swallowing the setText that was meant to replace it, not this builder.
+Submitted CarminatDisplay::showFullscreenText(const char* l1, const char* l2, const char* l3) {
+  const Ascii a(l1);
+  const Ascii b(l2);
+  const Ascii c(l3);
+
+  uint8_t p[2 + 96];
+  std::memset(p, 0x00, sizeof(p));
+  p[0] = kPciFirstFrame;
+  p[1] = 0x60;                 // 96 content bytes follow — correct
+  p[2] = kCmdScreen;           // 0x21
+  p[3] = kScreenFullscreen;    // 0x05
+  p[4] = 0xFF;
+  p[5] = 0x00;
+  p[6] = 0x00;
+  p[7] = 0x40;
+  // SPACE-filled so unused cells render blank rather than as garbage.
+  for (size_t k = 2 + 32; k < sizeof(p); ++k) p[k] = 0x20;
+
+  size_t q = 2 + 34;             // two leading spaces at content 32..33 — as captured
+
+  const auto putLine = [&](const Ascii& s) {
+    if (s.len == 0) return;    // an empty line is skipped ENTIRELY: no separator either
+    for (size_t i = 0; i < s.len && q < 2 + 95; ++i) p[q++] = static_cast<uint8_t>(s.buf[i]);
+    if (q < 2 + 96) p[q++] = kLineSeparator;
+  };
+  putLine(a);
+  putLine(b);
+  putLine(c);
+
+  return submit(kIdSetText, p, static_cast<uint8_t>(sizeof(p)), RenderSlot::Fullscreen);
+}
+
+// hideFullscreenText() WAS HERE AND IS GONE, 2026-08-06. It sent `02 54 03` — byte for byte
+// hidePopup() — so the library carried two names for one command, and the name implied a
+// teardown that the bench had already disproved: a plain setText() over a live fullscreen
+// replaces it, which is what lets 09_golden animate these at ~8 a second with no close in
+// between. Callers that want the raw close command still have hidePopup().
+
+#else
+
+Submitted CarminatDisplay::showFullscreenText(const char* l1, const char* l2, const char* l3) {
+  (void)l1; (void)l2; (void)l3;
+  return Submitted::refused(Result::NotSupported);
+}
+
+#endif  // AFFA_ENABLE_FULLSCREEN
+
+// ---------------------------------------------------------------------------
+// showConfirmBox — 0x151, §8.9
+// ---------------------------------------------------------------------------
+#if AFFA_ENABLE_CONFIRMBOX
+
+// THE BUTTON COUNT IS A REAL FIELD, AND IT USED TO BE A CONSTANT.
+//
+// What the old builder got RIGHT, and what is easy to misread: its `content[105]` array
+// started AFTER the 6-byte header, so `content[0x1A]` was payload offset 32 — the first
+// button label — and `content[0x20]` was payload 38, the body. Those placements were
+// correct, and this rewrite reproduces its bytes exactly for the one-button case. The
+// golden vector kConfirmBoxOk did not change.
+//
+// What it got WRONG is that payload[4], the button count, was hard-coded to 1. There was no
+// way to ask for the OEM's zero-button screen or its two-button Yes/No box, and the
+// parameter named `caption` was really the single button's label with no way to say so.
+// Its `kConfirmCapMax = 7` also let a 7th caption character run into the body's first byte.
+//
+// The layout and both length formulas are in CarminatConstants.h, derived from five OEM
+// captures with 0, 1 and 2 buttons. `labels` is `buttonCount` NUL-terminated strings, each
+// truncated to six bytes and NUL-padded — the capture pads labels with 0x00 and the body
+// with spaces, which is the opposite way round from what you would guess.
+Submitted CarminatDisplay::showMessageBox(const char* row0, const char* row1,
+                                       const char* const* labels, uint8_t buttonCount,
+                                       uint8_t selected) {
+  if (buttonCount > kButtonsMax)            return Submitted::refused(Result::BadArgument);
+  if (buttonCount && !labels)               return Submitted::refused(Result::BadArgument);
+  if (buttonCount && selected >= buttonCount) return Submitted::refused(Result::BadArgument);
+
+  // content[] is the payload after the two PCI bytes: content[0] is the 0x21.
+  const uint8_t bodyOff  = static_cast<uint8_t>(kBoxLabelOffset +
+                                                kButtonLabelLen * buttonCount);
+  const uint8_t declared = static_cast<uint8_t>(kBoxBaseLength +
+                                                kButtonLabelLen * buttonCount);
+
+  uint8_t buf[2 + kBoxBaseLength + kButtonLabelLen * kButtonsMax];
+  std::memset(buf, 0x00, sizeof(buf));
+  buf[0] = kPciFirstFrame;
+  buf[1] = declared;
+
+  uint8_t* const c = buf + 2;
+  c[0] = kCmdScreen;                       // 0x21
+  c[1] = kScreenFullscreen;                // 0x05
+  c[2] = buttonCount ? selected : kBoxNoSelection;   // 0xFF when there is nothing to select
+  c[3] = 0x00;
+  c[4] = buttonCount;
+  c[5] = kBoxHeaderByte5;                  // 0x49 in all five captures
+  // [6..31] stay zero — the OEM leaves them zero in every capture.
+
+  for (uint8_t b = 0; b < buttonCount; ++b) {
+    const Ascii label(labels[b]);
+    uint8_t* const cell = c + kBoxLabelOffset + kButtonLabelLen * b;
+    for (uint8_t i = 0; i < kButtonLabelLen && label.buf[i]; ++i)
+      cell[i] = static_cast<uint8_t>(label.buf[i]);   // NUL padding is the memset
+  }
+
+  // The body: rows separated by 0x0D, bounded by the 73-byte region that follows the
+  // labels. The region is the same size whatever the button count, because the declared
+  // length and the body offset move together.
+  uint8_t off = bodyOff;
+  const uint8_t end = static_cast<uint8_t>(bodyOff + kBoxBodyBytes);
+  const auto insertRow = [&](const char* text) {
+    const Ascii s(text);
+    const char* t = s.c();
+    while (*t && off < end) c[off++] = static_cast<uint8_t>(*t++);
+    if (off < end) c[off++] = kLineSeparator;
+  };
+  insertRow(row0);
+  insertRow(row1);
+
+  const uint8_t n = static_cast<uint8_t>(2 + declared);
+  AFFA_LOGT(kTag, "messageBox %u buttons, %u bytes", static_cast<unsigned>(buttonCount),
+            static_cast<unsigned>(n));
+  return submit(kIdSetText, buf, n, RenderSlot::ConfirmBox);
+}
+
+// The IDisplay spelling: a ONE-BUTTON OK box. `caption` is the BUTTON'S LABEL — six
+// characters, because that is the size of the field it lands in. It used to be written to
+// content[0x1A], where no capture shows anything rendering, while the button silently took
+// its caption from row0; this makes the parameter mean what a caller reading the name would
+// assume, and it is the only reading under which the box has a labelled button at all.
+Submitted CarminatDisplay::showConfirmBox(const char* caption, const char* row0,
+                                       const char* row1) {
+  const char* labels[1] = {caption};
+  return showMessageBox(row0, row1, labels, kButtonsOk, 0);
+}
+
+// `03 29 05 <index>` — a three-byte SINGLE frame, verbatim from the one capture that holds
+// it, answered with a bare 0x74. It is NOT the 7-byte `07 29 01 <rowtag> 80 00 00 00` the
+// two-row list uses; sending that form at a message box addresses the wrong screen mode.
+Submitted CarminatDisplay::selectBoxButton(uint8_t index) {
+  if (index >= kButtonsMax) return Submitted::refused(Result::BadArgument);
+  const uint8_t d[4] = {0x03, kCmdHilite, kSelectModeBox, index};
+  return submit(kIdSetText, d, sizeof(d), RenderSlot::Highlight);
+}
+
+#else
+
+Submitted CarminatDisplay::showMessageBox(const char* row0, const char* row1,
+                                       const char* const* labels, uint8_t buttonCount,
+                                       uint8_t selected) {
+  (void)row0; (void)row1; (void)labels; (void)buttonCount; (void)selected;
+  return Submitted::refused(Result::NotSupported);
+}
+Submitted CarminatDisplay::showConfirmBox(const char* caption, const char* row0,
+                                       const char* row1) {
+  (void)caption; (void)row0; (void)row1;
+  return Submitted::refused(Result::NotSupported);
+}
+Submitted CarminatDisplay::selectBoxButton(uint8_t index) {
+  (void)index;
+  return Submitted::refused(Result::NotSupported);
+}
+
+#endif  // AFFA_ENABLE_CONFIRMBOX
+
+// ---------------------------------------------------------------------------
+// showInfoPopup / showInfoMenu / hideInfoPopup — 0x151, §8.10
+// ---------------------------------------------------------------------------
+#if AFFA_ENABLE_INFOPOPUP
+
+// The 3-row settings-list popup. ONE MESSAGE PER ROW, 13 payload bytes each:
+//
+//   10 0B 76 <prefix> <offset> t0 t1 t2      (frame 0, eight raw bytes)
+//   21 t3 t4 t5 t6 t7 00 00                  (continuation, 5 bytes + 2 filler)
+//
+// One message PER ROW, and they must NOT coalesce against each other: all three share
+// funcId 0x151 and RenderSlot::InfoPopup, so with coalescing on, rows 1 and 2 would each
+// replace row 0 and only the last would ever be drawn. The cost is three queue slots.
+Submitted CarminatDisplay::showInfoMenu(const char* row0, const char* row1, const char* row2,
+                                     uint8_t offset0, uint8_t offset1, uint8_t offset2,
+                                     uint8_t infoPrefix) {
+  const auto sendRow = [&](uint8_t offset, const char* text) {
+    const Ascii t(text);
+
+    // SPACE-padded to 8, which is the OEM capture's form. NOT NUL-padded like setText.
+    char cell[kInfoCells];
+    for (uint8_t i = 0; i < kInfoCells; ++i) cell[i] = (i < t.len) ? t.buf[i] : ' ';
+
+    uint8_t d[5 + kInfoCells];
+    uint8_t n = 0;
+    d[n++] = kPciFirstFrame;
+    d[n++] = 0x0B;              // declared content length = 11 = 3 header + 8 text
+    d[n++] = kCmdInfoRow;       // 0x76
+    d[n++] = infoPrefix;        // text format, same semantics as setText byte 6
+    d[n++] = offset;            // row slot: the OEM list uses 0x41 / 0x44 / 0x48
+    for (uint8_t i = 0; i < kInfoCells; ++i) d[n++] = static_cast<uint8_t>(cell[i]);
+
+    return submit(kIdSetText, d, n, RenderSlot::InfoPopup, /*coalesce=*/false);
+  };
+
+  // Every row is attempted; the FIRST failure is returned — a partially drawn list is a
+  // failure the caller has to know about.
+  //
+  // ON SUCCESS THE LAST ROW'S TICKET IS THE ONE RETURNED, and that is a deliberate choice
+  // rather than an arbitrary one: the three rows are submitted in order and complete in
+  // order, so the last to complete is the one that says the whole list is on the glass.
+  // Watching the first would report success while two rows were still in flight.
+  const Submitted a = sendRow(offset0, row0);
+  const Submitted b = sendRow(offset1, row1);
+  const Submitted c = sendRow(offset2, row2);
+  if (!a) return a;
+  if (!b) return b;
+  return c;
+}
+
+// The offsets and the prefix reproduce the OEM settings list byte for byte:
+// `76 60 41 .. AUX`, `76 60 44 .. AUTO`, `76 60 48 .. SPEED`.
+Submitted CarminatDisplay::showInfoPopup(const char* l1, const char* l2, const char* l3) {
+  return showInfoMenu(l1, l2, l3, kInfoOffset0, kInfoOffset1, kInfoOffset2, kInfoPrefix);
+}
+
+// hideInfoPopup() WAS HERE AND IS GONE, 2026-08-06. Its body was `setText("RENAULT")` and
+// its own comment admitted the close command "has never been observed" — so it was a guess
+// wearing a protocol method's name, which is the single failure mode this project keeps
+// paying for. A caller that wants the OEM banner can call setText("RENAULT") itself, and
+// see that it is a choice rather than a dismissal.
+
+#else
+
+Submitted CarminatDisplay::showInfoMenu(const char* row0, const char* row1, const char* row2,
+                                     uint8_t offset0, uint8_t offset1, uint8_t offset2,
+                                     uint8_t infoPrefix) {
+  (void)row0; (void)row1; (void)row2;
+  (void)offset0; (void)offset1; (void)offset2; (void)infoPrefix;
+  return Submitted::refused(Result::NotSupported);
+}
+Submitted CarminatDisplay::showInfoPopup(const char* l1, const char* l2, const char* l3) {
+  (void)l1; (void)l2; (void)l3;
+  return Submitted::refused(Result::NotSupported);
+}
+
+#endif  // AFFA_ENABLE_INFOPOPUP
+
+}  // namespace affa
+
+#endif  // AFFA_PANEL_CARMINAT

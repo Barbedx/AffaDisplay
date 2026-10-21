@@ -1,0 +1,14 @@
+# Line endings are not cosmetic here.
+#
+# tools/gen_wire_doc.js parses the golden vectors out of test/*.cpp to write docs/WIRE.md.
+# Its first regex ended on `;\n`, which does not match `;\r\n` — so test_updatelist_wire,
+# the one file that happened to be CRLF, contributed NOTHING and an entire panel family was
+# missing from the published wire document. Nobody saw it, because the generator's --check
+# compares its own output against itself.
+#
+# The parser is fixed and now refuses to write a document it knows is short. This file makes
+# the input uniform anyway, so the next parser does not have to be as careful.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.bin binary

@@ -1,0 +1,89 @@
+#pragma once
+#include "../core/ICanLink.h"
+#include "../core/AffaConstants.h"
+#include "../core/AffaRing.h"
+
+namespace affa {
+
+// Header-only test double. Records everything the library transmits, lets a test inject
+// what the panel would have said, and can synthesise the per-frame ACK so a test does not
+// have to hand-write one per ISO-TP frame.
+//
+// It does NOT echo transmitted frames back into the RX ring. A real controller does not
+// receive its own transmissions, and a test double that silently did would make every host
+// test disagree with hardware. The setEcho(true) switch that existed for the fromSelf tests
+// went with test_keysource.
+template <uint16_t N = 128>
+class LoopbackLink final : public ICanLink {
+ public:
+  TxDisposition trySend(const Frame& f) override {
+    if (!_live) { ++_stats.txDropped; return TxDisposition::Rejected; }
+    if (!_sent.push(f)) { ++_stats.txDropped; return TxDisposition::Rejected; }
+    ++_stats.txFrames;
+    if (_autoAck) synthesiseAck(f);
+    return TxDisposition::Accepted;
+  }
+  bool  recv(Frame& out) override { return _rx.pop(out); }
+  bool  isLive() const override   { return _live; }
+
+  // A LINK THAT NEVER RECOVERS. The counting version — recoverCalls(), forcedRecoverCalls(),
+  // setRecoverable() — went with test_recovery, which was the only caller and which built its
+  // own GatedLink anyway because this one cannot express "healthy but not live".
+  bool recover(bool) override { return false; }
+  Stats stats()  const override   {
+    Stats s = _stats;
+    s.ringOverflow = _rx.overflow();
+    return s;
+  }
+
+  // ---- test side ----
+  void     inject(const Frame& f) { _rx.push(f); ++_stats.rxFrames; }  // panel -> library
+  bool     takeSent(Frame& out)   { return _sent.pop(out); }           // library -> test
+  uint32_t sentCount() const      { return _sent.size(); }
+  void     setLive(bool v)        { _live = v; }
+
+  // Answers each transmitted frame on id|replyFlag. `partialFor` is the number of leading
+  // frames of a transfer that are answered PARTIAL (30 01 00) before the DONE (0x74);
+  // the default of 0 answers DONE to everything, which is what a single-frame message
+  // wants. Set it to (frameCount - 1) to drive a multi-frame transfer to completion.
+  void setAutoAck(bool v)              { _autoAck = v; }
+  void setAutoAckPartials(uint16_t n)  { _partialsLeft = n; }
+
+  void clear() {
+    _rx.reset();
+    _sent.reset();
+    _stats = Stats{};
+    _partialsLeft = 0;
+  }
+
+ private:
+  void synthesiseAck(const Frame& f) {
+    Frame a;
+    a.id  = f.id | _replyFlag;
+    a.len = kPacketLength;
+    if (_partialsLeft > 0) {
+      --_partialsLeft;
+      a.data[0] = kAckPartial0;
+      a.data[1] = kAckPartial1;
+      a.data[2] = kAckPartial2;
+      for (uint8_t i = 3; i < kPacketLength; ++i) a.data[i] = _ackFiller;
+    } else {
+      a.data[0] = kAckDone;
+      for (uint8_t i = 1; i < kPacketLength; ++i) a.data[i] = _ackFiller;
+    }
+    _rx.push(a);
+    ++_stats.rxFrames;
+  }
+
+  AffaRing<Frame, N> _rx;
+  AffaRing<Frame, N> _sent;
+  Stats    _stats{};
+  uint16_t _replyFlag    = kReplyFlag;
+  uint16_t _partialsLeft = 0;
+  uint8_t  _ackFiller    = 0xA3;   // what the bench panel actually pads with, so a test
+                                   // that wrongly matched on the filler fails loudly
+  bool     _live    = true;
+  bool     _autoAck = false;
+};
+
+} // namespace affa

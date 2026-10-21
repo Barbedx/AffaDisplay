@@ -1,0 +1,52 @@
+{
+  "name": "AffaDisplay",
+  "version": "2.0.0",
+  "description": "Non-blocking ESP32 driver for Renault AFFA2/AFFA3 OEM dash panels (Carminat, UpdateList) over CAN. Pull-port CAN seam, state-machine transmit, wall-clock sync watchdog, zero dynamic allocation after begin(), and host-testable without hardware. TwaiLink runs on the ESP-IDF TWAI driver in the ESP32 Arduino core, with no third-party CAN library; implement ICanLink to bring your own driver.",
+  "keywords": [
+    "can",
+    "canbus",
+    "renault",
+    "carminat",
+    "affa2",
+    "affa3",
+    "megane",
+    "display",
+    "esp32",
+    "twai",
+    "iso-tp",
+    "automotive"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Barbedx/AffaDisplay.git"
+  },
+  "authors": [
+    {
+      "name": "Andrii",
+      "email": "www.andruxa@gmail.com",
+      "maintainer": true
+    }
+  ],
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "headers": "AffaDisplay.h",
+  "build": {
+    "flags": [
+      "-std=gnu++17"
+    ],
+    "unflags": [
+      "-std=gnu++11"
+    ]
+  },
+  "examples": [
+    "examples/*/*.cpp"
+  ],
+  "export": {
+    "exclude": [
+      ".pio",
+      ".vscode",
+      "docs/*.bak"
+    ]
+  }
+}
