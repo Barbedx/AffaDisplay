@@ -652,21 +652,8 @@ Submitted CarminatDisplay::showInfoMenu(const char* row0, const char* row1, cons
                                      uint8_t offset0, uint8_t offset1, uint8_t offset2,
                                      uint8_t infoPrefix, uint8_t cells) {
   if (cells == 0 || cells > kInfoCellsMax) return Submitted::refused(Result::BadArgument);
-
   const auto sendRow = [&](uint8_t offset, const char* text) {
-    const Ascii t(text);
-
-    uint8_t d[5 + kInfoCellsMax];
-    uint8_t n = 0;
-    d[n++] = kPciFirstFrame;
-    d[n++] = static_cast<uint8_t>(3 + cells);  // declared: 3 header + the cells (0x0B at 8)
-    d[n++] = kCmdInfoRow;       // 0x76
-    d[n++] = infoPrefix;        // text format, same semantics as setText byte 6
-    d[n++] = offset;            // row slot: the OEM list uses 0x41 / 0x44 / 0x48
-    // SPACE-padded, which is the OEM capture's form. NOT NUL-padded like setText.
-    for (uint8_t i = 0; i < cells; ++i) d[n++] = static_cast<uint8_t>(i < t.len ? t.buf[i] : ' ');
-
-    return submit(kIdSetText, d, n, RenderSlot::InfoPopup, /*coalesce=*/false);
+    return showInfoRow(text, offset, infoPrefix, cells);
   };
 
   // Every row is attempted; the FIRST failure is returned — a partially drawn list is a
@@ -682,6 +669,25 @@ Submitted CarminatDisplay::showInfoMenu(const char* row0, const char* row1, cons
   if (!a) return a;
   if (!b) return b;
   return c;
+}
+
+// One row: ONE message, its own queue slot, never coalesced (see above).
+Submitted CarminatDisplay::showInfoRow(const char* text, uint8_t offset, uint8_t infoPrefix,
+                                       uint8_t cells) {
+  if (cells == 0 || cells > kInfoCellsMax) return Submitted::refused(Result::BadArgument);
+  const Ascii t(text);
+
+  uint8_t d[5 + kInfoCellsMax];
+  uint8_t n = 0;
+  d[n++] = kPciFirstFrame;
+  d[n++] = static_cast<uint8_t>(3 + cells);  // declared: 3 header + the cells (0x0B at 8)
+  d[n++] = kCmdInfoRow;       // 0x76
+  d[n++] = infoPrefix;        // text format, same semantics as setText byte 6
+  d[n++] = offset;            // row slot: the OEM list uses 0x41 / 0x44 / 0x48
+  // SPACE-padded, which is the OEM capture's form. NOT NUL-padded like setText.
+  for (uint8_t i = 0; i < cells; ++i) d[n++] = static_cast<uint8_t>(i < t.len ? t.buf[i] : ' ');
+
+  return submit(kIdSetText, d, n, RenderSlot::InfoPopup, /*coalesce=*/false);
 }
 
 // The offsets and the prefix reproduce the OEM settings list byte for byte:
@@ -707,6 +713,11 @@ Submitted CarminatDisplay::showInfoMenu(const char* row0, const char* row1, cons
 }
 Submitted CarminatDisplay::showInfoPopup(const char* l1, const char* l2, const char* l3) {
   (void)l1; (void)l2; (void)l3;
+  return Submitted::refused(Result::NotSupported);
+}
+Submitted CarminatDisplay::showInfoRow(const char* text, uint8_t offset, uint8_t infoPrefix,
+                                       uint8_t cells) {
+  (void)text; (void)offset; (void)infoPrefix; (void)cells;
   return Submitted::refused(Result::NotSupported);
 }
 

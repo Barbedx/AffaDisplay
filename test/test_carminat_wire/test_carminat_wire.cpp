@@ -522,6 +522,29 @@ void test_showInfoMenu_refuses_a_cell_count_out_of_range(void) {
   TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(), "and sends nothing");
 }
 
+// showInfoRow is one of showInfoMenu's messages on its own: at the defaults, the OEM list's
+// first row byte for byte, and only that row.
+void test_showInfoRow_is_one_of_the_menus_rows(void) {
+  Rig r;
+  r.up();
+  ASSERT_RESULT(Ok, r.d.showInfoRow("AUX ON"));
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, r.d.queued(), "one row = one job");
+  pumpUntilIdle(r.d);
+  expectFrames(r.link, kInfoPopupOem, 2, "showInfoRow — the first OEM row");
+
+  // Rows 2 and 3 of the OEM list, each on its own, are the menu's frames 3-4 and 5-6.
+  ASSERT_RESULT(Ok, r.d.showInfoRow("AF ON", carminat::kInfoOffset1));
+  pumpUntilIdle(r.d);
+  expectFrames(r.link, kInfoPopupOem + 2, 2, "showInfoRow — the second OEM row");
+  ASSERT_RESULT(Ok, r.d.showInfoRow("SPEED 0", carminat::kInfoOffset2, carminat::kInfoPrefix, 8));
+  pumpUntilIdle(r.d);
+  expectFrames(r.link, kInfoPopupOem + 4, 2, "showInfoRow — the third OEM row");
+
+  ASSERT_RESULT(BadArgument, r.d.showInfoRow("X", carminat::kInfoOffset0, carminat::kInfoPrefix, 0));
+  ASSERT_RESULT(BadArgument, r.d.showInfoRow("X", carminat::kInfoOffset0, carminat::kInfoPrefix,
+                                             carminat::kInfoCellsMax + 1));
+}
+
 void test_info_geometry_reports_8_cells(void) {
   Rig r;
   TEST_ASSERT_EQUAL_UINT8(3, r.d.panelGeometry().infoRows);
@@ -554,6 +577,7 @@ int main(int, char**) {
   RUN_TEST(test_showInfoMenu_default_cells_is_the_oem_8_cell_frame);
   RUN_TEST(test_showInfoMenu_cells_9_to_16_declare_3_plus_n);
   RUN_TEST(test_showInfoMenu_refuses_a_cell_count_out_of_range);
+  RUN_TEST(test_showInfoRow_is_one_of_the_menus_rows);
   RUN_TEST(test_info_geometry_reports_8_cells);
   return UNITY_END();
 }

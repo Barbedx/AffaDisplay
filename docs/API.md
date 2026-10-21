@@ -331,6 +331,7 @@ cells, and a wider glass will show them.
 Carminat, the OEM list's declared length 0x0B). `showInfoMenu(..., cells)` takes 1 to 16; the
 declared length is then 3 + cells. Only 8 has been seen on glass; the box looks wider, and a
 glass sweep decides whether a wider count shows.
+`showInfoRow(text, offset, prefix, cells)` sends one of those rows on its own, one message.
 
 ---
 

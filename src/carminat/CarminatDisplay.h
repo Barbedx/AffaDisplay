@@ -275,6 +275,13 @@ class CarminatDisplay final : public AffaDisplayBase {
                                     uint8_t infoPrefix = carminat::kInfoPrefix,
                                     uint8_t cells = carminat::kInfoCells);
 
+  // ONE row of that screen, as showInfoMenu sends each of its three: one message at
+  // `offset`, same cells and padding rules. For redrawing a single row, or for a sweep
+  // that must put exactly one row on the glass.
+  Submitted showInfoRow(const char* text, uint8_t offset = carminat::kInfoOffset0,
+                        uint8_t infoPrefix = carminat::kInfoPrefix,
+                        uint8_t cells = carminat::kInfoCells);
+
  protected:
   uint8_t  packetFiller() const override { return carminat::kFiller; }
   uint16_t keyTxId()      const override { return carminat::kIdKeyPressed; }

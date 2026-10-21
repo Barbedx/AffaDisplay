@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.0 — 2026-10-21
+
+### `showInfoRow`: one info row on its own
+
+`showInfoRow(text, offset = kInfoOffset0, prefix = kInfoPrefix, cells = kInfoCells)` sends one row
+of the info screen as one message, with the same cells and padding rules as `showInfoMenu`.
+`showInfoMenu` now builds its three rows with it; its bytes are unchanged.
+
+- For redrawing a single row, or a glass sweep that must put exactly one row on the glass.
+- A new host test: the three OEM rows sent one at a time match the OEM list's frames byte for
+  byte, and 0 or 17 cells are refused. 79 host tests in all.
+
 ## 1.2.0 — 2026-10-21
 
 ### Info rows: the cell count is a parameter

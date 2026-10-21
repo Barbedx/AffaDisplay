@@ -20,7 +20,7 @@ each screen. It has no menus, scrolling or key gestures. Keys arrive through `on
 - Long screens are copied into a library-owned pool, so your buffer is free when the call returns.
 - Timeouts are retried, and renders are held while the panel is away and re-registered after a
   resync.
-- 78 host tests, no hardware needed.
+- 79 host tests, no hardware needed.
 
 ## Panels
 
@@ -37,7 +37,7 @@ each screen. It has no menus, scrolling or key gestures. Keys arrive through `on
 | `setPower` | ✔ | ✔ | ✔ |
 | `showMenu` / `highlightItem` (2 × 26) | ✔ | — | — |
 | `showMenuN` / `selectMenuItem` (up to 10 items, pictogram, scrollbar) | ✔ | — | — |
-| `showInfoMenu` / `showInfoPopup` (3 × 8) | ✔ | — | — |
+| `showInfoMenu` / `showInfoPopup` (3 × 8), `showInfoRow` | ✔ | — | — |
 | `showPopupText` / `hidePopup` | ✔ | — | — |
 | `showFullscreenText`, `showConfirmBox` / `selectBoxButton` | ✔ | — | — |
 | `showNavBitmap` (48 × 48 mono) | ✔ | — | — |
@@ -60,7 +60,7 @@ each screen. It has no menus, scrolling or key gestures. Keys arrive through `on
 
 ```ini
 lib_deps =
-  https://github.com/Barbedx/AffaDisplay.git#v1.2.0
+  https://github.com/Barbedx/AffaDisplay.git#v1.3.0
 build_flags =
   -std=gnu++17
   -D AFFA_PANEL_CARMINAT=1          ; at least one panel, or the build stops with #error
@@ -174,10 +174,10 @@ MIT · Arduino + PlatformIO · C++17 · неблокуючий · без куп�
 - Довгі екрани копіюються в пул бібліотеки, тож ваш буфер вільний одразу після виклику.
 - Тайм-аути повторюються; поки панелі немає, рендери чекають, а після ресинку бібліотека
   реєструється знову.
-- 78 тестів на хості, залізо не потрібне.
+- 79 тестів на хості, залізо не потрібне.
 
 Панелі, виклики, встановлення й приклад коду ті самі, що в англійській частині вище.
-Встановлення: `lib_deps = https://github.com/Barbedx/AffaDisplay.git#v1.2.0` і хоча б один
+Встановлення: `lib_deps = https://github.com/Barbedx/AffaDisplay.git#v1.3.0` і хоча б один
 `-D AFFA_PANEL_*=1`. У реєстрі PlatformIO бібліотеки ще немає. Перевірено на `espressif32@6.13.0`
 і `8.0.0`.
 
