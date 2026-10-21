@@ -114,7 +114,7 @@ class AffaTask {
   // start(), and it is yours.
   bool start(AffaDisplayBase& d, const TaskOptions& opt = TaskOptions{});
 
-  // Stops and joins. Pending-and-unstarted renders complete Cancelled; a message already on
+  // Stops and joins. Pending-and-unstarted renders complete Aborted; a message already on
   // the wire is allowed to finish, so no torn ISO-TP transfer is left behind. Safe to call
   // twice, and safe from a callback (i.e. from the owned task) — where it cannot join
   // itself, so it requests the stop and returns.

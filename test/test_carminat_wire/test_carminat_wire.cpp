@@ -178,8 +178,8 @@ const Frame kCloseWindow[] = {
     {0x151, 8, {0x02, 0x54, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00}, false},
 };
 
-// showConfirmBox("OK", "Line one", "Line two") — 113 bytes, 16 frames, last PCI 0x2F, the
-// continuation counter's absolute ceiling. [DERIVED] end to end.
+// showConfirmBox("OK", "Line one", "Line two") — 113 bytes, 16 frames, last PCI 0x2F (the
+// counter wraps past it on longer messages, see AFFA_MAX_PAYLOAD). [DERIVED] end to end.
 const Frame kConfirmBoxOk[] = {
     {0x151, 8, {0x10, 0x6F, 0x21, 0x05, 0x00, 0x00, 0x01, 0x49}, false},
     {0x151, 8, {0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false},

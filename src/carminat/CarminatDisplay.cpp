@@ -503,7 +503,7 @@ Submitted CarminatDisplay::showFullscreenText(const char* l1, const char* l2, co
 // hideFullscreenText() WAS HERE AND IS GONE, 2026-08-06. It sent `02 54 03` — byte for byte
 // hidePopup() — so the library carried two names for one command, and the name implied a
 // teardown that the bench had already disproved: a plain setText() over a live fullscreen
-// replaces it, which is what lets 09_golden animate these at ~8 a second with no close in
+// replaces it, which is what let a bench example animate these at ~8 a second with no close in
 // between. Callers that want the raw close command still have hidePopup().
 
 #else

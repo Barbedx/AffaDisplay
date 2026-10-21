@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.1.2 — 2026-10-21
+
+### Fixed: `Priority::Urgent` jobs keep their order
+
+docs/API.md §3.4 says urgent jobs are FIFO among themselves, but a new urgent job was put
+ahead of the urgent jobs already queued, so two of them went out in reverse order. A new
+urgent job now goes after the job in flight, the queued registrations and the queued urgent
+jobs, and still ahead of every `Normal` job.
+
+- `setPower(true)` then `setPower(false)` before either starts still coalesce: one frame, the
+  OFF, and the first ticket completes `Aborted`. Now pinned by a test.
+- Three new host tests (urgent order, registration still first, the two `setPower` calls).
+  74 host tests in all.
+
+### Docs and comments now match the code
+
+- API.md:
+  - `TooLong` is only for payload sizes; text longer than its field is cut, not refused.
+  - A held render whose hold runs out completes `NoSync` or `LinkDown`.
+  - The `poll()` order includes `pumpLink()` and the Ready edge.
+  - The `Highlight` slot also covers `selectMenuItem` and `selectBoxButton`.
+  - `setPower` is queued `Urgent` and replayed after a session reset.
+  - `AffaTask::stop()` ends unstarted renders `Aborted`.
+  - `AFFA_UNSAFE_LONG_PAYLOAD` is listed.
+  - `pressKey`: `Wire` only transmits, `Both` does both, and `Local` with no `onKey` is
+    `NotSupported`.
+  - The cluster has `KeyTx` on `0x1C1`.
+- README: the cluster's data ids are `0x121` and `0x1B1`; its keys are `0x1C1`.
+- NOTES.md: three `queueHello()` call sites, not two; no example sweeps the nav header yet.
+- WIRE.md: the confirm box's last PCI 0x2F is not a counter ceiling.
+- Source comments: `SendFailed` is not retried, an expired hold is `NoSync`/`LinkDown`,
+  `stop()` gives `Aborted`, `ICanLink::trySend()`. Names of examples that are not in this
+  repository are gone.
+
 ## 1.1.1 — 2026-10-21
 
 Documentation and examples only. The library code is unchanged.

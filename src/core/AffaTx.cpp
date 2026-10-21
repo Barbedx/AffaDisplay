@@ -282,10 +282,13 @@ int AffaDisplayBase::findCoalescable(uint16_t funcId, RenderSlot s) const {
 uint8_t AffaDisplayBase::insertIndexFor(Priority p) const {
   if (p == Priority::Normal) return _qCount;
   uint8_t i = 0;
-  // After the started job (never split a message on the wire) and after every queued
+  // After the started job (never split a message on the wire), after every queued
   // registration (the panel rejects a payload sent before its function is registered,
-  // and the resulting SendFailed looks exactly like a wire-format bug).
-  while (i < _qCount && (_queue[i].started || _queue[i].kind == JobKind::Registration)) ++i;
+  // and the resulting SendFailed looks exactly like a wire-format bug), and after the
+  // Urgent jobs already queued: Urgent is FIFO among itself, so setPower(true) and a
+  // later urgent render reach the wire in the order they were asked for.
+  while (i < _qCount && (_queue[i].started || _queue[i].kind == JobKind::Registration ||
+                         _queue[i].prio == Priority::Urgent)) ++i;
   return i;
 }
 
@@ -647,12 +650,13 @@ void AffaDisplayBase::pumpTx() {
   // HEAD-OF-LINE, DELIBERATELY. A job waiting out a backoff stalls the queue behind it
   // rather than being skipped, because skipping would reorder renders the application
   // issued in sequence — and ordering is a contract (docs/API.md §3.3). Priority::Urgent
-  // still overtakes: a retrying job has started == false, so insertIndexFor() puts an
-  // urgent one in front of it.
+  // still overtakes a retrying Normal job: it has started == false, so insertIndexFor()
+  // puts an urgent one in front of it.
   if (!expired(now, _queue[0].readyAtMs)) return;
 
   // 2. The link is not usable. The head is HELD, not failed — until its hold window runs
-  //    out, at which point it is given up as Cancelled rather than left there for ever.
+  //    out, at which point it is given up as NoSync or LinkDown rather than left there for
+  //    ever.
   if (!linkReady()) {
     if (expired(now, _queue[0].holdUntilMs)) {
       AFFA_LOGW(kTag, "held %d ms without a usable link, giving up",

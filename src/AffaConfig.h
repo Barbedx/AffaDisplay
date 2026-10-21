@@ -217,9 +217,10 @@
 // docs/NOTES.md §3). It is protocol behaviour, it belongs here, and it is a
 // state machine over IClock like everything else in this file.
 
-// How many times a job is re-attempted after a TRANSIENT failure — Timeout, SendFailed,
-// LinkDown. A permanent one (NotSupported, BadArgument, TooLong, UnknownFunc) is never
-// retried, and neither is a deliberate one (Aborted, Cancelled): the application asked.
+// How many times a job is re-attempted after a TRANSIENT failure — Timeout or LinkDown.
+// SendFailed (the panel answered with something else) is not retried, nor is a permanent
+// one (NotSupported, BadArgument, TooLong, UnknownFunc) or a deliberate one (Aborted,
+// Cancelled): the application asked.
 //
 // 0 means one attempt, then the failure is reported.
 #ifndef AFFA_TX_MAX_RETRIES
@@ -250,7 +251,7 @@
 #endif
 
 // How long a queued render waits for a link that is not ready, before it is given up as
-// Cancelled. This is what makes "the app never thinks about recovery" true: a render issued
+// NoSync (no session) or LinkDown (no link). This is what makes "the app never thinks about recovery" true: a render issued
 // while the panel is asleep, mid-resync or bus-off is HELD and sent when the link returns,
 // rather than rejected at the call site with NoSync for the application to re-issue.
 //
@@ -332,7 +333,7 @@
 //
 //   * the counter wrap is validated, continuously, by this library. The nav pane is a
 //     304-byte transfer whose PCIs run 11 20 21..2F 20 — it wraps every single frame — and
-//     09_golden ran 24 912 of them with `failed 0`. The OEM wraps too, on its own 302-byte
+//     a bench soak ran 24 912 of them with `failed 0`. The OEM wraps too, on its own 302-byte
 //     0x1F1 message and on its two-button message box.
 //   * 8 + 15*7 is just where the counter first repeats, which is a numbering fact, not a
 //     ceiling. ISO-TP sequence numbers are meant to wrap.

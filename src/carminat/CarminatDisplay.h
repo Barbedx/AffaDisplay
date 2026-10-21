@@ -55,8 +55,8 @@ class CarminatDisplay final : public AffaDisplayBase {
   bool supports(Feature f) const override;
 
   // MEASURED AT THE GLASS, not taken from the builders. setText carries fourteen cells and
-  // the panel shows about eight; `listItemChars` is 26 because docs/WIRE.md pins
-  // item2 at 26 usable even though the builder accepts 30. A fitter that trusted the builder
+  // the panel shows about eight; `listItemChars` is 26, the width seen on glass, even
+  // though the builder accepts 30. A fitter that trusted the builder
   // would produce text that is correct in every test and cut off on hardware.
   PanelGeometry panelGeometry() const override {
     PanelGeometry g;

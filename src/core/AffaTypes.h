@@ -360,8 +360,8 @@ enum class CbKind : uint8_t {
 };
 
 // A Result as text. Next to the enum because every consumer that logs one would otherwise
-// write this switch, and a switch written twice drifts once: 01_bringup carried a copy that
-// predated Result::Aborted.
+// write this switch, and a switch written twice drifts once: an old example carried a copy
+// that predated Result::Aborted.
 inline const char* resultName(Result r) {
   switch (r) {
     case Result::Ok:           return "Ok";

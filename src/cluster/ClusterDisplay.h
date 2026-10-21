@@ -16,7 +16,7 @@
 //
 // The clock is NOT here either, and deliberately: `3EF A6 <hh> <mm>` is a raw 3-byte frame
 // with no PCI and no SF_DL, so it is not a render call and does not belong on a display
-// class. Send it with ICanLink::send(). See §9.4.
+// class. Send it with ICanLink::trySend().
 #pragma once
 #include "../AffaConfig.h"
 

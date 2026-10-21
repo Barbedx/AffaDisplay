@@ -260,7 +260,7 @@ constexpr uint16_t kOvrMax = 320;   // one nav screen is 304; nothing this conso
 uint8_t  g_lastTx[kOvrMax];
 uint16_t g_lastTxLen = 0;
 uint16_t g_lastTxId  = 0;
-volatile bool  g_rawBusy = false;      // an override past 113 bytes is BORROWED until done
+volatile bool  g_rawBusy = false;      // an override past AFFA_MAX_PAYLOAD is in flight until done
 affa::TxTicket g_rawTicket = affa::kNoTicket;
 uint8_t  g_asm[kOvrMax];       // in progress
 uint16_t g_asmLen = 0, g_asmId = 0, g_asmWant = 0;
@@ -971,8 +971,8 @@ Cmd dispatch(PsychicRequest* r) {
     logHex("raw", id, buf, n);
 
     // WHICH ENQUEUE IS A LENGTH QUESTION, and the library is explicit about it: inline slots
-    // are AFFA_MAX_PAYLOAD (113) and a nav screen is 304. Past the ceiling the payload is
-    // BORROWED, so the buffer must stay put and unchanged until onDone releases it.
+    // are AFFA_MAX_PAYLOAD (119) and a nav screen is 304. Past the ceiling enqueueExternal()
+    // copies the payload into the long-payload pool.
     if (n <= AFFA_MAX_PAYLOAD)
       return fromResult(g_base->enqueue(id, buf, static_cast<uint8_t>(n)));
     const affa::Submitted s = g_base->enqueueExternal(id, buf, n);

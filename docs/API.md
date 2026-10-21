@@ -78,14 +78,14 @@ panel take it**.
 | `NoSync` | only if `AFFA_TX_HOLD_MS=0` | ✔ | No session. By default the render is held and completes `NoSync` if the opening has not finished within `AFFA_TX_HOLD_MS` (8 s). |
 | `LinkDown` | only if `AFFA_TX_HOLD_MS=0` | ✔ | `ICanLink::isLive()` is false (no controller, bus-off, listen-only, TX gate shut). Held like `NoSync`. |
 | `UnknownFunc` | ✔ | | The function id is not in this panel's table. |
-| `TooLong` | ✔ | | Over `AFFA_MAX_PAYLOAD` (119) or `AFFA_MAX_EXTERNAL_PAYLOAD` (320), or text longer than its field. |
+| `TooLong` | ✔ | | Over `AFFA_MAX_PAYLOAD` (119) or `AFFA_MAX_EXTERNAL_PAYLOAD` (320). Text longer than its field is cut to fit, not refused. |
 | `BadArgument` | ✔ | | Null pointer, zero length, row or index out of range, a `RenderSlot` on a long payload. |
 | `NotSupported` | ✔ | | `supports()` is false for this call. |
 | `QueueFull` | ✔ | ✔ | Call: the transmit queue, the dispatch ring or the pool is full. Complete: a render posted from another task found the queue full when the owner admitted it. |
 | `SendFailed` | | ✔ | The panel answered with something other than an ACK or flow control, or the link refused a frame while reporting live. Not retried. |
 | `Timeout` | | ✔ | No ACK within `AFFA_ACK_TIMEOUT_MS` (2 s) after `AFFA_TX_MAX_RETRIES` (3) retries. |
 | `Cancelled` | | ✔ | `begin()` ran again while the job was queued. |
-| `Aborted` | | ✔ | Dropped before any byte went out: `abortPending()`, `abortAll()`, or a newer render of the same slot (§3.3). |
+| `Aborted` | | ✔ | Dropped before any byte went out: `abortPending()`, `abortAll()`, `AffaTask::stop()`, or a newer render of the same slot (§3.3). |
 
 - Every issued ticket completes exactly once. A refused call (`ticket == kNoTicket`) never
   completes; its return value is the verdict.
@@ -106,13 +106,13 @@ The library does the recovery work, so the application does not have to:
 | --- | --- |
 | no ACK | retries up to `AFFA_TX_MAX_RETRIES`, backoff from `AFFA_TX_RETRY_MS` doubling to `AFFA_TX_RETRY_MAX_MS`; reports once at the end |
 | a transfer torn mid-way | waits `AFFA_TX_DIRTY_QUIET_MS` before the next attempt |
-| link down or no session | holds the render for up to `AFFA_TX_HOLD_MS`, then sends it |
+| link down or no session | holds the render for up to `AFFA_TX_HOLD_MS` and sends it when the link is back; if the hold runs out first, it completes `NoSync` or `LinkDown` |
 | panel lost and found again | keeps the queue; re-registers in front of the held payload |
 
 `SendFailed`, `Aborted` and `Cancelled` are never retried. One ticket can therefore take about
 11 s at the defaults before its verdict arrives, so use `Stats` / `AffaTask::Status` for
 health, not completion latency. A job waiting out a backoff holds the queue behind it, which
-keeps renders in order; `Urgent` still goes ahead of it.
+keeps renders in order; an `Urgent` job still goes ahead of a waiting `Normal` one.
 
 To get one attempt with every refusal at the call, set `AFFA_TX_MAX_RETRIES=0` and
 `AFFA_TX_HOLD_MS=0`.
@@ -132,10 +132,12 @@ if (pending && affa::expired(now, retryAt)) {
 
 ```
 poll():
-  1. pumpRx()    up to AFFA_RX_BUDGET (64) frames: sync, ACKs, keys -> onKey / onComplete
-  2. pumpSync()  heartbeat, sync request, peer watchdog
-  3. admit       renders posted from other tasks
-  4. pumpTx()    send at most one frame; check the ACK deadline
+  1. pumpLink()  the link's own service: recovery, the RX-stall watchdog
+  2. pumpRx()    up to AFFA_RX_BUDGET (64) frames: sync, ACKs, keys -> onKey / onComplete
+  3. pumpSync()  heartbeat, sync request, peer watchdog
+  4. admit       renders posted from other tasks
+  5. pumpTx()    send at most one frame; check the ACK deadline
+  6. the Settling -> Ready phase edge, then onPoll()
 ```
 
 A key that is in the RX queue when `poll()` starts reaches `onKey()` during that same `poll()`,
@@ -152,10 +154,10 @@ queue, and the older ticket completes `Aborted`. A transfer that has started is 
 | `Text` | `setText` |
 | `Clock` | `setTime` |
 | `Menu` | `showMenu` |
-| `Highlight` | `highlightItem` (separate from `Menu` on purpose) |
+| `Highlight` | `highlightItem`, `selectMenuItem`, `selectBoxButton` (separate from `Menu` on purpose) |
 | `Popup` | `showPopupText`, `hidePopup` (a queued show followed by a hide sends nothing) |
 | `Fullscreen`, `ConfirmBox`, `InfoPopup` | the matching call |
-| `Control` | `setPower` |
+| `Control` | `setPower` (queued `Urgent`, and replayed after a session reset) |
 | `None` | raw `enqueue()`, never coalesced |
 
 With `TxOptions::coalesce = false`, a message neither replaces nor is replaced; use it for an
@@ -178,8 +180,9 @@ already handles repeated renders of the same slot.
 whatever frames remain of the transfer in flight, plus one ACK round-trip per frame.
 
 **Test coverage:** the wire vectors, the opening, the RX budget, cross-task dispatch, the pool
-and the TX gate have host tests. The ordering, coalescing and preemption rules above are
-implemented but do not have tests of their own.
+and the TX gate have host tests, and so do `Urgent` ordering (FIFO, behind registration) and
+the coalescing of two `setPower` calls. The other coalescing and preemption rules above do
+not have tests of their own yet.
 
 ---
 
@@ -245,7 +248,7 @@ task.start(panel);           // TaskOptions: period, priority, core, stack
 - Priority `AFFA_TASK_PRIO` is 2, above Arduino's `loop()`. The stack is `AFFA_TASK_STACK`
   (4096).
 - `onKey()` runs on this task, inside `poll()`. Put slow work (WiFi, NVS) on your own task.
-- `stop()` drops unstarted renders, lets the frame on the wire finish (at most two ACK
+- `stop()` drops unstarted renders (they complete `Aborted`), lets the frame on the wire finish (at most two ACK
   timeouts), and then joins. When called from a callback it only requests the stop.
 - `start()` before `begin()`, a second `start()`, or a failed task creation each return `false`
   and log the reason.
@@ -290,7 +293,7 @@ Set knobs in your `build_flags`. `src/AffaConfig.h` supplies the defaults and do
 | Features | `AFFA_ENABLE_POPUP`, `_FULLSCREEN`, `_CONFIRMBOX`, `_INFOPOPUP`, `_BIGMENU`, `_NAV`; off means `NotSupported` |
 | Text, log | `AFFA_ENABLE_TRANSLITERATION` (keep on: UTF-8 on the wire is garbage on glass), `AFFA_ENABLE_LOG`, `AFFA_LOG_LEVEL`, `AFFA_TEXT_MAX` |
 | Link | `AFFA_RX_BUDGET`, `AFFA_RX_STALL_MS`, `AFFA_LINK_RECOVER_MS`, `AFFA_LINK_RECOVER_MAX_MS`; `TwaiLink` itself takes `TwaiConfig` at run time (pins, bitrate, listen-only, queue depths) |
-| Transmit | `AFFA_TX_QUEUE_DEPTH` (6), `AFFA_MAX_PAYLOAD`, `AFFA_MAX_EXTERNAL_PAYLOAD`, `AFFA_BULK_SLOTS` (2), `AFFA_ACK_TIMEOUT_MS`, `AFFA_TX_MAX_RETRIES`, `AFFA_TX_RETRY_MS`, `AFFA_TX_RETRY_MAX_MS`, `AFFA_TX_HOLD_MS`, `AFFA_TX_COALESCE`, `AFFA_TX_DIRTY_QUIET_MS` |
+| Transmit | `AFFA_TX_QUEUE_DEPTH` (6), `AFFA_MAX_PAYLOAD` (119; above that needs `AFFA_UNSAFE_LONG_PAYLOAD`), `AFFA_MAX_EXTERNAL_PAYLOAD`, `AFFA_BULK_SLOTS` (2), `AFFA_ACK_TIMEOUT_MS`, `AFFA_TX_MAX_RETRIES`, `AFFA_TX_RETRY_MS`, `AFFA_TX_RETRY_MAX_MS`, `AFFA_TX_HOLD_MS`, `AFFA_TX_COALESCE`, `AFFA_TX_DIRTY_QUIET_MS` |
 | Opening | `AFFA_SYNC_INTERVAL_MS`, `AFFA_HELLO_MIN_MS`, `AFFA_AWAIT_PEER_MS`, `AFFA_PING_REPLY_MIN_MS`, `AFFA_PEER_TIMEOUT_MS`; the rest is `SyncProfile` data |
 | Owned task | `AFFA_ENABLE_TASK`, `AFFA_TASK_PERIOD_MS`, `_PRIO`, `_CORE`, `_STACK`, `_LATE_FACTOR`, `AFFA_DISPATCH_DEPTH` (power of two; 0 removes the ring), `AFFA_CALLBACK_BUDGET_MS` |
 
@@ -308,7 +311,7 @@ Set the log sink with `affa::setLogSink(ILogSink*)`, which works with or without
 | `Power` | ✔ | ✔ | ✔ |
 | `Menu` | ✔ | — | — |
 | `Popup`, `Fullscreen`, `ConfirmBox`, `InfoPopup`, `NavBitmap` | ✔ if its gate is on | — | — |
-| `KeyTx` | ✔ (`0x1C1`) | ✔ (`0x0A9`) | — |
+| `KeyTx` | ✔ (`0x1C1`) | ✔ (`0x0A9`) | ✔ (`0x1C1`) |
 
 `supports()` reflects the compile gates too. A Carminat built with `AFFA_ENABLE_POPUP=0` reports
 no `Popup`, and `showPopupText` returns `NotSupported`.
@@ -338,5 +341,6 @@ panel.onKey([](affa::Key k, affa::KeyEdge e, void* ctx) {
 }, app);
 ```
 
-`pressKey(key, edge, KeySource)` injects a key: `Local` runs your `onKey`, and `Wire` also puts
-the frame on the bus where the panel has a key-transmit id (`Feature::KeyTx`).
+`pressKey(key, edge, KeySource)` injects a key. `Local` (the default) runs your `onKey`; with no
+`onKey` installed it returns `NotSupported`. `Wire` only puts the key frame on the bus, where the
+panel has a key-transmit id (`Feature::KeyTx`), and does not run `onKey`. `Both` does both.

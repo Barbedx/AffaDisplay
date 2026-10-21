@@ -999,6 +999,125 @@ void test_one_poll_takes_at_most_the_rx_budget_and_still_answers(void) {
                                    "and the sync pump still ran: the storm drew our BA");
 }
 
+// ---------------------------------------------------------------------------
+// Priority::Urgent ordering (docs/API.md §3.4)
+// ---------------------------------------------------------------------------
+
+// A one-frame marker payload on 0x151: `7A <id>` on the wire (enqueue() sends the bytes
+// as given).
+static Submitted enqueueMarker(CarRig& r, uint8_t id, Priority p) {
+  const uint8_t data[] = {0x7A, id};
+  TxOptions opt;
+  opt.priority = p;
+  opt.coalesce = false;
+  return r.d.enqueue(0x151, data, sizeof(data), opt);
+}
+
+// The marker ids in the order they reached the wire; other frames are skipped.
+static int sentMarkers(CarRig& r, uint8_t* out, int max) {
+  int n = 0;
+  Frame f;
+  while (r.link.takeSent(f))
+    if (f.id == 0x151 && f.data[0] == 0x7A && n < max) out[n++] = f.data[1];
+  return n;
+}
+
+void test_urgent_jobs_keep_their_order_ahead_of_normal_ones(void) {
+  CarRig r;
+  r.d.begin();
+  openCarminatSession(r);
+  r.clk.advance(carminat::kPayloadAfterRegistrationMs);
+  affatest::pumpUntilIdle(r.d);
+  drain(r.link);
+
+  // Queued together, nothing pumped in between, so only the queue decides the order.
+  ASSERT_RESULT(Ok, enqueueMarker(r, 1, Priority::Normal));
+  ASSERT_RESULT(Ok, enqueueMarker(r, 2, Priority::Urgent));
+  ASSERT_RESULT(Ok, enqueueMarker(r, 3, Priority::Urgent));
+  ASSERT_RESULT(Ok, enqueueMarker(r, 4, Priority::Urgent));
+  affatest::pumpUntilIdle(r.d);
+
+  uint8_t got[8];
+  TEST_ASSERT_EQUAL_INT_MESSAGE(4, sentMarkers(r, got, 8), "every marker reached the wire");
+  const uint8_t want[] = {2, 3, 4, 1};
+  TEST_ASSERT_EQUAL_UINT8_ARRAY_MESSAGE(want, got, 4,
+      "Urgent jobs go out FIFO among themselves, all ahead of the Normal one");
+}
+
+void test_registration_still_goes_ahead_of_queued_urgent_jobs(void) {
+  CarRig r;
+  r.d.begin();
+  r.d.setSelfAck(true);
+  // Queued before the panel has asked: held until the session is open and registered.
+  ASSERT_RESULT(Ok, enqueueMarker(r, 1, Priority::Urgent));
+  ASSERT_RESULT(Ok, enqueueMarker(r, 2, Priority::Urgent));
+  affatest::carminatOpeningRequest(r.d, r.link);
+  finishCarminatHello(r);          // asserts nothing else left between the B0 frames
+  uint8_t early = 0;
+  for (int i = 0; i < 8 && !r.d.registered(); ++i) {
+    r.d.poll();
+    Frame f;
+    while (r.link.takeSent(f)) {
+      if (f.id == 0x151 && f.data[0] == 0x7A) ++early;
+    }
+  }
+  TEST_ASSERT_TRUE_MESSAGE(r.d.registered(), "Carminat functions should register");
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, early, "no urgent payload before the registration completed");
+
+  r.clk.advance(carminat::kPayloadAfterRegistrationMs);
+  affatest::pumpUntilIdle(r.d);
+  uint8_t got[8];
+  TEST_ASSERT_EQUAL_INT(2, sentMarkers(r, got, 8));
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, got[0], "the first urgent job first");
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(2, got[1], "the second after it");
+}
+
+struct Verdicts {
+  TxTicket t[4] = {};
+  Result   r[4] = {};
+  int      n = 0;
+};
+
+static void recordVerdict(TxTicket t, Result res, void* ctx) {
+  Verdicts& v = *static_cast<Verdicts*>(ctx);
+  if (v.n < 4) { v.t[v.n] = t; v.r[v.n] = res; ++v.n; }
+}
+
+void test_power_on_then_off_before_either_starts_coalesces_to_off(void) {
+  // Both are Urgent, both RenderSlot::Control: the second replaces the first in place, and
+  // the first completes Aborted. The panel only ever sees the last value asked for.
+  CarRig r;
+  r.d.begin();
+  openCarminatSession(r);
+  r.clk.advance(carminat::kPayloadAfterRegistrationMs);
+  affatest::pumpUntilIdle(r.d);
+  drain(r.link);
+
+  Verdicts v;
+  r.d.onComplete(&recordVerdict, &v);
+  const Submitted on  = r.d.setPower(true);
+  const Submitted off = r.d.setPower(false);
+  ASSERT_RESULT(Ok, on);
+  ASSERT_RESULT(Ok, off);
+  affatest::pumpUntilIdle(r.d);
+
+  int powerFrames = 0;
+  uint8_t last = 0xFF;
+  Frame f;
+  while (r.link.takeSent(f))
+    if (f.id == 0x151 && f.data[0] == 0x03 && f.data[1] == 0x52) { ++powerFrames; last = f.data[2]; }
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, powerFrames, "one power frame: the two coalesced");
+  TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00, last, "and it is the OFF");
+
+  bool onAborted = false, offOk = false;
+  for (int i = 0; i < v.n; ++i) {
+    if (v.t[i] == on.ticket && v.r[i] == Result::Aborted) onAborted = true;
+    if (v.t[i] == off.ticket && v.r[i] == Result::Ok) offOk = true;
+  }
+  TEST_ASSERT_TRUE_MESSAGE(onAborted, "setPower(true) completes Aborted");
+  TEST_ASSERT_TRUE_MESSAGE(offOk, "setPower(false) completes Ok");
+}
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -1019,5 +1138,8 @@ int main(int, char**) {
   RUN_TEST(test_a_display_that_never_opens_its_channel_registers_after_the_bound);
   RUN_TEST(test_a_repeated_request_before_registration_draws_a_fresh_burst);
   RUN_TEST(test_one_poll_takes_at_most_the_rx_budget_and_still_answers);
+  RUN_TEST(test_urgent_jobs_keep_their_order_ahead_of_normal_ones);
+  RUN_TEST(test_registration_still_goes_ahead_of_queued_urgent_jobs);
+  RUN_TEST(test_power_on_then_off_before_either_starts_coalesces_to_off);
   return UNITY_END();
 }

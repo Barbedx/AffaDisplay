@@ -315,8 +315,8 @@ asserted by `test_hidePopup_is_the_only_close_command`
 
 ### `kConfirmBoxOk`
 
-> showConfirmBox("OK", "Line one", "Line two") — 113 bytes, 16 frames, last PCI 0x2F, the
-> continuation counter's absolute ceiling. [DERIVED] end to end.
+> showConfirmBox("OK", "Line one", "Line two") — 113 bytes, 16 frames, last PCI 0x2F (the
+> counter wraps past it on longer messages, see AFFA_MAX_PAYLOAD). [DERIVED] end to end.
 
 ```
 151  10 6F 21 05 00 00 01 49

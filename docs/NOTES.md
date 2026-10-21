@@ -23,7 +23,7 @@ file.
 
 ### 1.1 The cluster's opening cannot complete  [BLOCKER]
 
-Both `queueHello()` call sites live inside one branch of `handleSyncFrame()`:
+All three `queueHello()` call sites live inside one branch of `handleSyncFrame()`:
 
 ```cpp
 if (f.data[0] == 0x61 && f.data[1] == 0x11) { … queueHello(now); … }
@@ -56,8 +56,8 @@ command, `[12] [13]` are the 48 × 48 geometry, and the other ten are unmeasured
 `[4..10]` held `"ABCDEF\0"` in the capture and are **confirmed not to be text** — ASCII
 written there puts nothing on the glass.
 
-`examples/17_mediascreen` has the sweep card: `/api/cmd?op=navhdr&bN=0xVV`, one byte at a
-time, logging what went out. There is no automated sweep, because **the panel ACKs a screen
+No example sweeps these bytes yet: `showNavBitmapWithHeader()` is the call to sweep them with,
+one byte at a time. There is no automated sweep, because **the panel ACKs a screen
 it never lights** — 256 scripted steps produce 256 rows of `ok` and no information. The
 oracle is a person looking at glass.
 

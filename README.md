@@ -20,7 +20,7 @@ each screen. It has no menus, scrolling or key gestures. Keys arrive through `on
 - Long screens are copied into a library-owned pool, so your buffer is free when the call returns.
 - Timeouts are retried, and renders are held while the panel is away and re-registered after a
   resync.
-- 71 host tests, no hardware needed.
+- 74 host tests, no hardware needed.
 
 ## Panels
 
@@ -28,7 +28,7 @@ each screen. It has no menus, scrolling or key gestures. Keys arrive through `on
 | --- | --- | --- | --- | --- |
 | Carminat / AFFA3 | `affa::CarminatDisplay` | `0x3AF` → `0x3CF` | `0x151`, `0x1F1` | `0x1C1` → `0x5C1` |
 | UpdateList / AFFA2 | `affa::UpdateListDisplay` | `0x3DF` → `0x3CF` | `0x121`, `0x1B1` | `0x0A9` → `0x4A9` |
-| Instrument cluster | `affa::ClusterDisplay` | `0x3AF` → `0x3CF` | `0x151`, `0x1F1` | — |
+| Instrument cluster | `affa::ClusterDisplay` | `0x3AF` → `0x3CF` | `0x121`, `0x1B1` | `0x1C1` → `0x5C1` |
 
 | Call | Carminat | UpdateList | Cluster |
 | --- | :---: | :---: | :---: |
@@ -60,7 +60,7 @@ each screen. It has no menus, scrolling or key gestures. Keys arrive through `on
 
 ```ini
 lib_deps =
-  https://github.com/Barbedx/AffaDisplay.git#v1.1.1
+  https://github.com/Barbedx/AffaDisplay.git#v1.1.2
 build_flags =
   -std=gnu++17
   -D AFFA_PANEL_CARMINAT=1          ; at least one panel, or the build stops with #error
@@ -174,10 +174,10 @@ MIT · Arduino + PlatformIO · C++17 · неблокуючий · без куп�
 - Довгі екрани копіюються в пул бібліотеки, тож ваш буфер вільний одразу після виклику.
 - Тайм-аути повторюються; поки панелі немає, рендери чекають, а після ресинку бібліотека
   реєструється знову.
-- 71 тест на хості, залізо не потрібне.
+- 74 тести на хості, залізо не потрібне.
 
 Панелі, виклики, встановлення й приклад коду ті самі, що в англійській частині вище.
-Встановлення: `lib_deps = https://github.com/Barbedx/AffaDisplay.git#v1.1.1` і хоча б один
+Встановлення: `lib_deps = https://github.com/Barbedx/AffaDisplay.git#v1.1.2` і хоча б один
 `-D AFFA_PANEL_*=1`. У реєстрі PlatformIO бібліотеки ще немає. Перевірено на `espressif32@6.13.0`
 і `8.0.0`.
 
