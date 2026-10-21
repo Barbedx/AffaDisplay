@@ -35,6 +35,9 @@ struct PanelGeometry {
   // The info rows — showInfoMenu(). Narrower than a menu row and there are three of them.
   uint8_t infoRows       = 0;
   uint8_t infoRowChars   = 0;
+  // The cells showInfoMenu() puts in each row's frame by default. infoRowChars is what the
+  // glass shows; this is what the frame carries, and the two can differ (as for setText).
+  uint8_t infoCells      = 0;
 
   // The scrolling list — showMenuN(). The panel tracks `listMaxItems` and draws `menuRows`
   // of them, scrolling itself as the selection moves.

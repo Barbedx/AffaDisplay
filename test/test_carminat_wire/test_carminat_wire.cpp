@@ -446,6 +446,89 @@ void test_showInfoPopup_is_three_messages_space_padded(void) {
   expectFrames(r.link, kInfoPopupOem, 6, "showInfoPopup — OEM SPACE padding");
 }
 
+// The cell count's default is today's frame, byte for byte, given or left out.
+void test_showInfoMenu_default_cells_is_the_oem_8_cell_frame(void) {
+  Rig r;
+  r.up();
+  ASSERT_RESULT(Ok, r.d.showInfoMenu("AUX ON", "AF ON", "SPEED 0"));
+  pumpUntilIdle(r.d);
+  expectFrames(r.link, kInfoPopupOem, 6, "showInfoMenu, default cells");
+
+  ASSERT_RESULT(Ok, r.d.showInfoMenu("AUX ON", "AF ON", "SPEED 0", carminat::kInfoOffset0,
+                                     carminat::kInfoOffset1, carminat::kInfoOffset2,
+                                     carminat::kInfoPrefix, 8));
+  pumpUntilIdle(r.d);
+  expectFrames(r.link, kInfoPopupOem, 6, "showInfoMenu, cells = 8");
+}
+
+// 9..16 cells: declared length 3 + n (0x0B + n - 8), the text space-padded or cut to n,
+// and nothing but the filler past the declared length.
+void test_showInfoMenu_cells_9_to_16_declare_3_plus_n(void) {
+  const char* text = "ABCDEFGHIJKLMNOPQRST";   // 20: longer than any cell count, so it is cut
+  for (uint8_t n = 9; n <= carminat::kInfoCellsMax; ++n) {
+    Rig r;
+    r.up();
+    ASSERT_RESULT(Ok, r.d.showInfoMenu(text, "", "", carminat::kInfoOffset0,
+                                       carminat::kInfoOffset1, carminat::kInfoOffset2,
+                                       carminat::kInfoPrefix, n));
+    pumpUntilIdle(r.d);
+
+    uint8_t content[3 + 16];
+    content[0] = carminat::kCmdInfoRow;
+    content[1] = carminat::kInfoPrefix;
+    content[2] = carminat::kInfoOffset0;
+    for (uint8_t i = 0; i < n; ++i) content[3 + i] = static_cast<uint8_t>(text[i]);
+    const uint8_t len = static_cast<uint8_t>(3 + n);
+
+    char msg[48];
+    Frame f;
+    snprintf(msg, sizeof(msg), "%u cells: first frame", (unsigned)n);
+    TEST_ASSERT_TRUE_MESSAGE(r.link.takeSent(f), msg);
+    TEST_ASSERT_EQUAL_HEX16_MESSAGE(0x151, f.id, msg);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x10, f.data[0], msg);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(len, f.data[1], msg);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY_MESSAGE(content, f.data + 2, 6, msg);
+
+    uint8_t at = 6;
+    for (uint8_t seq = 1; at < len; ++seq) {
+      snprintf(msg, sizeof(msg), "%u cells: continuation %u", (unsigned)n, (unsigned)seq);
+      TEST_ASSERT_TRUE_MESSAGE(r.link.takeSent(f), msg);
+      TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x20 | (seq & 0x0F), f.data[0], msg);
+      for (uint8_t b = 1; b < 8; ++b, ++at) {
+        const uint8_t want = at < len ? content[at] : carminat::kFiller;
+        TEST_ASSERT_EQUAL_HEX8_MESSAGE(want, f.data[b], msg);
+      }
+    }
+    // Rows 1 and 2 follow as their own messages; the first message ended where it declared.
+    snprintf(msg, sizeof(msg), "%u cells: row 1 starts a new message", (unsigned)n);
+    TEST_ASSERT_TRUE_MESSAGE(r.link.takeSent(f), msg);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x10, f.data[0], msg);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(len, f.data[1], msg);
+  }
+}
+
+void test_showInfoMenu_refuses_a_cell_count_out_of_range(void) {
+  Rig r;
+  r.up();
+  ASSERT_RESULT(BadArgument, r.d.showInfoMenu("A", "B", "C", carminat::kInfoOffset0,
+                                              carminat::kInfoOffset1, carminat::kInfoOffset2,
+                                              carminat::kInfoPrefix, 0));
+  ASSERT_RESULT(BadArgument, r.d.showInfoMenu("A", "B", "C", carminat::kInfoOffset0,
+                                              carminat::kInfoOffset1, carminat::kInfoOffset2,
+                                              carminat::kInfoPrefix,
+                                              carminat::kInfoCellsMax + 1));
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, r.d.queued(), "a refused list queues nothing");
+  pumpUntilIdle(r.d);
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, r.link.sentCount(), "and sends nothing");
+}
+
+void test_info_geometry_reports_8_cells(void) {
+  Rig r;
+  TEST_ASSERT_EQUAL_UINT8(3, r.d.panelGeometry().infoRows);
+  TEST_ASSERT_EQUAL_UINT8(8, r.d.panelGeometry().infoRowChars);
+  TEST_ASSERT_EQUAL_UINT8(8, r.d.panelGeometry().infoCells);
+}
+
 // ---------------------------------------------------------------------------
 
 void setUp(void) {}
@@ -468,5 +551,9 @@ int main(int, char**) {
   RUN_TEST(test_fullscreen_geometry_is_22_columns);
   RUN_TEST(test_showConfirmBox_is_a_one_button_box);
   RUN_TEST(test_showInfoPopup_is_three_messages_space_padded);
+  RUN_TEST(test_showInfoMenu_default_cells_is_the_oem_8_cell_frame);
+  RUN_TEST(test_showInfoMenu_cells_9_to_16_declare_3_plus_n);
+  RUN_TEST(test_showInfoMenu_refuses_a_cell_count_out_of_range);
+  RUN_TEST(test_info_geometry_reports_8_cells);
   return UNITY_END();
 }

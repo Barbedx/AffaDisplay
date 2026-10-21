@@ -359,7 +359,7 @@ asserted by `test_showConfirmBox_is_a_one_button_box`
 151  21 45 44 20 30 20 00 00
 ```
 
-asserted by `test_showInfoPopup_is_three_messages_space_padded`
+asserted by `test_showInfoPopup_is_three_messages_space_padded`, `test_showInfoMenu_default_cells_is_the_oem_8_cell_frame`
 
 ## `test_updatelist_wire`
 

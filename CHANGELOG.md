@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0 — 2026-10-21
+
+### Info rows: the cell count is a parameter
+
+An API addition, ready for a glass sweep of the info box's width. Nothing on the wire changes
+unless you pass the new argument.
+
+- `showInfoMenu(..., uint8_t cells = 8)`: text cells per row, 1 to `carminat::kInfoCellsMax`
+  (16). The declared length is 3 + cells, so the default 8 sends today's `10 0B 76 ...` bytes
+  exactly. Text is space-padded or cut to `cells`. Out of range: `BadArgument`. Only 8 has been
+  seen on glass.
+- `PanelGeometry::infoCells`: the cells `showInfoMenu()` sends by default (8 on Carminat, 0
+  elsewhere). `infoRowChars` stays the width the glass shows.
+- Four new host tests:
+  - the default and an explicit 8 match the OEM frames byte for byte;
+  - 9 to 16 cells declare 3 + n and send nothing but the filler past it;
+  - 0 and 17 are refused;
+  - the geometry says 8.
+  78 host tests in all.
+
 ## 1.1.2 — 2026-10-21
 
 ### Fixed: `Priority::Urgent` jobs keep their order

@@ -65,6 +65,7 @@ class CarminatDisplay final : public AffaDisplayBase {
     g.menuRowChars  = 26;
     g.infoRows      = 3;
     g.infoRowChars  = carminat::kInfoCells;       // 8
+    g.infoCells     = carminat::kInfoCells;       // 8, showInfoMenu's default
     g.listMaxItems  = carminat::kMenuMaxItems;    // 10; the OEM corpus shows 2, 4 and 6
     g.listItemChars = 26;
     g.fullRows      = 3;
@@ -263,11 +264,16 @@ class CarminatDisplay final : public AffaDisplayBase {
   // format prefix are the only part of this screen still being reverse-engineered. The
   // defaults reproduce the OEM settings list byte for byte. Sends ONE MESSAGE PER ROW —
   // three queue slots, and they deliberately do not coalesce against each other.
+  //
+  // `cells` is the text cells per row (1..kInfoCellsMax); the declared length is 3 + cells,
+  // so the default 8 is the OEM's 0x0B. Text is space-padded or cut to it. Only 8 has been
+  // seen on glass. Out of range: BadArgument.
   Submitted showInfoMenu(const char* row0, const char* row1, const char* row2,
                                     uint8_t offset0 = carminat::kInfoOffset0,
                                     uint8_t offset1 = carminat::kInfoOffset1,
                                     uint8_t offset2 = carminat::kInfoOffset2,
-                                    uint8_t infoPrefix = carminat::kInfoPrefix);
+                                    uint8_t infoPrefix = carminat::kInfoPrefix,
+                                    uint8_t cells = carminat::kInfoCells);
 
  protected:
   uint8_t  packetFiller() const override { return carminat::kFiller; }

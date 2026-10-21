@@ -636,32 +636,35 @@ Submitted CarminatDisplay::selectBoxButton(uint8_t index) {
 // ---------------------------------------------------------------------------
 #if AFFA_ENABLE_INFOPOPUP
 
-// The 3-row settings-list popup. ONE MESSAGE PER ROW, 13 payload bytes each:
+// The 3-row settings-list popup. ONE MESSAGE PER ROW, 13 payload bytes each at the
+// default 8 cells:
 //
 //   10 0B 76 <prefix> <offset> t0 t1 t2      (frame 0, eight raw bytes)
 //   21 t3 t4 t5 t6 t7 00 00                  (continuation, 5 bytes + 2 filler)
+//
+// With `cells` = n the declared length is 3 + n and the text runs on into more
+// continuation frames; nothing past the declared length but the filler.
 //
 // One message PER ROW, and they must NOT coalesce against each other: all three share
 // funcId 0x151 and RenderSlot::InfoPopup, so with coalescing on, rows 1 and 2 would each
 // replace row 0 and only the last would ever be drawn. The cost is three queue slots.
 Submitted CarminatDisplay::showInfoMenu(const char* row0, const char* row1, const char* row2,
                                      uint8_t offset0, uint8_t offset1, uint8_t offset2,
-                                     uint8_t infoPrefix) {
+                                     uint8_t infoPrefix, uint8_t cells) {
+  if (cells == 0 || cells > kInfoCellsMax) return Submitted::refused(Result::BadArgument);
+
   const auto sendRow = [&](uint8_t offset, const char* text) {
     const Ascii t(text);
 
-    // SPACE-padded to 8, which is the OEM capture's form. NOT NUL-padded like setText.
-    char cell[kInfoCells];
-    for (uint8_t i = 0; i < kInfoCells; ++i) cell[i] = (i < t.len) ? t.buf[i] : ' ';
-
-    uint8_t d[5 + kInfoCells];
+    uint8_t d[5 + kInfoCellsMax];
     uint8_t n = 0;
     d[n++] = kPciFirstFrame;
-    d[n++] = 0x0B;              // declared content length = 11 = 3 header + 8 text
+    d[n++] = static_cast<uint8_t>(3 + cells);  // declared: 3 header + the cells (0x0B at 8)
     d[n++] = kCmdInfoRow;       // 0x76
     d[n++] = infoPrefix;        // text format, same semantics as setText byte 6
     d[n++] = offset;            // row slot: the OEM list uses 0x41 / 0x44 / 0x48
-    for (uint8_t i = 0; i < kInfoCells; ++i) d[n++] = static_cast<uint8_t>(cell[i]);
+    // SPACE-padded, which is the OEM capture's form. NOT NUL-padded like setText.
+    for (uint8_t i = 0; i < cells; ++i) d[n++] = static_cast<uint8_t>(i < t.len ? t.buf[i] : ' ');
 
     return submit(kIdSetText, d, n, RenderSlot::InfoPopup, /*coalesce=*/false);
   };
@@ -697,9 +700,9 @@ Submitted CarminatDisplay::showInfoPopup(const char* l1, const char* l2, const c
 
 Submitted CarminatDisplay::showInfoMenu(const char* row0, const char* row1, const char* row2,
                                      uint8_t offset0, uint8_t offset1, uint8_t offset2,
-                                     uint8_t infoPrefix) {
+                                     uint8_t infoPrefix, uint8_t cells) {
   (void)row0; (void)row1; (void)row2;
-  (void)offset0; (void)offset1; (void)offset2; (void)infoPrefix;
+  (void)offset0; (void)offset1; (void)offset2; (void)infoPrefix; (void)cells;
   return Submitted::refused(Result::NotSupported);
 }
 Submitted CarminatDisplay::showInfoPopup(const char* l1, const char* l2, const char* l3) {

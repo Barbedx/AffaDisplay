@@ -327,6 +327,11 @@ no `Popup`, and `showPopupText` returns `NotSupported`.
 UpdateList's 8 is the width every panel in that family is known to show. The frame carries 12
 cells, and a wider glass will show them.
 
+`infoCells` is how many cells `showInfoMenu()` puts in each row's frame by default (8 on
+Carminat, the OEM list's declared length 0x0B). `showInfoMenu(..., cells)` takes 1 to 16; the
+declared length is then 3 + cells. Only 8 has been seen on glass; the box looks wider, and a
+glass sweep decides whether a wider count shows.
+
 ---
 
 ## 7. Keys
