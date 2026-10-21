@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // The AFFA2 / UpdateList panel — ONE encoding, every glass.
 //
 // The eight-segment display and the wider LCD are DIFFERENT GLASS ON THE SAME BUS, and the

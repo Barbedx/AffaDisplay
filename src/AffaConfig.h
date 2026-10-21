@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // AffaDisplay — the single knob header.
 //
 // Every gate is #define'd to 0 rather than left undefined, so code uses `#if AFFA_X` and

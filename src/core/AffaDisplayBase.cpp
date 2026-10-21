@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // AffaDisplayBase — lifecycle, the poll() contract, the receive drain, keys, and the
 // public surface.
 //

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // UpdateList (AFFA2) family constants: identifiers, filler, sync profile, and every
 // literal byte of the three payloads this family builds.
 //

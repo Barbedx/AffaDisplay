@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // AffaTx — the transmit queue, ISO-TP segmentation, flow control and retries.
 //
 // One of AffaDisplayBase's four translation units; see AffaObserve.cpp for the division. handleAckFrame() is here rather than in AffaSync.cpp because

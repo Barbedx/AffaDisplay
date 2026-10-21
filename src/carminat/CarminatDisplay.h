@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // The Carminat / AFFA3 panel: the colour two-row window with a menu, popups, a fullscreen
 // screen and a confirm box. Sync on 0x3AF/0x3CF, data on 0x151 and 0x1F1, keys in on
 // 0x1C1.
@@ -218,7 +219,7 @@ class CarminatDisplay final : public AffaDisplayBase {
 #if AFFA_ENABLE_NAV
   // The 48x48 navigation pane on 0x1F1. `bitmap` is carminat::kNavBitmapBytes (288) of
   // row-major, MSB-first, 6-bytes-per-row monochrome — bit 7 of byte 0 is the top-left
-  // pixel. archive/bench-notes:tools/gen_navicons.js in the repo builds them.
+  // pixel. examples/shared/nav_images.h has ready-made ones.
   //
   // COPIED into the long-payload pool (AFFA_BULK_SLOTS): the caller may reuse the buffer as
   // soon as this returns. QueueFull while every pool slot is still in flight.

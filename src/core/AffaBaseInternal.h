@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Shared between the four translation units that implement AffaDisplayBase. NOT a public
 // header — nothing outside src/core/ may include it, and nothing in here is part of the API.
 //

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // HOW BIG EACH SURFACE IS, in one struct the panel answers for itself.
 //
 // WHY THIS EXISTS. supports(Feature) says a panel CAN draw a list; it does not say the list

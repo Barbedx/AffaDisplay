@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: MIT
 // 03_hello — the smallest correct way to put SUCCESS on a Carminat panel.
 //
-// THIS FILE IS THE API, NOT A DEPLOYMENT. It has no WiFi and no OTA, so it can only be
-// flashed over a cable. For a board you can only reach over the network — the bench rig —
-// flash examples/01_bringup instead: same sequence, plus WiFi, ElegantOTA and a console.
+// It has no WiFi and no OTA, so it is flashed over USB. For a board you reach over the
+// network, flash examples/17_mediascreen instead.
+//
+// Pins: -D AFFA_CAN_RX / AFFA_CAN_TX (GPIO numbers, the transceiver's CRX and CTX side).
+// The default is 5 / 4, as in the other examples; the ex03_hello env sets 3 / 4 for a C3.
 //
 // WHAT IT DEMONSTRATES, AND THE ONE THING PEOPLE GET WRONG:
 //
@@ -26,7 +29,7 @@
 //
 //     power on -> wait for its ACK -> wait 750 ms -> "SUCCESS" -> wait for ACK -> 10:00
 //
-// Build (needs a cable for the upload):
+// Build and flash over USB:
 //   pio run -e ex03_hello -t upload
 
 #include <Arduino.h>
@@ -39,11 +42,18 @@
 #  error "03_hello uses the library-owned poll task: build with -D AFFA_ENABLE_TASK=1"
 #endif
 
+#ifndef AFFA_CAN_RX
+#  define AFFA_CAN_RX 5
+#endif
+#ifndef AFFA_CAN_TX
+#  define AFFA_CAN_TX 4
+#endif
+
 namespace {
 
-// ESP32-C3 SuperMini + transceiver. RX FIRST — the named fields are what stop the swap
-// from becoming a silent bus with no error anywhere.
-struct { gpio_num_t rx, tx; } constexpr kPins{ GPIO_NUM_3, GPIO_NUM_4 };
+// RX first. Swapped pins give a silent bus and no error anywhere.
+struct { gpio_num_t rx, tx; } constexpr kPins{ static_cast<gpio_num_t>(AFFA_CAN_RX),
+                                               static_cast<gpio_num_t>(AFFA_CAN_TX) };
 constexpr uint32_t      kBitrate = 500000;
 
 // The panel needs a moment after power-on before anything drawn on it is visible.
@@ -89,6 +99,16 @@ uint8_t ackState() {
   return 0;
 }
 
+// True once the render we wait for is acknowledged. A failed one starts the sequence again.
+bool acked() {
+  const uint8_t a = ackState();
+  if (a == 2) {
+    Serial.println("[seq] render failed, starting again");
+    g_step = Step::WaitLink;
+  }
+  return a == 1;
+}
+
 }  // namespace
 
 void setup() {
@@ -128,8 +148,9 @@ void loop() {
 
   switch (g_step) {
     case Step::WaitLink:
-      // NOT waiting for registration: it is lazy and happens ON the first render, so
-      // waiting for it here would wait for ever.
+      // No need to wait for registration: the library holds a render for up to
+      // AFFA_TX_HOLD_MS (8 s) until the panel has registered. If it never does, the render
+      // fails and acked() starts the sequence again.
       if (affa::hasFlag(st.sync, affa::SyncState::Failed)) break;
       Serial.println("[seq] panel answering — powering the display on");
       g_req  = g_display.setPower(true).ticket;
@@ -138,7 +159,7 @@ void loop() {
       break;
 
     case Step::Power:
-      if (ackState() != 1) break;
+      if (!acked()) break;
       Serial.printf("[seq] power acknowledged — warming up %lu ms\n",
                     static_cast<unsigned long>(kWarmUpMs));
       g_until = now + kWarmUpMs;
@@ -155,7 +176,7 @@ void loop() {
       break;
 
     case Step::Text:
-      if (ackState() != 1) break;
+      if (!acked()) break;
       Serial.println("[seq] \"SUCCESS\" delivered — setting the clock");
       g_req  = g_display.setTime("1000").ticket;  // HHMM, four ASCII digits: 10:00
       g_seen = g_ackSeq;
@@ -163,7 +184,7 @@ void loop() {
       break;
 
     case Step::Time:
-      if (ackState() != 1) break;
+      if (!acked()) break;
       Serial.println("[seq] clock set to 10:00 — done");
       g_step = Step::Done;
       break;

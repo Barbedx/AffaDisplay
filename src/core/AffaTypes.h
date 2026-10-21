@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Every type that crosses a seam in AffaDisplay. Declared once, here, so that no header
 // below this one has to invent a frame, a result or an event of its own.
 #pragma once

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Protocol constants shared by BOTH panel families. Nothing panel-specific lives here —
 // identifiers and fillers belong to carminat/ and updatelist/.
 //

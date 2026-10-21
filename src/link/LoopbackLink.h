@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 #include "../core/ICanLink.h"
 #include "../core/AffaConstants.h"

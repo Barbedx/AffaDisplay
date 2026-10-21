@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Everything the AFFA2 family shares below the text encoding: the SyncProfile and function
 // table (0x121, 0x1B1), setPower's 0x1B1 payload, the 0x0A9 key channel and the 0x121 inbound
 // radio-text sniff.

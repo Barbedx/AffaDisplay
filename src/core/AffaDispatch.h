@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Crossing a task boundary, as data.
 //
 // THE PROBLEM THIS SOLVES, stated once. Every render in this library is a pure byte-builder:

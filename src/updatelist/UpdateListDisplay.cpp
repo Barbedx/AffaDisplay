@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Entire body gated: an unselected panel must compile to an empty object file.
 #include "../AffaConfig.h"
 #if AFFA_PANEL_UPDATELIST

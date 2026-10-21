@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // 18_aiscreen — a content feed on the Carminat, from anything that can compose a document.
 //
 // The producer is an LLM in the intended setup, but nothing here knows that. It receives a

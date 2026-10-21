@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // AffaSync — the opening, and nothing else.
 //
 // One of AffaDisplayBase's four translation units; see AffaObserve.cpp for the division. What lives here is the Phase table and the frames that drive

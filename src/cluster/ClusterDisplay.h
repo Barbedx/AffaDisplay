@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // The dashboard cluster — UNTESTED, and the header says so because nothing else can.
 //
 // This class exists to be the counter-example that proves SyncProfile: a third family,

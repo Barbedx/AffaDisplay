@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // net.h — WiFi, mDNS, PsychicHttp and OTA, once instead of three times.
 //
 // Every example here brings up the same stack, and before this file they each carried their

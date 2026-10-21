@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // 04_sniffer — the CAN link with no panel: listen-only, print every frame.
 //
 // Built with NO AFFA_PANEL_* flag, through <AffaTwai.h>. Listen-only never transmits and never

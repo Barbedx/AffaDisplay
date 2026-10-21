@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "AffaTask.h"
 
 // THE ENTIRE BODY IS INSIDE THE GATE, exactly like every other optional .cpp in this

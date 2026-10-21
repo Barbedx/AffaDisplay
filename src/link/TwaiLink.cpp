@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "TwaiLink.h"
 
 #if __has_include(<driver/twai.h>)

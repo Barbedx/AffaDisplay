@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // The dashboard-cluster variant — A THIRD SYNC PROFILE, AND NOBODY HAS RUN IT.
 //
 // EVERYTHING IN THIS FILE IS TRANSCRIBED FROM ONE CAPTURE of an OEM radio talking to an

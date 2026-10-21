@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "../AffaConfig.h"          // the ONLY thing outside the gate
 #if AFFA_ENABLE_TRANSLITERATION
 

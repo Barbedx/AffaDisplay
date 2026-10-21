@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // The semantic display contract — and the ONE place that knows how it becomes CAN.
 //
 // THE RULE THIS FILE EXISTS TO ENFORCE:

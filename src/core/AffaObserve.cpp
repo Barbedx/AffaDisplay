@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // AffaObserve — the observation seam, and the choke point every frame passes through.
 //
 // One class, four translation units: AffaDisplayBase.cpp (lifecycle, poll() orchestration,

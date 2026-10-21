@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // 17_mediascreen — the console. Everything this library can put on a panel, plus the
 // probes for the bytes it does not understand yet.
 //

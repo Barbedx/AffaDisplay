@@ -39,6 +39,43 @@ jobs:
       - name: host tests
         run: pio test -e native
 
+  # The README's Install block and Minimal example, built as a user's project on every
+  # platform the README says it was tested with. Any warning in the example fails the job.
+  readme:
+    name: README example on ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [espressif32@6.13.0, espressif32@8.0.0]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-readme-${{ matrix.platform }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-readme-${{ matrix.platform }}-
+      - run: pip install platformio
+      - name: build
+        run: |
+          set -o pipefail
+          node tools/readme_consumer.js "$RUNNER_TEMP/consumer" "${{ matrix.platform }}"
+          pio run -d "$RUNNER_TEMP/consumer" 2>&1 | tee build.log
+      - name: no warnings from the example
+        run: |
+          if grep -E '^src/main\.cpp:[0-9]+:[0-9]+: warning:' build.log; then exit 1; fi
+      - name: show the failure
+        if: failure()
+        run: |
+          { grep -E 'error:|warning:' build.log | grep 'main\.cpp' | head -15; tail -15 build.log; } \
+            | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}' | sed 's/^/::error title=README example::/'
+          echo
+
   build:
     name: build ${{ matrix.env }}
     runs-on: ubuntu-latest
@@ -63,9 +100,8 @@ jobs:
         run: |
           set -o pipefail
           pio run -e ${{ matrix.env }} 2>&1 | tee build.log
-      # The SDK headers are not -Wundef clean, so the build prints hundreds of warnings that
-      # are not ours. Only a warning whose location is in this repository's src/ or
-      # examples/ fails the job.
+      # Only a warning whose location is in this repository's src/ or examples/ fails the job;
+      # framework headers are not ours to fix.
       - name: no warnings from the library or the examples
         run: |
           if grep -E '^(src|examples)/[^:]+:[0-9]+:[0-9]+: warning:' build.log > own.txt; then

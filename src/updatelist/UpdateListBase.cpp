@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // The ENTIRE body is inside the gate, so this translation unit is empty when the panel
 // is not selected. That, plus -ffunction-sections + --gc-sections, is what makes the
 // flash cost of an unselected panel actually zero. See AffaConfig.h.

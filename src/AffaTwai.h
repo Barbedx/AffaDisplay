@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // AffaTwai — the CAN link without the display.
 //
 //   #include <AffaTwai.h>

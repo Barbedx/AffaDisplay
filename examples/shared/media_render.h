@@ -1,9 +1,9 @@
+// SPDX-License-Identifier: MIT
 // media_render.h — the 48x48 nav pane, drawn on the device, one frame at a time.
 //
 // Everything here writes into a 288-byte buffer in the OEM's own packing: row-major, 6
-// bytes per row, MSB-first. That is the format carminat::showNavBitmap() sends, and it is
-// the format archive/bench-notes:tools/gen_navicons.js emits, so a frame drawn here and a frame baked into
-// flash are the same thing.
+// bytes per row, MSB-first. That is the format carminat::showNavBitmap() sends and the format
+// of nav_images.h, so a frame drawn here and a frame baked into flash are the same thing.
 //
 // WHY DRAW ON THE DEVICE AT ALL. Baking frames into flash costs 288 bytes each and can only
 // ever animate what was decided at build time. A media pane has to show a clock that

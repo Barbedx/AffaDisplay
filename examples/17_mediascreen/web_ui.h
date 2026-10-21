@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // web_ui.h — the console for 17_mediascreen.
 //
 // SIX TABS, ONE COMMAND FUNCTION. Everything goes through cmd(op, params) and every press

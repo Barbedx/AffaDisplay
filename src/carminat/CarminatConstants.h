@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Carminat (AFFA3) family constants: identifiers, filler, sync profile, function table
 // and the command / header bytes the frame builders emit.
 //

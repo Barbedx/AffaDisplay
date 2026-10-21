@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // AffaDisplay — the only header a consumer includes.
 //
 //   #include <AffaDisplay.h>

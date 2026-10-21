@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.1.1 — 2026-10-21
+
+Documentation and examples only. The library code is unchanged.
+
+- **README:** the minimal example compiles as written (`#include <Arduino.h>`, and it uses the
+  `[[nodiscard]]` result of `setText`). CI now builds it as a user's project on
+  `espressif32@6.13.0` and `8.0.0`, and fails on any warning in it.
+- **README:** a Wiring section (transceiver, 500 kbit/s, termination, listen-only before a car
+  bus), the tested platforms, and a plain note that the library is not in the PlatformIO
+  registry yet.
+- **`03_hello`:** pins come from `AFFA_CAN_RX` / `AFFA_CAN_TX` (default 5 / 4, as in the other
+  examples; the `ex03_hello` env sets the C3's 3 / 4). A failed render restarts the sequence
+  instead of stopping it.
+- **Example dependencies pinned:** `hoeken/PsychicHttp@1.2.1`, ElegantOTA at
+  `e2c2aee15e9f71ed35415cc02f0b10b53b2c195c` (the `psychic-http` branch).
+- **Build noise:** `-Wundef` is on for the host build only. On ESP32 the framework headers
+  printed about 1200 `-Wundef` warnings that were not ours. Warnings in `src/` and `examples/`
+  still fail CI.
+- Every file in `src/` and `examples/` has an `SPDX-License-Identifier: MIT` line.
+- Stale comments in `platformio.ini`, `examples/README.md` and `03_hello` no longer point at
+  examples and tools that are not in this repository.
+
 ## 1.1.0 — 2026-10-21
 
 ### `showFullscreenText` uses the OEM geometry

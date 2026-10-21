@@ -60,18 +60,23 @@ each screen. It has no menus, scrolling or key gestures. Keys arrive through `on
 
 ```ini
 lib_deps =
-  https://github.com/Barbedx/AffaDisplay.git#v1.1.0
+  https://github.com/Barbedx/AffaDisplay.git#v1.1.1
 build_flags =
   -std=gnu++17
   -D AFFA_PANEL_CARMINAT=1          ; at least one panel, or the build stops with #error
 build_unflags = -std=gnu++11
 ```
 
-Once it is in the PlatformIO registry: `lib_deps = AffaDisplay@^1.1.0`.
+Tested with PlatformIO `espressif32@6.13.0` (Arduino-ESP32 2.0.17) and `espressif32@8.0.0`
+(Arduino-ESP32 3.3.12); CI builds the minimal example below on both. The examples that use
+PsychicHttp (17, 18) build on 6.13.0 only.
+
+The library is not published in the PlatformIO registry yet; install it from the Git tag.
 
 ## Minimal example
 
 ```cpp
+#include <Arduino.h>
 #include <AffaDisplay.h>
 
 struct ArduinoClock final : affa::IClock {
@@ -84,8 +89,9 @@ affa::CarminatDisplay g_display(g_link, g_clock);
 affa::rtos::AffaTask  g_task;
 
 void setup() {
+  Serial.begin(115200);
   g_display.onKey([](affa::Key k, affa::KeyEdge e, void*) {
-    if (k == affa::Key::Pause && e == affa::KeyEdge::Click) g_display.setText("PAUSED");
+    if (k == affa::Key::Pause && e == affa::KeyEdge::Click) (void)g_display.setText("PAUSED");
   }, nullptr);
 
   affa::TwaiConfig cfg;
@@ -97,7 +103,10 @@ void setup() {
 }
 
 void loop() {
-  g_display.setText("HELLO");       // safe from any task
+  // Safe from any task. The result says whether the render was queued; delivery is reported
+  // later through onComplete(). See examples/03_hello.
+  affa::Submitted s = g_display.setText("HELLO");
+  if (s.result != affa::Result::Ok) Serial.printf("setText: %d\n", static_cast<int>(s.result));
   delay(1000);
 }
 ```
@@ -107,6 +116,21 @@ The panel opens the conversation. Until it does, the library announces a bare `B
 
 Using a different CAN driver? Implement `affa::ICanLink` (`trySend`, `recv`). For the link
 without a panel (a sniffer), include `<AffaTwai.h>` instead; see `examples/04_sniffer`.
+
+## Wiring
+
+- **Transceiver:** a 3.3 V CAN transceiver between the ESP32 and the panel's CAN pair, for
+  example an SN65HVD230 on a bench. For a car, use an automotive part such as the TJA1051T/3.
+  Its CTX pin goes to the GPIO in `cfg.tx`, CRX to `cfg.rx`. Swapped pins give a silent bus
+  and no error.
+- **Bit rate:** 500 kbit/s, the `TwaiConfig` default.
+- **Termination:** 120 Ω at each end of the bus. With the power off, measure between CAN-H and
+  CAN-L: 60 Ω means both ends are terminated, 120 Ω means one end is missing.
+- **Panel connector:** the pinout is not documented here. Take CAN-H, CAN-L, +12 V and ground
+  from the panel's wiring diagram.
+- **A bus with other traffic (a car):** start with `cfg.listenOnly = true`, or flash
+  `examples/04_sniffer`. Listen-only never transmits or acknowledges, so it cannot disturb the
+  bus. Switch to normal mode once you have seen what is on it.
 
 ## Examples
 
@@ -153,8 +177,14 @@ MIT · Arduino + PlatformIO · C++17 · неблокуючий · без куп�
 - 71 тест на хості, залізо не потрібне.
 
 Панелі, виклики, встановлення й приклад коду ті самі, що в англійській частині вище.
-Встановлення: `lib_deps = https://github.com/Barbedx/AffaDisplay.git#v1.1.0` і хоча б один
-`-D AFFA_PANEL_*=1`.
+Встановлення: `lib_deps = https://github.com/Barbedx/AffaDisplay.git#v1.1.1` і хоча б один
+`-D AFFA_PANEL_*=1`. У реєстрі PlatformIO бібліотеки ще немає. Перевірено на `espressif32@6.13.0`
+і `8.0.0`.
+
+**Підключення.** Трансивер CAN на 3,3 В (на столі SN65HVD230, в авто TJA1051T/3), 500 кбіт/с,
+по 120 Ом на кожному кінці шини (без живлення між CAN-H і CAN-L має бути 60 Ом). Розпіновки
+роз'єму панелі тут немає. На шину з іншим трафіком (авто) спершу підключайтеся з
+`cfg.listenOnly = true` або прошийте `examples/04_sniffer`.
 
 **Стан.**
 - **Carminat:** на справжній панелі бачено все з таблиці, крім інфо-попапа й діалогу
