@@ -11,8 +11,8 @@ comment above the vector, where it dies with the assertion it describes.
 > **What is NOT here is not attested.** ~8 000 lines of prose about this protocol
 > were deleted on 2026-08-08: inference, third-party source reconstruction and
 > transcription of captures we still have. The raw evidence (`docs/captures/`) and the
-> record of what was seen on glass (`docs/BENCH-VERIFIED.md`) live on branch
-> `archive/bench-notes`.
+> record of what was seen on glass (`docs/BENCH-VERIFIED.md`) live in the bench archive
+> (branch `archive/bench-notes`, not published in this repository).
 
 ## `test_carminat_session`
 

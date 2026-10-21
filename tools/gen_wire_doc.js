@@ -119,8 +119,8 @@ function render(suites) {
   L.push('> **What is NOT here is not attested.** ~8 000 lines of prose about this protocol');
   L.push('> were deleted on 2026-08-08: inference, third-party source reconstruction and');
   L.push('> transcription of captures we still have. The raw evidence (`docs/captures/`) and the');
-  L.push('> record of what was seen on glass (`docs/BENCH-VERIFIED.md`) live on branch');
-  L.push('> `archive/bench-notes`.');
+  L.push('> record of what was seen on glass (`docs/BENCH-VERIFIED.md`) live in the bench archive');
+  L.push('> (branch `archive/bench-notes`, not published in this repository).');
   L.push('');
 
   let total = 0, orphans = 0;

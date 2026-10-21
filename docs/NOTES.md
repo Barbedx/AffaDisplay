@@ -9,7 +9,7 @@ Everything else — ~8 000 lines across nine documents — was deleted on 2026-0
 inference, third-party source reconstruction, and prose transcription of captures we still
 have.
 
-**Raw evidence lives on branch `archive/bench-notes`**, in `docs/captures/` — the 24-file OEM
+**Raw evidence lives in the maintainer's bench archive (branch `archive/bench-notes`, not published in this repository)**, in `docs/captures/` — the 24-file OEM
 corpus and the four acknowledge-display CSVs, third-party recordings of a real Renault radio
 talking to a real panel, which we cannot reproduce — with `tools/decode_oem_csv.py`, which
 splits sync from functional traffic, reassembles ISO-TP on every channel and names each
@@ -165,4 +165,4 @@ them. **The caller-owned contract is one sentence and it is violated by ADDITION
 next feature somebody puts in `loop()`, not by the code that was reviewed.
 
 The owned task removes the class, because the task that polls is no longer a task anyone else
-can put anything on. `docs/API.md` §4.7 is the mechanism, §4b the contract.
+can put anything on. `docs/API.md` §4.1 is the mechanism, §4.4 the contract.

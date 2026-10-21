@@ -167,7 +167,7 @@
 #  define AFFA_TASK_PRIO 2
 #endif
 
-// poll() plus the deepest documented callback nesting (docs/API.md §4.3). MEASURED on the
+// poll() plus the deepest documented callback nesting (docs/API.md §4.2). MEASURED on the
 // bench rig (C3, marquee widget, rendering KeyCb, examples/17_mediascreen): 2036 bytes
 // still free, i.e. about half of this unused. Status::stackFreeBytes reports it live, so
 // shrinking this is checkable against your own callbacks rather than a guess.

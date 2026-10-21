@@ -6,7 +6,11 @@ described the panel wrongly, and a silent behaviour change would have been worse
 
 ---
 
-## Unreleased — `main`, 2026-10-20
+## 2.0.0 — 2026-10-21
+
+The first public release, in a new repository. It contains the 2.0 API rewrite listed below
+(tagged 2.0.0 on 2026-08-09 in the old, now deleted repository, and never published) plus the
+work in this section.
 
 **BREAKING.** The one consumer (MegaOpen) ran on 1.0.0 plus two fixes that never reached
 `main`; this brings them in, moves MegaOpen's transport into the library, and removes what
@@ -86,10 +90,17 @@ slot in flight is refused `QueueFull`. No heap.
 
 ### Repository
 
-The bench history moved to branch `archive/bench-notes`: `HANDOFF.md`, `Hardware.md`,
+The bench history moved out of the library into the maintainer's bench archive, which is not
+published here: `HANDOFF.md`, `Hardware.md`,
 `docs/captures/`, `docs/BENCH-VERIFIED.md`, `docs/ESP32CAN-CONTRACT.md`, `examples/19_cantest`,
 the footprint harness and the capture tools. Code that cites a capture says
-`archive/bench-notes:docs/captures/…`.
+`archive/bench-notes:docs/captures/…`, a path in that archive.
+
+GitHub Actions: `ci.yml` runs the host tests, builds every example and fails on a warning
+from `src/` or `examples/`; it also checks that `docs/WIRE.md` is current, that the example web
+pages parse, and that no log argument has a side effect. `release.yml` runs on a `vX.Y.Z` tag
+that matches `library.json` and `library.properties`, and publishes this section as the release
+notes. README and `docs/API.md` were cut to the facts.
 
 ### Known gaps
 
@@ -112,7 +123,7 @@ the footprint harness and the capture tools. Code that cites a capture says
 
 ---
 
-## 2.0.0 — 2026-08-09
+## 2.0 API rewrite — 2026-08-09 (part of 2.0.0)
 
 **BREAKING, and the theme is subtraction.** `src/` went from ~14 000 lines to 8 400, the
 test suite from 7 976 to 1 934, the documentation from 8 176 to 2 297, and the repository
@@ -188,9 +199,9 @@ got things wrong eight times), `BENCH-VERIFIED.md` (what a human saw on glass) a
 ### What this release does NOT have
 
 **The behavioural test suites are gone** — 165 tests across eleven files, kept only where
-they asserted a golden wire vector. The §3b guarantees (one-poll key delivery, coalescing,
+they asserted a golden wire vector. The ordering guarantees (one-poll key delivery, coalescing,
 `abortPending`, `Priority::Urgent`) are implemented and documented but **no longer
-enforced**. `docs/API.md` §3b.9 says so in those words.
+enforced**. `docs/API.md` §3.4 lists what is tested.
 
 Untested at all, and previously so: `ILogSink`, `shouldAutoAck()`, `PanelGeometry` for the
 two working families, `stats()`, and `CanCommonLink` in its entirety — the real link. The
@@ -200,7 +211,7 @@ cluster family has never run against hardware and its opening cannot complete.
 
 ## 1.0.x — the work that became 2.0.0
 
-Everything below landed before the version bump and is included in 2.0.0.
+Everything below landed before the 2.0 rewrite and is included in 2.0.0.
 
 ### The list screen has a pictogram and a scrollbar, and the library was hiding both
 

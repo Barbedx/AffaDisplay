@@ -14,7 +14,7 @@ namespace affa {
 // CALLABLE FROM ANY TASK. The bytes are built on the calling task's own stack — every
 // render in this library is a pure function of its arguments — and then cross into the
 // task that owns poll(). The one honest consequence
-// (docs/API.md §4.7): a refusal that depends on the owner's state — a full transmit queue —
+// (docs/API.md §4.1): a refusal that depends on the owner's state — a full transmit queue —
 // is reported through onComplete() instead when the call came from another task, because
 // nothing has been admitted yet at the moment of return.
 struct IDisplay {

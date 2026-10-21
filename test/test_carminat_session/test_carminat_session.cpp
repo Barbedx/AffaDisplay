@@ -504,7 +504,7 @@ void test_carminat_bootstrap_is_held_until_good_auth(void) {
 }
 
 void test_phase_walks_the_measured_opening_in_order(void) {
-  // THIS IS THE SAFETY NET FOR STEP 4 of docs/API.md §7. `phase()` is derived from
+  // THIS IS THE SAFETY NET FOR the measured opening. `phase()` is derived from
   // the nine booleans today, so it cannot currently disagree with them; what this test pins
   // is the derivation against THE WIRE — which frame moves the opening on, and in what
   // order. When the booleans are deleted and Phase becomes the stored truth, this is the

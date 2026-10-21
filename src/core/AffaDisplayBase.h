@@ -237,12 +237,12 @@ class AffaDisplayBase : public IDisplay, public IPanel {
 
   // ---- transmit -----------------------------------------------------------
   // Copies the bytes and returns immediately; they need not outlive the call. `opt` carries
-  // the coalescing slot, priority and per-message opt-out — docs/API.md §3b.4.
+  // the coalescing slot, priority and per-message opt-out — docs/API.md §3.3.
   //
   // THE CHOKE POINT. Every render in every panel, present and future, funnels through here —
   // CarminatDisplay::submit() and UpdateListBase::enqueueRender() are two-line wrappers — so
   // this is the one place the cross-task boundary has to live, and putting it here is what
-  // makes a render added later thread-safe on the day it is written. docs/API.md §4.7
+  // makes a render added later thread-safe on the day it is written. docs/API.md §4.1
   Submitted enqueue(uint16_t funcId, const uint8_t* data, uint8_t len,
                     TxOptions opt = TxOptions{});
 
@@ -270,7 +270,7 @@ class AffaDisplayBase : public IDisplay, public IPanel {
   // Drop every job QUEUED AND NOT YET STARTED. The job on the wire is untouched, and so are
   // pending Registration jobs — a payload arriving before its function is registered is
   // rejected, and the SendFailed looks exactly like a wire-format bug. Dropped tickets
-  // report Aborted; returns how many. docs/API.md §3b.5. From another task it is posted
+  // report Aborted; returns how many. docs/API.md §3.4. From another task it is posted
   // and returns 0: the drops are reported through onComplete when the owner applies it.
   uint8_t abortPending();
 

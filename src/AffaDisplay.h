@@ -40,7 +40,7 @@
 
 // The owned poll task. THE ONLY PART OF THIS LIBRARY THAT IS NOT PORTABLE, and the one
 // directory a non-FreeRTOS port omits: everything above this line compiles on the host
-// against nothing but C++17. docs/API.md §4b.
+// against nothing but C++17. docs/API.md §4.4.
 #if AFFA_ENABLE_TASK
 #  if __has_include("rtos/AffaTask.h")
 #    include "rtos/AffaTask.h"

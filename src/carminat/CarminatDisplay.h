@@ -9,7 +9,7 @@
 //
 // AND IT HOLDS NO STATE AT ALL. Every builder below is a pure function of its arguments into
 // a stack buffer, which is what makes a render safe to call from any task with nothing to
-// check (docs/API.md §4.7).
+// check (docs/API.md §4.1).
 //
 // The duplicated tick() sync machine is GONE — the base owns it, once, for both families.
 // Every render goes through enqueue() with a RenderSlot so latest-value-wins coalescing
@@ -287,7 +287,7 @@ class CarminatDisplay final : public AffaDisplayBase {
 
   // NO MEMBERS. Every render above is a pure function of its arguments into a stack buffer,
   // which is what makes a call from any task safe with nothing to check — see
-  // docs/API.md §4.7.
+  // docs/API.md §4.1.
 };
 
 }  // namespace affa

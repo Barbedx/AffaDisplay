@@ -354,7 +354,7 @@ Submitted AffaDisplayBase::enqueue(uint16_t funcId, const uint8_t* data, uint8_t
   // THE TASK BOUNDARY, AND IT IS ONE LINE BECAUSE EVERY RENDER IN THIS LIBRARY FUNNELS HERE.
   // Above this point nothing has been read but the caller's arguments and a table fixed at
   // construction; below it, every decision reads state the poll owner mutates. So this is
-  // where the call stops and the bytes travel instead. docs/API.md §4.7
+  // where the call stops and the bytes travel instead. docs/API.md §4.1
   if (!onPollOwner()) return post(t, funcId, data, len, opt, nullptr);
 
   return admit(t, funcId, data, len, opt, nullptr);
@@ -647,7 +647,7 @@ void AffaDisplayBase::pumpTx() {
   // ---- the three gates in front of the head job -----------------------------
   // HEAD-OF-LINE, DELIBERATELY. A job waiting out a backoff stalls the queue behind it
   // rather than being skipped, because skipping would reorder renders the application
-  // issued in sequence — and ordering is a contract (docs/API.md §3b.4). Priority::Urgent
+  // issued in sequence — and ordering is a contract (docs/API.md §3.3). Priority::Urgent
   // still overtakes: a retrying job has started == false, so insertIndexFor() puts an
   // urgent one in front of it.
   if (!expired(now, _queue[0].readyAtMs)) return;
@@ -716,7 +716,7 @@ void AffaDisplayBase::pumpTx() {
 
   // MARK IT STARTED BEFORE THE SEND, NOT AFTER. txFrame() calls observe(), which runs the
   // frame tap and every Direction::Tx subscription — application code, which docs/API.md
-  // §4.2/§4.3 explicitly permit to call enqueue(), any render, abortPending() and
+  // §4.2 explicitly permit to call enqueue(), any render, abortPending() and
   // abortAll(). Every one of those decisions keys off TxJob::started, so with the flag set
   // afterwards a Tx callback saw this job as preemptable while its first frame was already
   // on the wire: abortPending() dropped it and `job` then pointed at the job that shifted
