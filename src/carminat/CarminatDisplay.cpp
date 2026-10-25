@@ -182,7 +182,9 @@ Submitted CarminatDisplay::highlightItem(uint8_t row) {
 // DECLARED LENGTH 0x5A = 90, BUILT 94 — AND THAT IS CORRECT. The panel stops as soon as it
 // holds the declared count (6 + 12*7 = 90), so hardware DONEs after PCI 0x2C at 13 frames
 // while the self-ACK emulator runs to 14. row1 therefore has 26 usable characters even
-// though the builder accepts 30. Change neither number without panel testing.
+// though the builder accepts 30. Change neither number without panel testing. Of those 26
+// the glass shows 20 of a row (the big font) and 26 of the header (kMenuRowCols,
+// kMenuHeaderCols): the frame keeps its size, panelGeometry() says what is seen.
 //
 // [3] AND [4] ARE PARAMETERS NOW — the gutter glyph and the scrollbar thumb, two unrelated
 // fields. They were two literals here, `0x80, 0x00`, which is "glyph 0, suppressed" and "no

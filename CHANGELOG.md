@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.4.0 — 2026-10-25
+
+### The menu's two widths, measured on glass
+
+A glass sweep on a car's panel (digits, W and lowercase rulers) showed that `showMenu()`
+draws its header and its rows in two fonts:
+
+| surface | glass shows |
+| --- | --- |
+| `showMenu` header | 26 (small font) |
+| `showMenu` row | **20** (big font, cut by the scroll bar) |
+| `showFullscreenText` row | 22 of any glyph (unchanged) |
+
+- `PanelGeometry::menuRowChars` is now **20** on Carminat (it said 26, the frame's field). A
+  fitter that laid a value flush right at 26 put it off the glass.
+- New `PanelGeometry::menuHeaderChars`: 26 on Carminat, 0 where there is no menu.
+- `carminat::kMenuHeaderCols` (26) and `kMenuRowCols` (20). The frame is unchanged: the
+  builder still takes 30, row 1 still carries 26; past the glass width text is sent and cut.
+- `listItemChars` (`showMenuN`) stays 26; it was not part of this sweep.
+- One new host test pins the menu geometry. Example 18's `/caps` reports `menuHeaderChars`.
+
+Nothing on the wire changes.
+
 ## 1.3.0 — 2026-10-21
 
 ### `showInfoRow`: one info row on its own

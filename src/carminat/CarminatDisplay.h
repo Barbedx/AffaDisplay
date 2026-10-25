@@ -55,14 +55,16 @@ class CarminatDisplay final : public AffaDisplayBase {
   bool supports(Feature f) const override;
 
   // MEASURED AT THE GLASS, not taken from the builders. setText carries fourteen cells and
-  // the panel shows about eight; `listItemChars` is 26, the width seen on glass, even
-  // though the builder accepts 30. A fitter that trusted the builder
-  // would produce text that is correct in every test and cut off on hardware.
+  // the panel shows about eight; a showMenu() row carries 26 and the glass shows 20 (the big
+  // font), under a header that shows 26 (glass sweep 2026-10-25). A fitter that trusted the
+  // builder would produce text that is correct in every test and cut off on hardware.
+  // `listItemChars` (showMenuN) is 26 from an earlier look, not from that sweep.
   PanelGeometry panelGeometry() const override {
     PanelGeometry g;
     g.mainChars     = 8;                          // 14 carried, ~8 visible
     g.menuRows      = 2;
-    g.menuRowChars  = 26;
+    g.menuRowChars  = carminat::kMenuRowCols;     // 20, the big font
+    g.menuHeaderChars = carminat::kMenuHeaderCols;  // 26, the small font
     g.infoRows      = 3;
     g.infoRowChars  = carminat::kInfoCells;       // 8
     g.infoCells     = carminat::kInfoCells;       // 8, showInfoMenu's default
@@ -107,6 +109,8 @@ class CarminatDisplay final : public AffaDisplayBase {
   Submitted setTime(const char* hhmm) override;
   Submitted setPower(bool on) override;
 
+  // The glass shows kMenuHeaderCols (26) of the header and kMenuRowCols (20) of each row;
+  // the rest is sent and cut there (panelGeometry() menuHeaderChars / menuRowChars).
   Submitted showMenu(const char* header, const char* row0, const char* row1,
                                 uint8_t scrollIndicator = carminat::kScrollDown) override;
 

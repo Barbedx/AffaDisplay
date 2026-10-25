@@ -29,8 +29,12 @@ struct PanelGeometry {
   uint8_t mainChars      = 0;
 
   // The two-row window — showMenu(). `menuRows` is the VIEWPORT, not the list length.
+  // The header and the rows are two fonts and two widths: on Carminat the header is the
+  // small font (26 cells), each row the big one (20 cells before the scroll bar). A fitter
+  // that lays a row's value flush right at the header's width puts it off the glass.
   uint8_t menuRows       = 0;
   uint8_t menuRowChars   = 0;
+  uint8_t menuHeaderChars = 0;
 
   // The info rows — showInfoMenu(). Narrower than a menu row and there are three of them.
   uint8_t infoRows       = 0;

@@ -295,6 +295,12 @@ inline constexpr uint8_t kBoxBaseLength   = 105;   // declared length with no bu
 inline constexpr uint8_t kFullscreenLength = kBoxBaseLength;   // 0x69
 inline constexpr uint8_t kFullscreenTextAt = kBoxLabelOffset;  // 32
 inline constexpr uint8_t kFullscreenCols   = 22;   // wide characters per row, camera-measured
+// What the glass shows of showMenu() (glass sweep 2026-10-25, MegaOpen docs/glass-sweeps.md:
+// digits, W and lowercase alike). The header is the small font; a row is the big one, cut
+// by the scroll bar. The frame carries more of both (the builder takes 30, the panel keeps
+// 26 of row 1): text past these is sent and not seen.
+inline constexpr uint8_t kMenuHeaderCols   = 26;
+inline constexpr uint8_t kMenuRowCols      = 20;
 // Selection inside a message box moves with `03 29 05 <index>` — a THREE-BYTE SINGLE FRAME,
 // mode 0x05, not the 0x01 the list screen uses and not the 7-byte `29 01 <rowtag> 80` form.
 // [OEM] `CONFIRM SCREEN SWITCH TO YES.csv`, answered with a bare 0x74.

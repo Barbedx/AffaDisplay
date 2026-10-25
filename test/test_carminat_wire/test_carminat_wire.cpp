@@ -420,6 +420,14 @@ void test_fullscreen_geometry_is_22_columns(void) {
   TEST_ASSERT_EQUAL_UINT8(22, r.d.panelGeometry().fullRowChars);
 }
 
+// Glass sweep 2026-10-25: the menu header is the small font, a row the big one.
+void test_menu_geometry_is_a_26_header_over_20_rows(void) {
+  Rig r;
+  TEST_ASSERT_EQUAL_UINT8(2, r.d.panelGeometry().menuRows);
+  TEST_ASSERT_EQUAL_UINT8(26, r.d.panelGeometry().menuHeaderChars);
+  TEST_ASSERT_EQUAL_UINT8(20, r.d.panelGeometry().menuRowChars);
+}
+
 void test_showConfirmBox_is_a_one_button_box(void) {
   // 2 + 6 + 105 = 113, sixteen frames, last PCI 0x2F. UNCHANGED by the 2026-08-06 rewrite
   // that made the button count a parameter: `caption` was always the button's label, so
@@ -572,6 +580,7 @@ int main(int, char**) {
   RUN_TEST(test_showFullscreenText_three_rows_match_megaopen);
   RUN_TEST(test_showFullscreenText_cuts_at_the_end_of_the_body);
   RUN_TEST(test_fullscreen_geometry_is_22_columns);
+  RUN_TEST(test_menu_geometry_is_a_26_header_over_20_rows);
   RUN_TEST(test_showConfirmBox_is_a_one_button_box);
   RUN_TEST(test_showInfoPopup_is_three_messages_space_padded);
   RUN_TEST(test_showInfoMenu_default_cells_is_the_oem_8_cell_frame);

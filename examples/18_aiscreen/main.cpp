@@ -301,7 +301,8 @@ esp_err_t caps(PsychicRequest* r) {
   jf("{\"panel\":\"carminat\",\"types\":[\"text\",\"info\",\"list\",\"message\",\"question\",\"image\"]");
   jf(",\"mainChars\":%u,\"infoRows\":%u,\"infoRowChars\":%u", g.mainChars, g.infoRows,
      g.infoRowChars);
-  jf(",\"menuRows\":%u,\"menuRowChars\":%u", g.menuRows, g.menuRowChars);
+  jf(",\"menuRows\":%u,\"menuRowChars\":%u,\"menuHeaderChars\":%u", g.menuRows, g.menuRowChars,
+     g.menuHeaderChars);
   jf(",\"listMaxItems\":%u,\"listItemChars\":%u", g.listMaxItems, g.listItemChars);
   jf(",\"image\":{\"w\":%u,\"h\":%u}", g.imageWidth, g.imageHeight);
   jf(",\"charset\":\"ascii — Cyrillic and Polish are transliterated; emoji become '?'\"");
