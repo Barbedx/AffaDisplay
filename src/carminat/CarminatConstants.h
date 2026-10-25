@@ -400,7 +400,7 @@ inline constexpr uint8_t kTextCells      = 14;  // setText carries 14, panel sho
 inline constexpr uint8_t kPopupCellsMin  = 8;   // keeps the captured "VOL 28" identical
 inline constexpr uint8_t kPopupCellsMax  = 16;
 inline constexpr uint8_t kInfoCells      = 8;   // showInfoMenu's default: the OEM list's 0x0B
-inline constexpr uint8_t kInfoCellsMax   = 16;  // the most showInfoMenu() builds; wider is untested
+inline constexpr uint8_t kInfoCellsMax   = 16;  // the most showInfoMenu() builds; the glass still shows 8 (swept 9..16)
 inline constexpr uint8_t kMenuHeaderMax  = 26;
 
 // The N-item list screen. Stride and cell width are MEASURED, not inferred: the six-item

@@ -270,8 +270,9 @@ class CarminatDisplay final : public AffaDisplayBase {
   // three queue slots, and they deliberately do not coalesce against each other.
   //
   // `cells` is the text cells per row (1..kInfoCellsMax); the declared length is 3 + cells,
-  // so the default 8 is the OEM's 0x0B. Text is space-padded or cut to it. Only 8 has been
-  // seen on glass. Out of range: BadArgument.
+  // so the default 8 is the OEM's 0x0B. Text is space-padded or cut to it. The glass shows 8
+  // whatever is declared: 9 to 16 cells were swept (2026-10-25) and every row stayed at 8,
+  // in all three rows alike. Out of range: BadArgument.
   Submitted showInfoMenu(const char* row0, const char* row1, const char* row2,
                                     uint8_t offset0 = carminat::kInfoOffset0,
                                     uint8_t offset1 = carminat::kInfoOffset1,

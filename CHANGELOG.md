@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.1 — 2026-10-25
+
+### The info rows are 8 on glass, at any declared width
+
+The rest of the same glass sweep: `showInfoRow` / `showInfoMenu` with 9 to 16 cells (declared
+length `0x0C`..`0x13`), one row and all three, showed 8 characters every time. 8 is the
+width; `infoRowChars` and `kInfoCells` stay 8, and the comments now say it was measured. A
+wider `cells` only sends padding the panel does not draw. Documentation only; nothing on the
+wire changes.
+
 ## 1.4.0 — 2026-10-25
 
 ### The menu's two widths, measured on glass
